@@ -1,8 +1,222 @@
-/*
+/* Expense Manager Plugin Styles */
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+/* QR Upload Area */
+.qr-upload-container {
+	border: 2px dashed var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 40px 20px;
+	text-align: center;
+	cursor: pointer;
+	transition: border-color 0.2s ease;
+}
 
-If your plugin does not need CSS, delete this file.
+.qr-upload-container:hover {
+	border-color: var(--interactive-accent);
+	background-color: var(--background-secondary);
+}
 
-*/
+.qr-upload-container p.mod-hint {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	margin-top: 8px;
+}
+
+/* Preview Area */
+.qr-preview-area {
+	margin-top: 20px;
+	text-align: center;
+}
+
+.qr-preview-area img {
+	max-width: 100%;
+	max-height: 300px;
+	border-radius: 8px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Processing Indicator */
+.processing-indicator {
+	text-align: center;
+	padding: 20px;
+	color: var(--text-accent);
+}
+
+/* Button Containers */
+.qr-button-container {
+	display: flex;
+	gap: 10px;
+	justify-content: flex-end;
+	margin-top: 20px;
+}
+
+/* Summary Cards in Reports */
+.summary-cards {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 15px;
+	margin-bottom: 30px;
+}
+
+@media (max-width: 600px) {
+	.summary-cards {
+		grid-template-columns: 1fr;
+	}
+}
+
+.summary-card {
+	padding: 15px;
+	border-radius: 8px;
+	text-align: center;
+}
+
+.summary-card .mod-xl {
+	font-size: 1.5em;
+	font-weight: bold;
+	margin-top: 8px;
+}
+
+/* Category Table */
+.category-table-container {
+	overflow-x: auto;
+	margin-bottom: 20px;
+}
+
+.category-table-container table {
+	width: 100%;
+	border-collapse: collapse;
+}
+
+.category-table-container th {
+	text-align: left;
+	padding: 8px;
+	background-color: var(--background-secondary);
+	font-weight: 600;
+}
+
+.category-table-container td {
+	padding: 8px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+/* Transactions List */
+.transactions-list {
+	max-height: 400px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 10px;
+}
+
+.transaction-item {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 8px !important;
+	border-bottom: 1px solid var(--background-modifier-border) !important;
+}
+
+.transaction-item:last-child {
+	border-bottom: none !important;
+}
+
+/* Period Info */
+.period-info {
+	margin-bottom: 20px;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+	.summary-cards {
+		grid-template-columns: 1fr;
+	}
+	
+	.qr-upload-container {
+		padding: 20px 10px;
+	}
+}
+
+/* Dark mode optimizations */
+.theme-dark .summary-card.income {
+	background: linear-gradient(135deg, #2d7a4f, #1e5c3a);
+}
+
+.theme-dark .summary-card.expense {
+	background: linear-gradient(135deg, #a83232, #7a2525);
+}
+
+.theme-dark .summary-card.balance {
+	background: linear-gradient(135deg, #4a6fa5, #2d4a7a);
+}
+
+/* Light mode optimizations */
+.theme-light .summary-card.income {
+	background: linear-gradient(135deg, #4caf50, #388e3c);
+}
+
+.theme-light .summary-card.expense {
+	background: linear-gradient(135deg, #f44336, #d32f2f);
+}
+
+.theme-light .summary-card.balance {
+	background: linear-gradient(135deg, #2196f3, #1976d2);
+}
+
+/* Chart container */
+.chart-container {
+	position: relative;
+	height: 300px;
+	width: 100%;
+	margin: 20px 0;
+}
+
+/* Loading spinner */
+.loading-spinner {
+	display: inline-block;
+	width: 20px;
+	height: 20px;
+	border: 3px solid rgba(var(--accent-rgb), 0.3);
+	border-radius: 50%;
+	border-top-color: var(--accent-color);
+	animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+	to { transform: rotate(360deg); }
+}
+
+/* Transaction source badges */
+.source-badge {
+	display: inline-block;
+	padding: 2px 8px;
+	border-radius: 12px;
+	font-size: 0.75em;
+	font-weight: 600;
+	margin-left: 8px;
+}
+
+.source-badge.manual {
+	background-color: var(--tag-background);
+	color: var(--tag-color);
+}
+
+.source-badge.qr {
+	background-color: var(--background-modifier-success);
+	color: white;
+}
+
+.source-badge.telegram {
+	background-color: #0088cc;
+	color: white;
+}
+
+/* Empty state */
+.empty-state {
+	text-align: center;
+	padding: 40px 20px;
+	color: var(--text-muted);
+}
+
+.empty-state-icon {
+	font-size: 3em;
+	margin-bottom: 10px;
+}

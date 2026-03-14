@@ -1,0 +1,198 @@
+import { TransactionData, TransactionDetail } from '../types';
+
+/**
+ * Generate YAML frontmatter from transaction data
+ */
+export function generateFrontmatter(data: TransactionData): string {
+	const frontmatter: Record<string, unknown> = {
+		type: data.type,
+		amount: data.amount,
+		currency: data.currency,
+		dateTime: data.dateTime,
+		comment: data.comment,
+		tags: data.tags,
+		category: data.category || data.tags[0] || 'uncategorized',
+		source: data.source
+	};
+
+	// Convert to YAML manually to avoid external dependencies
+	let yaml = '---\n';
+	for (const [key, value] of Object.entries(frontmatter)) {
+		if (value === undefined || value === null) {
+			continue;
+		}
+		
+		if (Array.isArray(value)) {
+			yaml += `${key}: ${JSON.stringify(value)}\n`;
+		} else if (typeof value === 'string') {
+			// Escape quotes in strings
+			const escaped = value.replace(/"/g, '\\"');
+			yaml += `${key}: "${escaped}"\n`;
+		} else {
+			yaml += `${key}: ${value}\n`;
+		}
+	}
+	yaml += '---\n\n';
+
+	return yaml;
+}
+
+/**
+ * Parse YAML frontmatter from markdown content
+ */
+export function parseFrontmatter(content: string): Partial<TransactionData> | null {
+	// Check if content starts with frontmatter delimiter
+	if (!content.startsWith('---\n')) {
+		return null;
+	}
+
+	const endIndex = content.indexOf('\n---\n', 4);
+	if (endIndex === -1) {
+		return null;
+	}
+
+	const frontmatterText = content.substring(4, endIndex);
+	const parsed: Record<string, unknown> = {};
+
+	// Simple YAML parser for our specific format
+	const lines = frontmatterText.split('\n');
+	for (const line of lines) {
+		if (!line.trim() || line.startsWith('#')) {
+			continue;
+		}
+
+		const colonIndex = line.indexOf(':');
+		if (colonIndex === -1) {
+			continue;
+		}
+
+		const key = line.substring(0, colonIndex).trim();
+		const value = line.substring(colonIndex + 1).trim();
+
+		// Parse value based on type
+		if (value.startsWith('[') && value.endsWith(']')) {
+			// Array - parse JSON
+			try {
+				parsed[key] = JSON.parse(value);
+			} catch {
+				parsed[key] = [];
+			}
+		} else if (value.startsWith('"') && value.endsWith('"')) {
+			// String with quotes
+			parsed[key] = value.slice(1, -1).replace(/\\"/g, '"');
+		} else if (value === 'true' || value === 'false') {
+			// Boolean
+			parsed[key] = value === 'true';
+		} else if (!isNaN(Number(value))) {
+			// Number
+			parsed[key] = Number(value);
+		} else {
+			// Plain string
+			parsed[key] = value;
+		}
+	}
+
+	return parsed as Partial<TransactionData>;
+}
+
+/**
+ * Extract transaction details from content body
+ */
+export function parseDetailsFromContent(content: string): TransactionDetail[] | undefined {
+	// Look for items section in the content
+	const itemsMatch = content.match(/## Items\s*\n([\s\S]*?)(?=\n##|\Z)/);
+	if (!itemsMatch) {
+		return undefined;
+	}
+
+	const itemsText = itemsMatch[1];
+	const details: TransactionDetail[] = [];
+
+	// Parse each line item (format: "- Item name: price")
+	const lines = itemsText.split('\n');
+	for (const line of lines) {
+		const itemMatch = line.match(/^-?\s*(.+?):\s*([\d.]+)\s*(?:x\s*([\d.]+))?\s*(?:=\s*([\d.]+))?/i);
+		if (itemMatch) {
+			const name = itemMatch[1].trim();
+			const price = parseFloat(itemMatch[2]) || 0;
+			const quantity = parseFloat(itemMatch[3]) || 1;
+			const total = parseFloat(itemMatch[4]) || (price * quantity);
+
+			details.push({ name, quantity, price, total });
+		}
+	}
+
+	return details.length > 0 ? details : undefined;
+}
+
+/**
+ * Generate markdown content body from transaction data
+ */
+export function generateContentBody(data: TransactionData): string {
+	let content = '';
+
+	// Add header
+	content += `# ${data.type === 'expense' ? 'Expense' : 'Income'}: ${data.comment}\n\n`;
+
+	// Add summary info
+	content += `**Date:** ${formatDateTime(data.dateTime)}\n`;
+	content += `**Amount:** ${data.amount.toFixed(2)} ${data.currency}\n`;
+	content += `**Category:** ${data.category || 'uncategorized'}\n`;
+	content += `**Source:** ${data.source}\n\n`;
+
+	// Add details if available
+	if (data.details && data.details.length > 0) {
+		content += '## Items\n\n';
+		for (const detail of data.details) {
+			const lineTotal = (detail.price * detail.quantity).toFixed(2);
+			content += `- ${detail.name}: ${detail.price.toFixed(2)} x ${detail.quantity} = ${lineTotal}\n`;
+		}
+		content += '\n';
+	}
+
+	// Add tags section
+	if (data.tags.length > 0) {
+		content += '## Tags\n\n';
+		content += data.tags.map(tag => `#${tag}`).join(' ') + '\n';
+	}
+
+	return content;
+}
+
+/**
+ * Format ISO date string to readable format
+ */
+export function formatDateTime(isoString: string, format = 'YYYY-MM-DD HH:mm'): string {
+	const date = new Date(isoString);
+	
+	const year = date.getFullYear();
+	const month = String(date.getMonth() + 1).padStart(2, '0');
+	const day = String(date.getDate()).padStart(2, '0');
+	const hours = String(date.getHours()).padStart(2, '0');
+	const minutes = String(date.getMinutes()).padStart(2, '0');
+
+	return format
+		.replace('YYYY', String(year))
+		.replace('MM', month)
+		.replace('DD', day)
+		.replace('HH', hours)
+		.replace('mm', minutes);
+}
+
+/**
+ * Generate filename from transaction data
+ */
+export function generateFilename(data: TransactionData): string {
+	const date = new Date(data.dateTime);
+	const dateStr = date.toISOString().split('T')[0]; // YYYY-MM-DD
+	const timeStr = date.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-mm-ss
+	const typeShort = data.type === 'expense' ? 'exp' : 'inc';
+	const amountStr = data.amount.toFixed(0);
+	const commentShort = data.comment
+		.substring(0, 20)
+		.replace(/[^a-zA-Z0-9а-яА-ЯёЁ\s-]/g, '')
+		.replace(/\s+/g, '-')
+		.toLowerCase();
+
+	return `${dateStr}-${timeStr}-${typeShort}-${amountStr}-${commentShort}.md`;
+}

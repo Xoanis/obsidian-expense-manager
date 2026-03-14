@@ -1,94 +1,242 @@
-# Obsidian Sample Plugin
+# Expense Manager for Obsidian
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+A comprehensive expense and income tracking plugin for Obsidian with support for multiple input methods including QR code receipts, manual entry, and Telegram bot integration.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+## Features
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open Sample Modal" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and output 'click' to the console.
-- Registers a global interval which logs 'setInterval' to the console.
+### 📝 Multiple Input Methods
+- **Manual Entry**: Quick modal interface for adding expenses and income
+- **QR Code Receipts**: Scan receipt QR codes using [proverkacheka.com](https://proverkacheka.com) API
+- **Telegram Bot**: Add expenses/income via Telegram messages (requires Telegram Bot plugin)
 
-## First time developing plugins?
+### 📊 Analytics & Reports
+- Monthly expense reports with category breakdowns
+- Visual charts and graphs (powered by Chart.js)
+- Transaction lists with filtering capabilities
+- Summary cards showing total income, expenses, and balance
 
-Quick starting guide for new plugin devs:
+### 💾 Data Storage
+- Each transaction is stored as a separate markdown file
+- YAML frontmatter for easy querying and filtering
+- Organized in configurable folder structure
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `main.ts` to `main.js`.
-- Make changes to `main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+### 🔧 Extensible Architecture
+- Handler-based design allows adding new input methods
+- Future support planned for PDF bank statements
+- Category management with predefined and custom tags
 
-## Releasing new releases
+## Installation
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
+### From Community Plugins (Pending)
+1. Open Obsidian Settings
+2. Go to Community plugins
+3. Search for "Expense Manager"
+4. Click Install and Enable
 
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
+### Manual Installation
+1. Download the latest release from GitHub
+2. Extract files to `<vault>/.obsidian/plugins/expense-manager/`
+3. Enable the plugin in Obsidian Settings → Community plugins
 
-## Adding your plugin to the community plugin list
+## Configuration
 
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
+### Required Settings
 
-## How to use
+**ProverkaCheka API Key** (for QR code processing):
+1. Register at [proverkacheka.com](https://proverkacheka.com)
+2. Get your API key from dashboard
+3. Enter it in plugin settings
 
-- Clone this repo.
-- Make sure your NodeJS is at least v16 (`node --version`).
-- `npm i` or `yarn` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
+### Optional Settings
 
-## Manually installing the plugin
+- **Expense Folder**: Where transaction files are stored (default: `Expenses`)
+- **Default Currency**: Your primary currency (default: `RUB`)
+- **Auto-save QR**: Skip review after QR processing (default: disabled)
+- **Categories**: Manage predefined expense and income categories
+- **Telegram Integration**: Enable/disable Telegram bot features
 
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
+## Usage
 
-## Improve code quality with eslint (optional)
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code. 
-- To use eslint with this project, make sure to install eslint from terminal:
-  - `npm install -g eslint`
-- To use eslint to analyze this project use this command:
-  - `eslint main.ts`
-  - eslint will then create a report with suggestions for code improvement by file and line number.
-- If your source code is in a folder, such as `src`, you can use eslint with this command to analyze all files in that folder:
-  - `eslint ./src/`
+### Adding Expenses
 
-## Funding URL
+#### Method 1: Command Palette
+1. Press `Ctrl/Cmd + P`
+2. Select "Expense Manager: Add expense"
+3. Fill in the form and save
 
-You can include funding URLs where people who use your plugin can financially support it.
+#### Method 2: Ribbon Icon
+1. Click the wallet icon in the left ribbon
+2. Fill in expense details
+3. Save
 
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
+#### Method 3: QR Code Receipt
+1. Press `Ctrl/Cmd + P`
+2. Select "Expense Manager: Add expense via QR code"
+3. Upload receipt image or drag & drop
+4. Review processed data (or auto-save if enabled)
+5. Edit if needed and save
 
-```json
-{
-    "fundingUrl": "https://buymeacoffee.com"
-}
+#### Method 4: Telegram Bot
+If you have the Telegram Bot plugin installed:
+```
+/expense 500 Lunch at cafe
+/income 50000 Salary
 ```
 
-If you have multiple URLs, you can also do:
+### Generating Reports
 
-```json
-{
-    "fundingUrl": {
-        "Buy Me a Coffee": "https://buymeacoffee.com",
-        "GitHub Sponsor": "https://github.com/sponsors",
-        "Patreon": "https://www.patreon.com/"
-    }
-}
+1. Press `Ctrl/Cmd + P`
+2. Select "Expense Manager: Generate monthly expense report"
+3. View summary cards, category breakdown, and transaction list
+
+### Data Structure
+
+Each transaction creates a markdown file with this structure:
+
+```markdown
+---
+type: expense
+amount: 1500.00
+currency: RUB
+dateTime: 2024-03-13T14:30:00
+comment: "Grocery shopping"
+tags: ["groceries", "food"]
+category: "Food"
+source: qr
+---
+
+# Expense: Grocery shopping
+
+**Date:** 2024-03-13 14:30
+**Amount:** 1500.00 RUB
+**Category:** Food
+**Source:** qr
+
+## Items
+- Milk: 100.00 x 1 = 100.00
+- Bread: 50.00 x 2 = 100.00
+- ...
 ```
 
-## API Documentation
+## Commands
 
-See https://github.com/obsidianmd/obsidian-api
+| Command | Description |
+|---------|-------------|
+| `Add expense` | Open modal to add new expense |
+| `Add income` | Open modal to add new income |
+| `Add expense via QR code` | Process receipt QR code |
+| `Generate monthly expense report` | View current month analytics |
+
+## Keyboard Shortcuts
+
+You can assign hotkeys to any command:
+1. Settings → Hotkeys
+2. Search for "Expense Manager"
+3. Assign your preferred shortcuts
+
+## Privacy & Security
+
+- All data stored locally in your vault
+- QR code images sent to proverkacheka.com API only when processing
+- No telemetry or data collection
+- Telegram integration requires separate Telegram Bot plugin
+
+## Technical Details
+
+### Dependencies
+- **Chart.js**: For analytics visualization
+- **proverkacheka.com API**: For QR code receipt processing
+
+### File Naming Convention
+Transactions are named automatically:
+```
+YYYY-MM-DD-HH-mm-ss-type-amount-comment.md
+```
+
+Example: `2024-03-13-14-30-00-exp-1500-grocery-shopping.md`
+
+### Supported Image Formats for QR
+- JPG/JPEG
+- PNG
+- WEBP
+- GIF
+
+## Troubleshooting
+
+### QR Code Processing Fails
+- Verify API key is correct in settings
+- Check image quality (QR code must be clearly visible)
+- Ensure image format is supported
+- Check internet connection
+
+### Plugin Doesn't Load
+- Ensure `main.js`, `manifest.json`, and `styles.css` are in correct location
+- Check Obsidian version (requires 0.15.0+)
+- Try disabling and re-enabling plugin
+
+### Telegram Integration Not Working
+- Install Telegram Bot plugin first
+- Enable Telegram integration in Expense Manager settings
+- Restart Obsidian after enabling
+
+## Development
+
+### Build from Source
+
+```bash
+npm install
+npm run dev      # Development mode (watch)
+npm run build    # Production build
+```
+
+### Project Structure
+```
+src/
+  commands/          # Command implementations
+  handlers/          # Input method handlers
+  services/          # Business logic
+  ui/                # Modal components
+  utils/             # Utility functions
+  main.ts            # Plugin entry point
+  settings.ts        # Settings interface
+  types.ts           # TypeScript types
+```
+
+## Roadmap
+
+### Planned Features
+- [ ] PDF bank statement parsing
+- [ ] Budget tracking and alerts
+- [ ] Recurring transactions
+- [ ] Multi-currency support with exchange rates
+- [ ] Export to CSV/Excel
+- [ ] Advanced filtering and search
+- [ ] Dashboard view with quick stats
+- [ ] Backup and sync utilities
+
+## Contributing
+
+Contributions welcome! Please:
+1. Fork the repository
+2. Create feature branch
+3. Submit pull request
+
+## License
+
+MIT License - See LICENSE file for details
+
+## Support
+
+- **Issues**: Report bugs on GitHub Issues
+- **Discussions**: Feature requests and questions on GitHub Discussions
+- **Documentation**: Check this README and Obsidian help docs
+
+## Acknowledgments
+
+- Built with [Obsidian Sample Plugin](https://github.com/obsidianmd/obsidian-sample-plugin)
+- QR processing powered by [proverkacheka.com](https://proverkacheka.com)
+- Charts powered by [Chart.js](https://www.chartjs.org/)
+
+---
+
+**Made with ❤️ for the Obsidian community**

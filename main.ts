@@ -1,85 +1,64 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
+import { ExpenseManagerSettings, DEFAULT_SETTINGS } from './src/settings';
+import { ExpenseService } from './src/services/expense-service';
+import { AnalyticsService } from './src/services/analytics-service';
+import { ManualHandler } from './src/handlers/manual-handler';
+import { QrHandler } from './src/handlers/qr-handler';
+import { TelegramHandler } from './src/handlers/telegram-handler';
+import { TransactionData } from './src/types';
+import { registerAddExpenseCommand } from './src/commands/add-expense';
+import { registerAddIncomeCommand } from './src/commands/add-income';
+import { registerAddQrExpenseCommand } from './src/commands/add-qr-expense';
+import { registerGenerateReportCommand } from './src/commands/generate-report';
+import { ReportsModal } from './src/ui/reports-modal';
+import { ITelegramBotPluginAPIv1 } from './telegram_plugin_api';
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
+// Try to import Telegram API (may not be available)
+let TelegramApiClass: any = null;
+try {
+	TelegramApiClass = require('./telegram_plugin_api');
+} catch (e) {
+	console.log('Telegram plugin API not available');
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
-
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class ExpenseManagerPlugin extends Plugin {
+	settings: ExpenseManagerSettings;
+	
+	private expenseService!: ExpenseService;
+	private analyticsService!: AnalyticsService;
+	private telegramHandler!: TelegramHandler;
+	private telegramApi: ITelegramBotPluginAPIv1 | null = null;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (_evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+		// Initialize services
+		this.expenseService = new ExpenseService(this.app, this.settings.expenseFolder);
+		this.analyticsService = new AnalyticsService(this.expenseService);
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+		// Initialize Telegram handler if API is available
+		await this.initializeTelegramIntegration();
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, _view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+		// Register commands
+		registerAddExpenseCommand(this);
+		registerAddIncomeCommand(this);
+		registerAddQrExpenseCommand(this);
+		registerGenerateReportCommand(this);
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
+		// Add ribbon icon
+		this.addRibbonIcon('wallet', 'Add Expense', () => {
+			this.handleAddExpense();
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		// Add settings tab
+		this.addSettingTab(new ExpenseManagerSettingTab(this.app, this));
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		// Show startup notice
+		new Notice('Expense Manager loaded');
 	}
 
 	onunload() {
-
+		// Cleanup
 	}
 
 	async loadSettings() {
@@ -88,46 +67,242 @@ export default class MyPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+		
+		// Reinitialize services with new settings
+		this.expenseService = new ExpenseService(this.app, this.settings.expenseFolder);
+	}
+
+	/**
+	 * Command handlers
+	 */
+	async handleAddExpense() {
+		const handler = new ManualHandler(
+			this.app,
+			this.settings.defaultTransactionType,
+			this.settings.defaultCurrency,
+			this.settings.expenseCategories
+		);
+
+		const result = await handler.handle();
+		
+		if (result.success && result.data) {
+			await this.saveTransaction(result.data);
+		} else if (result.error) {
+			new Notice(result.error);
+		}
+	}
+
+	async handleAddIncome() {
+		const handler = new ManualHandler(
+			this.app,
+			'income',
+			this.settings.defaultCurrency,
+			this.settings.incomeCategories
+		);
+
+		const result = await handler.handle();
+		
+		if (result.success && result.data) {
+			await this.saveTransaction(result.data);
+		} else if (result.error) {
+			new Notice(result.error);
+		}
+	}
+
+	async handleAddQrExpense() {
+		const handler = new QrHandler(
+			this.app,
+			this.settings.proverkaChekaApiKey,
+			this.settings.autoSaveQrExpenses
+		);
+
+		const result = await handler.handle();
+		
+		if (result.success && result.data) {
+			await this.saveTransaction(result.data);
+		} else if (result.error) {
+			new Notice(result.error);
+		}
+	}
+
+	/**
+	 * Generate monthly report
+	 */
+	async handleGenerateReport() {
+		try {
+			const report = await this.analyticsService.generateCurrentMonthReport();
+			const modal = new ReportsModal(this.app, report);
+			modal.open();
+		} catch (error) {
+			new Notice(`Error generating report: ${(error as Error).message}`);
+		}
+	}
+
+	/**
+	 * Save transaction to vault
+	 */
+	private async saveTransaction(data: TransactionData) {
+		try {
+			const file = await this.expenseService.createTransaction(data);
+			
+			if (this.settings.showConfirmationNotice) {
+				const emoji = data.type === 'expense' ? '💸' : '💰';
+				new Notice(`${emoji} Saved: ${data.amount.toFixed(2)} ${data.currency} - ${data.comment}`);
+			}
+		} catch (error) {
+			new Notice(`Error saving transaction: ${(error as Error).message}`);
+			console.error('Save error:', error);
+		}
+	}
+
+	/**
+	 * Initialize Telegram integration
+	 */
+	private async initializeTelegramIntegration() {
+		if (!this.settings.enableTelegramIntegration) {
+			return;
+		}
+
+		// Try to get Telegram API from other plugin
+		try {
+			// @ts-ignore - Telegram plugin may not exist
+			const telegramPlugin = this.app.plugins?.plugins?.['telegram-bot'];
+			if (telegramPlugin && telegramPlugin.getApi) {
+				this.telegramApi = telegramPlugin.getApi();
+				
+				if (this.telegramApi) {
+					this.telegramHandler = new TelegramHandler(
+						this.app,
+						this.expenseService,
+						this.telegramApi
+					);
+					
+					await this.telegramHandler.initialize();
+					console.log('Telegram integration initialized');
+				}
+			}
+		} catch (error) {
+			console.log('Telegram integration not available:', error);
+		}
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+/**
+ * Plugin settings tab
+ */
+class ExpenseManagerSettingTab extends PluginSettingTab {
+	plugin: ExpenseManagerPlugin;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: ExpenseManagerPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
-		const {containerEl} = this;
-
+		const { containerEl } = this;
 		containerEl.empty();
 
+		containerEl.createEl('h2', { text: 'Expense Manager Settings' });
+
+		// Expense folder setting
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
+			.setName('Expense folder')
+			.setDesc('Where expense markdown files will be stored')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('Expenses')
+				.setValue(this.plugin.settings.expenseFolder)
 				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.expenseFolder = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// Default currency
+		new Setting(containerEl)
+			.setName('Default currency')
+			.setDesc('Currency code for transactions')
+			.addText(text => text
+				.setPlaceholder('RUB')
+				.setValue(this.plugin.settings.defaultCurrency)
+				.onChange(async (value) => {
+					this.plugin.settings.defaultCurrency = value.toUpperCase();
+					await this.plugin.saveSettings();
+				}));
+
+		// ProverkaCheka API key
+		new Setting(containerEl)
+			.setName('ProverkaCheka API key')
+			.setDesc('API key for receipt QR code processing (https://proverkacheka.com)')
+			.addText(text => text
+				.setPlaceholder('Enter your API key')
+				.setValue(this.plugin.settings.proverkaChekaApiKey)
+				.onChange(async (value) => {
+					this.plugin.settings.proverkaChekaApiKey = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// Auto-save QR expenses
+		new Setting(containerEl)
+			.setName('Auto-save QR expenses')
+			.setDesc('Automatically save expenses after QR processing without review')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.autoSaveQrExpenses)
+				.onChange(async (value) => {
+					this.plugin.settings.autoSaveQrExpenses = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// Confirmation notice
+		new Setting(containerEl)
+			.setName('Show confirmation notice')
+			.setDesc('Display notification after saving transaction')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.showConfirmationNotice)
+				.onChange(async (value) => {
+					this.plugin.settings.showConfirmationNotice = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// Telegram integration
+		new Setting(containerEl)
+			.setName('Enable Telegram integration')
+			.setDesc('Allow expense/income entry via Telegram bot (requires Telegram Bot plugin)')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableTelegramIntegration)
+				.onChange(async (value) => {
+					this.plugin.settings.enableTelegramIntegration = value;
+					await this.plugin.saveSettings();
+					// Reload plugin to apply changes
+					location.reload();
+				}));
+
+		// Categories management
+		containerEl.createEl('h3', { text: 'Categories' });
+
+		new Setting(containerEl)
+			.setName('Expense categories')
+			.setDesc('Comma-separated list of expense categories')
+			.addTextArea(text => text
+				.setPlaceholder('Food, Transport, Shopping...')
+				.setValue(this.plugin.settings.expenseCategories.join(', '))
+				.onChange(async (value) => {
+					this.plugin.settings.expenseCategories = value
+						.split(',')
+						.map(c => c.trim())
+						.filter(c => c.length > 0);
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Income categories')
+			.setDesc('Comma-separated list of income categories')
+			.addTextArea(text => text
+				.setPlaceholder('Salary, Freelance, Investments...')
+				.setValue(this.plugin.settings.incomeCategories.join(', '))
+				.onChange(async (value) => {
+					this.plugin.settings.incomeCategories = value
+						.split(',')
+						.map(c => c.trim())
+						.filter(c => c.length > 0);
 					await this.plugin.saveSettings();
 				}));
 	}
