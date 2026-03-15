@@ -228,4 +228,96 @@ export class ExpenseService {
 			t.category === category || t.tags.includes(category)
 		);
 	}
+
+	/**
+	 * Generate markdown content for period report
+	 */
+	generateReportMarkdown(report: PeriodReport): string {
+		const formatDate = (date: Date): string => {
+			return date.toISOString().split('T')[0];
+		};
+
+		let content = `---\ntype: financial-report\nperiod: ${formatDate(report.startDate)} to ${formatDate(report.endDate)}\ngeneratedAt: ${new Date().toISOString()}\ntotalExpenses: ${report.totalExpenses.toFixed(2)}\ntotalIncome: ${report.totalIncome.toFixed(2)}\nbalance: ${report.balance.toFixed(2)}\n---\n\n`;
+
+		// Header
+		content += `# Financial Report\n\n`;
+		content += `**Period:** ${formatDate(report.startDate)} - ${formatDate(report.endDate)}\n\n`;
+		content += `**Generated:** ${new Date().toLocaleString()}\n\n`;
+
+		// Summary section
+		content += `## 📊 Summary\n\n`;
+		content += `| Metric | Amount |\n`;
+		content += `|--------|--------|\n`;
+		content += `| 💰 Total Income | ${report.totalIncome.toFixed(2)} RUB |\n`;
+		content += `| 💸 Total Expenses | ${report.totalExpenses.toFixed(2)} RUB |\n`;
+		content += `| 📈 Balance | ${report.balance.toFixed(2)} RUB |\n\n`;
+
+		// Category breakdown
+		content += `## 📋 Category Breakdown\n\n`;
+		content += `| Category | Amount | % | Count |\n`;
+		content += `|----------|--------|---|-------|\n`;
+
+		// Sort by total descending
+		const sortedCategories = [...report.byCategory].sort((a, b) => b.total - a.total);
+		for (const cat of sortedCategories) {
+			content += `| ${cat.category} | ${cat.total.toFixed(2)} RUB | ${cat.percentage.toFixed(1)}% | ${cat.count} |\n`;
+		}
+		content += '\n';
+
+		// Transactions by type
+		content += `## 💰 Income\n\n`;
+		const incomes = report.transactions.filter(t => t.type === 'income');
+		if (incomes.length > 0) {
+			content += `| Date | Amount | Comment | Category |\n`;
+			content += `|------|--------|---------|----------|\n`;
+			for (const t of incomes) {
+				const dateStr = new Date(t.dateTime).toLocaleDateString();
+				content += `| ${dateStr} | ${t.amount.toFixed(2)} ${t.currency} | ${t.comment} | ${t.category} |\n`;
+			}
+		} else {
+			content += `_No income in this period._\n\n`;
+		}
+		content += '\n';
+
+		content += `## 💸 Expenses\n\n`;
+		const expenses = report.transactions.filter(t => t.type === 'expense');
+		if (expenses.length > 0) {
+			content += `| Date | Amount | Comment | Category |\n`;
+			content += `|------|--------|---------|----------|\n`;
+			for (const t of expenses) {
+				const dateStr = new Date(t.dateTime).toLocaleDateString();
+				content += `| ${dateStr} | ${t.amount.toFixed(2)} ${t.currency} | ${t.comment} | ${t.category} |\n`;
+			}
+		} else {
+			content += `_No expenses in this period._\n\n`;
+		}
+
+		return content;
+	}
+
+	/**
+	 * Save report as markdown file
+	 */
+	async saveReportAsFile(report: PeriodReport): Promise<TFile> {
+		// Ensure reports folder exists
+		const reportsFolder = `${this.settingsFolder}/Reports`;
+		const folder = this.app.vault.getAbstractFileByPath(reportsFolder);
+		if (!folder) {
+			await this.app.vault.createFolder(reportsFolder);
+		}
+
+		// Generate filename
+		const startDate = report.startDate.toISOString().split('T')[0];
+		const endDate = report.endDate.toISOString().split('T')[0];
+		const filename = `financial-report-${startDate}-to-${endDate}.md`;
+		const filepath = `${reportsFolder}/${filename}`;
+
+		// Generate content
+		const content = this.generateReportMarkdown(report);
+
+		// Create file
+		const file = await this.app.vault.create(filepath, content);
+		
+		return file;
+	}
 }

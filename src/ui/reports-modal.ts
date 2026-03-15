@@ -1,15 +1,18 @@
-import { App, Modal, Setting } from 'obsidian';
+import { App, Modal, Setting, Notice } from 'obsidian';
 import { PeriodReport, CategorySummary } from '../types';
 import { formatDateTime } from '../utils/frontmatter';
+import { ExpenseService } from '../services/expense-service';
 
 export class ReportsModal extends Modal {
 	private report: PeriodReport | null = null;
+	private expenseService: ExpenseService;
 
 	onComplete: (() => void) | null = null;
 
-	constructor(app: App, report: PeriodReport) {
+	constructor(app: App, report: PeriodReport, expenseService: ExpenseService) {
 		super(app);
 		this.report = report;
+		this.expenseService = expenseService;
 	}
 
 	onOpen() {
@@ -145,14 +148,31 @@ export class ReportsModal extends Modal {
 		}
 
 		// Close button
-		new Setting(contentEl).addButton(button => {
-			button
-				.setButtonText('Close')
-				.setCta()
-				.onClick(() => {
-					this.close();
-				});
-		});
+		new Setting(contentEl)
+			.addButton(button => {
+				button
+					.setButtonText('Save as File')
+					.setCta()
+					.onClick(async () => {
+						try {
+							const file = await this.expenseService.saveReportAsFile(this.report!);
+							new Notice(`Report saved to ${file.path}`);
+							// Open the file
+							const leaf = this.app.workspace.getLeaf();
+							await leaf.openFile(file);
+						} catch (error) {
+							new Notice(`Error saving report: ${(error as Error).message}`);
+							console.error('Save error:', error);
+						}
+					});
+			})
+			.addButton(button => {
+				button
+					.setButtonText('Close')
+					.onClick(() => {
+						this.close();
+					});
+			});
 	}
 
 	onClose() {

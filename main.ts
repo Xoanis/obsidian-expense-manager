@@ -10,6 +10,7 @@ import { registerAddExpenseCommand } from './src/commands/add-expense';
 import { registerAddIncomeCommand } from './src/commands/add-income';
 import { registerAddQrExpenseCommand } from './src/commands/add-qr-expense';
 import { registerGenerateReportCommand } from './src/commands/generate-report';
+import { registerGenerateReportFileCommand } from './src/commands/generate-report-file';
 import { ReportsModal } from './src/ui/reports-modal';
 import { ITelegramBotPluginAPIv1 } from './telegram_plugin_api';
 
@@ -44,6 +45,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerAddIncomeCommand(this);
 		registerAddQrExpenseCommand(this);
 		registerGenerateReportCommand(this);
+		registerGenerateReportFileCommand(this);
 
 		// Add ribbon icon
 		this.addRibbonIcon('wallet', 'Add Expense', () => {
@@ -131,10 +133,28 @@ export default class ExpenseManagerPlugin extends Plugin {
 	async handleGenerateReport() {
 		try {
 			const report = await this.analyticsService.generateCurrentMonthReport();
-			const modal = new ReportsModal(this.app, report);
+			const modal = new ReportsModal(this.app, report, this.expenseService);
 			modal.open();
 		} catch (error) {
 			new Notice(`Error generating report: ${(error as Error).message}`);
+		}
+	}
+
+	/**
+	 * Generate monthly report and save as file directly
+	 */
+	async handleGenerateReportFile() {
+		try {
+			const report = await this.analyticsService.generateCurrentMonthReport();
+			const file = await this.expenseService.saveReportAsFile(report);
+			new Notice(`Report saved to ${file.path}`);
+			
+			// Open the file
+			const leaf = this.app.workspace.getLeaf();
+			await leaf.openFile(file);
+		} catch (error) {
+			new Notice(`Error generating report: ${(error as Error).message}`);
+			console.error('Save error:', error);
 		}
 	}
 
