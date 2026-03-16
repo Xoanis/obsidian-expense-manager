@@ -115,7 +115,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 		const handler = new QrHandler(
 			this.app,
 			this.settings.proverkaChekaApiKey,
-			this.settings.autoSaveQrExpenses
+			this.settings.autoSaveQrExpenses,
+			this.settings.localQrOnly
 		);
 
 		const result = await handler.handle();
@@ -268,6 +269,17 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.autoSaveQrExpenses)
 				.onChange(async (value) => {
 					this.plugin.settings.autoSaveQrExpenses = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// Local-only QR recognition
+		new Setting(containerEl)
+			.setName('Local QR recognition only')
+			.setDesc('Use only local QR decoding without sending to ProverkaCheka API (no item details, but works offline)')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.localQrOnly)
+				.onChange(async (value) => {
+					this.plugin.settings.localQrOnly = value;
 					await this.plugin.saveSettings();
 				}));
 

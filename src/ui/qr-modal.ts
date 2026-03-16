@@ -108,6 +108,14 @@ export class QrModal extends Modal {
 		const previewImg = previewArea.createEl('img');
 		previewImg.style.cssText = 'max-width: 100%; max-height: 300px; border-radius: 8px;';
 		
+		// Process button (appears after file selection when autoSave is off)
+		const processButtonContainer = contentEl.createDiv({ cls: 'process-button-container' });
+		processButtonContainer.style.cssText = 'margin-top: 15px; text-align: center; display: none;';
+		
+		const processButton = processButtonContainer.createEl('button', { text: '🔍 Process Receipt' });
+		processButton.className = 'mod-cta';
+		processButton.onclick = () => this.processReceipt();
+		
 		// Processing indicator
 		const processingIndicator = contentEl.createDiv({ cls: 'processing-indicator' });
 		processingIndicator.style.cssText = `
@@ -141,6 +149,7 @@ export class QrModal extends Modal {
 		// Store references for updates
 		(this as any).previewArea = previewArea;
 		(this as any).previewImg = previewImg;
+		(this as any).processButtonContainer = processButtonContainer;
 		(this as any).processingIndicator = processingIndicator;
 		(this as any).buttonContainer = buttonContainer;
 	}
@@ -160,8 +169,11 @@ export class QrModal extends Modal {
 				(this as any).previewImg.src = e.target.result as string;
 				(this as any).previewArea.style.display = 'block';
 				
-				// Auto-process if enabled
-				if (this.autoSave) {
+				// Show process button if autoSave is off
+				if (!this.autoSave) {
+					(this as any).processButtonContainer.style.display = 'block';
+				} else {
+					// Auto-process if enabled
 					this.processReceipt();
 				}
 			}
@@ -173,13 +185,27 @@ export class QrModal extends Modal {
 		if (!this.selectedFile || this.isProcessing) return;
 
 		this.isProcessing = true;
+		(this as any).processButtonContainer.style.display = 'none';
 		(this as any).processingIndicator.style.display = 'block';
 		(this as any).buttonContainer.style.display = 'none';
 
 		try {
-			this.processedData = await this.client.processReceiptImage(this.selectedFile);
+			// Use hybrid processing: local QR first, then API fallback
+			const result = await this.client.processReceiptHybrid(this.selectedFile);
 			
-			new Notice('Receipt processed successfully!');
+			if (result.hasError) {
+				new Notice(`Error: ${result.error || 'Failed to process receipt'}`);
+				console.error('QR processing error:', result.error);
+				// Show process button again on error so user can retry
+				(this as any).processButtonContainer.style.display = 'block';
+				return;
+			}
+			
+			this.processedData = result.data;
+			
+			// Show success message with source info
+			const sourceText = result.source === 'api' ? 'via ProverkaCheka API' : 'via local QR';
+			new Notice(`Receipt processed successfully (${sourceText})!`);
 			
 			if (this.autoSave) {
 				// Save directly
@@ -191,6 +217,8 @@ export class QrModal extends Modal {
 		} catch (error) {
 			new Notice(`Error: ${(error as Error).message}`);
 			console.error('QR processing error:', error);
+			// Show process button again on error so user can retry
+			(this as any).processButtonContainer.style.display = 'block';
 		} finally {
 			this.isProcessing = false;
 			(this as any).processingIndicator.style.display = 'none';

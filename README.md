@@ -42,10 +42,12 @@ A comprehensive expense and income tracking plugin for Obsidian with support for
 
 ### Required Settings
 
-**ProverkaCheka API Key** (for QR code processing):
+**ProverkaCheka API Token** (for QR code processing):
 1. Register at [proverkacheka.com](https://proverkacheka.com)
-2. Get your API key from dashboard
+2. Get your API token from dashboard
 3. Enter it in plugin settings
+
+⚠️ **Important**: The service uses `token` parameter (not `api_key`) for authentication.
 
 ### Optional Settings
 
@@ -164,10 +166,13 @@ Example: `2024-03-13-14-30-00-exp-1500-grocery-shopping.md`
 ## Troubleshooting
 
 ### QR Code Processing Fails
-- Verify API key is correct in settings
+- Verify API token is correct in settings (check for extra spaces)
+- Ensure you're using `token` parameter format, not `api_key`
 - Check image quality (QR code must be clearly visible)
-- Ensure image format is supported
+- Ensure image format is supported (JPG, PNG, WEBP)
 - Check internet connection
+- If error says "still being processed", wait a few seconds and try again
+- If "limit exceeded", wait until your quota resets
 
 ### Plugin Doesn't Load
 - Ensure `main.js`, `manifest.json`, and `styles.css` are in correct location

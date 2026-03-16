@@ -16,6 +16,9 @@ export interface ExpenseManagerSettings {
 	/** Whether to auto-save after QR processing (vs showing review modal) */
 	autoSaveQrExpenses: boolean;
 	
+	/** Use only local QR recognition without sending to ProverkaCheka API */
+	localQrOnly: boolean;
+	
 	/** Predefined categories for expenses */
 	expenseCategories: string[];
 	
@@ -43,6 +46,7 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	defaultCurrency: 'RUB',
 	proverkaChekaApiKey: '',
 	autoSaveQrExpenses: false,
+	localQrOnly: false,
 	expenseCategories: [
 		'Food',
 		'Transport',
