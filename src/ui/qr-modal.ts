@@ -240,9 +240,13 @@ export class QrModal extends Modal {
 		(editModal as any).category = this.processedData.category || '';
 
 		editModal.onComplete = (data: TransactionData) => {
-			// Keep the details from original processing
+			// Keep the details and fiscal data from original processing
 			data.details = this.processedData?.details;
 			data.source = 'qr';
+			// Preserve fiscal document numbers
+			data.fn = this.processedData?.fn;
+			data.fd = this.processedData?.fd;
+			data.fp = this.processedData?.fp;
 			this.onComplete?.(data);
 		};
 

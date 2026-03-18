@@ -164,6 +164,22 @@ export default class ExpenseManagerPlugin extends Plugin {
 	 */
 	private async saveTransaction(data: TransactionData) {
 		try {
+			// Check for duplicates if fiscal data is available
+			if (data.fn || data.fd || data.fp) {
+				const isDuplicate = await this.expenseService.isDuplicateTransaction(
+					data.fn,
+					data.fd,
+					data.fp,
+					data.dateTime
+				);
+				
+				if (isDuplicate) {
+					new Notice(`⚠️ Duplicate transaction detected! Skipping.`);
+					console.log('Duplicate transaction prevented:', data.comment);
+					return;
+				}
+			}
+			
 			const file = await this.expenseService.createTransaction(data);
 			
 			if (this.settings.showConfirmationNotice) {
@@ -187,20 +203,26 @@ export default class ExpenseManagerPlugin extends Plugin {
 		// Try to get Telegram API from other plugin
 		try {
 			// @ts-ignore - Telegram plugin may not exist
-			const telegramPlugin = this.app.plugins?.plugins?.['telegram-bot'];
-			if (telegramPlugin && telegramPlugin.getApi) {
-				this.telegramApi = telegramPlugin.getApi();
+			const telegramPlugin = this.app.plugins?.plugins?.['obsidian-telegram-bot-plugin'];
+			if (telegramPlugin && telegramPlugin.getAPIv1) {
+				this.telegramApi = telegramPlugin.getAPIv1();
 				
 				if (this.telegramApi) {
 					this.telegramHandler = new TelegramHandler(
 						this.app,
 						this.expenseService,
-						this.telegramApi
+						this.telegramApi,
+						this.settings.proverkaChekaApiKey,
+						this.settings.localQrOnly
 					);
 					
 					await this.telegramHandler.initialize();
 					console.log('Telegram integration initialized');
+				} else {
+					console.log('Telegram integration failed: this.telegramApi is null');
 				}
+			} else {
+				console.log('Telegram integration failed: telegramPlugin || telegramPlugin.getAPIv1 is undefined');
 			}
 		} catch (error) {
 			console.log('Telegram integration not available:', error);

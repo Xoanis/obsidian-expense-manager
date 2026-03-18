@@ -25,6 +25,7 @@ export class ExpenseService {
 		await this.ensureExpenseFolder();
 
 		// Generate filename and content
+        console.log('Creating transaction file with data:', data);
 		const filename = generateFilename(data);
 		const filepath = `${this.settingsFolder}/${filename}`;
 		
@@ -227,6 +228,39 @@ export class ExpenseService {
 		return allTransactions.filter(t => 
 			t.category === category || t.tags.includes(category)
 		);
+	}
+
+	/**
+	 * Check if a transaction with same fiscal data already exists
+	 */
+	async isDuplicateTransaction(fn: string | undefined, fd: string | undefined, fp: string | undefined, dateTime: string): Promise<boolean> {
+		// Only check if we have at least one fiscal identifier
+		if (!fn && !fd && !fp) {
+			return false;
+		}
+
+		const allTransactions = await this.getAllTransactions();
+		const transactionDate = new Date(dateTime).toDateString();
+
+		for (const t of allTransactions) {
+			// Check if date matches (same day)
+			const existingDate = new Date(t.dateTime).toDateString();
+			if (existingDate !== transactionDate) {
+				continue;
+			}
+
+			// Check if fiscal identifiers match
+			const fnMatch = fn && t.fn && t.fn === fn;
+			const fdMatch = fd && t.fd && t.fd === fd;
+			const fpMatch = fp && t.fp && t.fp === fp;
+
+			// If all provided identifiers match, it's a duplicate
+			if (fnMatch || fdMatch || fpMatch) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**

@@ -3,22 +3,29 @@ import { BaseHandler } from './base-handler';
 import { HandlerResult, TransactionData, TransactionType } from '../types';
 import { ITelegramBotPluginAPIv1, CommandHandler, TextHandler, FileHandler } from '../../telegram_plugin_api';
 import { ExpenseService } from '../services/expense-service';
+import { ProverkaChekaClient } from '../utils/api-client';
 
 export class TelegramHandler extends BaseHandler {
 	private app: App;
 	private expenseService: ExpenseService;
 	private telegramApi: ITelegramBotPluginAPIv1 | null = null;
 	private unitName = 'expense-manager';
+	private proverkaChekaApiKey: string;
+	private localQrOnly: boolean;
 
 	constructor(
 		app: App,
 		expenseService: ExpenseService,
-		telegramApi?: ITelegramBotPluginAPIv1
+		telegramApi?: ITelegramBotPluginAPIv1,
+		proverkaChekaApiKey: string = '',
+		localQrOnly: boolean = false
 	) {
 		super();
 		this.app = app;
 		this.expenseService = expenseService;
 		this.telegramApi = telegramApi || null;
+		this.proverkaChekaApiKey = proverkaChekaApiKey;
+		this.localQrOnly = localQrOnly;
 	}
 
 	getName(): string {
@@ -42,7 +49,7 @@ export class TelegramHandler extends BaseHandler {
 		this.telegramApi.addTextHandler(this.handleTextMessage.bind(this), this.unitName);
 		
 		// Register file handler for receipt images
-		this.telegramApi.addFileHandler(this.handleFileMessage.bind(this), this.unitName, 'image/');
+		this.telegramApi.addFileHandler(this.handleFileMessage.bind(this), this.unitName, 'image/*');
 
 		return true;
 	}
@@ -135,6 +142,7 @@ export class TelegramHandler extends BaseHandler {
 
 		// Check if file is image
 		if (!file.extension.match(/^(jpg|jpeg|png|gif|webp)$/i)) {
+            console.log("Not an image file")
 			return { processed: false, answer: null };
 		}
 
@@ -143,10 +151,35 @@ export class TelegramHandler extends BaseHandler {
 			const arrayBuffer = await this.app.vault.readBinary(file);
 			const blob = new Blob([arrayBuffer], { type: 'image/jpeg' });
 
-			// Note: We can't directly call ProverkaCheka here because we don't have the API key
-			// This would need to be handled by the main plugin logic
+			// Create ProverkaCheka client with current settings
+			const client = new ProverkaChekaClient(this.proverkaChekaApiKey, this.localQrOnly);
+			
+			// Use hybrid processing
+			const result = await client.processReceiptHybrid(blob);
+			
+			if (result.hasError) {
+				await this.telegramApi?.sendMessage(
+					`❌ Error processing receipt: ${result.error || 'Failed to decode QR code'}`
+				);
+				return { processed: true, answer: null };
+			}
+			
+			// Update comment with caption if provided
+			if (caption && caption.trim()) {
+				result.data.comment = caption.trim();
+			}
+			
+			// Save transaction
+			await this.expenseService.createTransaction(result.data);
+			
+			// Send confirmation
+			const emoji = result.data.type === 'expense' ? '💸' : '💰';
+			const sourceText = result.source === 'api' ? 'via ProverkaCheka API' : 'via local QR';
+			
 			await this.telegramApi?.sendMessage(
-				'Receipt image received. Please use the Obsidian plugin to process it with QR code reader.'
+				`${emoji} Saved: ${result.data.type} ${result.data.amount.toFixed(2)} RUB\n` +
+				`${result.data.comment}\n` +
+				`Source: ${sourceText}`
 			);
 
 			return { processed: true, answer: null };

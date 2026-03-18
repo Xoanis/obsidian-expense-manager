@@ -15,6 +15,17 @@ export function generateFrontmatter(data: TransactionData): string {
 		source: data.source
 	};
 
+	// Add fiscal document fields if available
+	if (data.fn) {
+		frontmatter.fn = data.fn;
+	}
+	if (data.fd) {
+		frontmatter.fd = data.fd;
+	}
+	if (data.fp) {
+		frontmatter.fp = data.fp;
+	}
+
 	// Convert to YAML manually to avoid external dependencies
 	let yaml = '---\n';
 	for (const [key, value] of Object.entries(frontmatter)) {

@@ -118,22 +118,13 @@ export class ProverkaChekaClient {
 		const type = qrData.n ? operationTypeToTransactionType(qrData.n) : 'expense';
 		
 		// Generate comment from available data
-		let comment = 'Receipt (local QR)';
+		let comment = 'Receipt';
 		if (qrData.fn) {
-			comment = `Receipt FN:${qrData.fn}`;
+			comment = `Receipt`;
 		}
 		
-		// Build tags
+		// Build tags - no longer include fn, fp, i
 		const tags: string[] = ['receipt', 'qr', 'local'];
-		if (qrData.fn) {
-			tags.push(`fn:${qrData.fn}`);
-		}
-		if (qrData.fp) {
-			tags.push(`fp:${qrData.fp}`);
-		}
-		if (qrData.i) {
-			tags.push(`i:${qrData.i}`);
-		}
 
 		return {
 			type: type,
@@ -144,7 +135,11 @@ export class ProverkaChekaClient {
 			tags: tags,
 			category: type === 'expense' ? 'Shopping' : 'Other',
 			source: 'qr',
-			details: [] // No item details from local QR
+			details: [], // No item details from local QR
+			// Store fiscal document numbers as separate properties
+			fn: qrData.fn,
+			fd: qrData.i, // 'i' in QR is the fiscal document number (ФД)
+			fp: qrData.fp
 		};
 	}
 
@@ -187,6 +182,7 @@ export class ProverkaChekaClient {
 			
 			// Step 2: Check if we should skip API and use local only
 			if (this.localOnly) {
+                console.log('Local-only mode enabled, will use local QR data');
 				// Local-only mode - skip API call
 				const localData = this.createFromLocalQr(qrData);
 				return {
@@ -194,11 +190,15 @@ export class ProverkaChekaClient {
 					source: 'local',
 					hasError: false
 				};
-			}
+			} else {
+                console.log('Local-only mode disabled, will use API to process receipt');
+            }
 			
 			// Step 3: Try to get detailed data from API
 			try {
+                console.log('Trying to process receipt using API');
 				const apiData = await this.processReceiptImage(imageBlob);
+                console.log('API data:', apiData);
 				return {
 					data: apiData,
 					source: 'api',
@@ -370,13 +370,7 @@ export class ProverkaChekaClient {
 		}
 
 		// Build tags with receipt metadata
-		const tags: string[] = ['receipt', 'qr'];
-		if (json.userInn) {
-			tags.push(`inn:${json.userInn}`);
-		}
-		if (json.fiscalDriveNumber) {
-			tags.push(`fn:${json.fiscalDriveNumber}`);
-		}
+		const tags: string[] = ['receipt', 'qr', 'ProverkaChekaAPI'];
 
 		return {
 			type: type,
@@ -389,10 +383,10 @@ export class ProverkaChekaClient {
 			details: details,
 			source: 'qr',
 			
-			// Store additional receipt metadata (optional, could be added to types later)
-			// operator: json.operator,
-			// retailPlaceAddres: json.retailPlaceAddres,
-			// requestNumber: json.requestNumber,
+			// Store fiscal document numbers from API response
+			fn: json.fiscalDriveNumber,
+			fd: json.fiscalDocumentNumber,
+			fp: json.fiscalSign
 		};
 	}
 

@@ -58,22 +58,4 @@ export class QrHandler extends BaseHandler {
 		});
 	}
 
-	/**
-	 * Handle with local QR recognition first (new approach)
-	 */
-	async handleWithLocalFirst(): Promise<HandlerResult> {
-		const client = new ProverkaChekaClient(this.apiKey || '');
-
-		return new Promise((resolve) => {
-			// Use hybrid processing that tries local QR first
-			client.processReceiptHybrid = client.processReceiptHybrid.bind(client);
-			
-			// This would need updates to QrModal to support the new flow
-			// For now, keeping backward compatibility with existing handle()
-			resolve({
-				success: false,
-				error: 'Use handle() method - hybrid processing requires UI updates'
-			});
-		});
-	}
 }

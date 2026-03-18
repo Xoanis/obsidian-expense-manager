@@ -39,6 +39,15 @@ export interface TransactionData {
 	/** Source of the transaction (manual, qr, telegram, pdf, etc.) */
 	source: TransactionSource;
 	
+	/** Fiscal document number (Фискальный номер документа) */
+	fd?: string;
+	
+	/** Fiscal drive number (Фискальный номер накопителя) */
+	fn?: string;
+	
+	/** Fiscal sign (Фискальный признак) */
+	fp?: string;
+	
 	/** Reference to the markdown file */
 	file?: TFile;
 }
