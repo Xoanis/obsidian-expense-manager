@@ -1,26 +1,21 @@
 import { App } from 'obsidian';
 import { BaseHandler } from './base-handler';
 import { HandlerResult, TransactionData } from '../types';
+import { ExpenseManagerSettings } from '../settings';
 import { ProverkaChekaClient } from '../utils/api-client';
 import { QrModal } from '../ui/qr-modal';
 
 export class QrHandler extends BaseHandler {
 	private app: App;
-	private apiKey: string;
-	private autoSave: boolean;
-	private localOnly: boolean;
+	private settings: ExpenseManagerSettings;
 
 	constructor(
 		app: App,
-		apiKey: string,
-		autoSave: boolean = false,
-		localOnly: boolean = false
+		settings: ExpenseManagerSettings
 	) {
 		super();
 		this.app = app;
-		this.apiKey = apiKey;
-		this.autoSave = autoSave;
-		this.localOnly = localOnly;
+		this.settings = settings;
 	}
 
 	getName(): string {
@@ -28,17 +23,20 @@ export class QrHandler extends BaseHandler {
 	}
 
 	async handle(): Promise<HandlerResult> {
-		if (!ProverkaChekaClient.validateApiKey(this.apiKey)) {
+		if (!ProverkaChekaClient.validateApiKey(this.settings.proverkaChekaApiKey)) {
 			return {
 				success: false,
 				error: 'ProverkaCheka API token is not configured. Please set it in plugin settings.'
 			};
 		}
 
-		const client = new ProverkaChekaClient(this.apiKey, this.localOnly);
+		const client = new ProverkaChekaClient(
+			this.settings.proverkaChekaApiKey, 
+			this.settings.localQrOnly
+		);
 
 		return new Promise((resolve) => {
-			const modal = new QrModal(this.app, client, this.autoSave);
+			const modal = new QrModal(this.app, client, this.settings.autoSaveQrExpenses);
 
 			modal.onComplete = (data: TransactionData) => {
 				resolve({
@@ -57,5 +55,4 @@ export class QrHandler extends BaseHandler {
 			modal.open();
 		});
 	}
-
 }

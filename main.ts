@@ -34,7 +34,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		await this.loadSettings();
 
 		// Initialize services
-		this.expenseService = new ExpenseService(this.app, this.settings.expenseFolder);
+		this.expenseService = new ExpenseService(this.app, this.settings);
 		this.analyticsService = new AnalyticsService(this.expenseService);
 
 		// Initialize Telegram handler if API is available
@@ -69,9 +69,6 @@ export default class ExpenseManagerPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-		
-		// Reinitialize services with new settings
-		this.expenseService = new ExpenseService(this.app, this.settings.expenseFolder);
 	}
 
 	/**
@@ -80,9 +77,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 	async handleAddExpense() {
 		const handler = new ManualHandler(
 			this.app,
-			this.settings.defaultTransactionType,
-			this.settings.defaultCurrency,
-			this.settings.expenseCategories
+			this.settings,
+			'expense'
 		);
 
 		const result = await handler.handle();
@@ -97,9 +93,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 	async handleAddIncome() {
 		const handler = new ManualHandler(
 			this.app,
-			'income',
-			this.settings.defaultCurrency,
-			this.settings.incomeCategories
+			this.settings,
+			'income'
 		);
 
 		const result = await handler.handle();
@@ -114,9 +109,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	async handleAddQrExpense() {
 		const handler = new QrHandler(
 			this.app,
-			this.settings.proverkaChekaApiKey,
-			this.settings.autoSaveQrExpenses,
-			this.settings.localQrOnly
+			this.settings
 		);
 
 		const result = await handler.handle();
@@ -211,9 +204,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 					this.telegramHandler = new TelegramHandler(
 						this.app,
 						this.expenseService,
-						this.telegramApi,
-						this.settings.proverkaChekaApiKey,
-						this.settings.localQrOnly
+						this.settings,
+						this.telegramApi
 					);
 					
 					await this.telegramHandler.initialize();

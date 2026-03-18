@@ -2,6 +2,7 @@ import { App, TFile } from 'obsidian';
 import { BaseHandler } from './base-handler';
 import { HandlerResult, TransactionData, TransactionType } from '../types';
 import { ITelegramBotPluginAPIv1, CommandHandler, TextHandler, FileHandler } from '../../telegram_plugin_api';
+import { ExpenseManagerSettings } from '../settings';
 import { ExpenseService } from '../services/expense-service';
 import { ProverkaChekaClient } from '../utils/api-client';
 
@@ -10,22 +11,19 @@ export class TelegramHandler extends BaseHandler {
 	private expenseService: ExpenseService;
 	private telegramApi: ITelegramBotPluginAPIv1 | null = null;
 	private unitName = 'expense-manager';
-	private proverkaChekaApiKey: string;
-	private localQrOnly: boolean;
+	private settings: ExpenseManagerSettings;
 
 	constructor(
 		app: App,
 		expenseService: ExpenseService,
-		telegramApi?: ITelegramBotPluginAPIv1,
-		proverkaChekaApiKey: string = '',
-		localQrOnly: boolean = false
+		settings: ExpenseManagerSettings,
+		telegramApi?: ITelegramBotPluginAPIv1
 	) {
 		super();
 		this.app = app;
 		this.expenseService = expenseService;
+		this.settings = settings;
 		this.telegramApi = telegramApi || null;
-		this.proverkaChekaApiKey = proverkaChekaApiKey;
-		this.localQrOnly = localQrOnly;
 	}
 
 	getName(): string {
@@ -152,7 +150,10 @@ export class TelegramHandler extends BaseHandler {
 			const blob = new Blob([arrayBuffer], { type: 'image/jpeg' });
 
 			// Create ProverkaCheka client with current settings
-			const client = new ProverkaChekaClient(this.proverkaChekaApiKey, this.localQrOnly);
+			const client = new ProverkaChekaClient(
+				this.settings.proverkaChekaApiKey, 
+				this.settings.localQrOnly
+			);
 			
 			// Use hybrid processing
 			const result = await client.processReceiptHybrid(blob);

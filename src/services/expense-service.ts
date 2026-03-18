@@ -1,5 +1,6 @@
 import { App, TFile, TFolder } from 'obsidian';
 import { TransactionData, PeriodReport, CategorySummary } from '../types';
+import { ExpenseManagerSettings } from '../settings';
 import { 
 	generateFrontmatter, 
 	generateContentBody, 
@@ -10,13 +11,12 @@ import {
 
 export class ExpenseService {
 	private app: App;
-	private settingsFolder: string;
+	private settings: ExpenseManagerSettings;
 
-	constructor(app: App, expenseFolder: string) {
+	constructor(app: App, settings: ExpenseManagerSettings) {
 		this.app = app;
-		this.settingsFolder = expenseFolder;
+		this.settings = settings;
 	}
-
 	/**
 	 * Create a new transaction file
 	 */
@@ -27,7 +27,7 @@ export class ExpenseService {
 		// Generate filename and content
         console.log('Creating transaction file with data:', data);
 		const filename = generateFilename(data);
-		const filepath = `${this.settingsFolder}/${filename}`;
+		const filepath = `${this.settings.expenseFolder}/${filename}`;
 		
 		const frontmatter = generateFrontmatter(data);
 		const contentBody = generateContentBody(data);
@@ -43,7 +43,7 @@ export class ExpenseService {
 	 * Get all transactions from vault
 	 */
 	async getAllTransactions(): Promise<TransactionData[]> {
-		const expenseFolder = this.app.vault.getAbstractFileByPath(this.settingsFolder);
+		const expenseFolder = this.app.vault.getAbstractFileByPath(this.settings.expenseFolder);
 		
 		if (!expenseFolder || !(expenseFolder instanceof TFolder)) {
 			return [];
@@ -196,10 +196,10 @@ export class ExpenseService {
 	 * Ensure expense folder exists
 	 */
 	private async ensureExpenseFolder(): Promise<void> {
-		const folder = this.app.vault.getAbstractFileByPath(this.settingsFolder);
+		const folder = this.app.vault.getAbstractFileByPath(this.settings.expenseFolder);
 		
 		if (!folder) {
-			await this.app.vault.createFolder(this.settingsFolder);
+			await this.app.vault.createFolder(this.settings.expenseFolder);
 		}
 	}
 
@@ -334,7 +334,7 @@ export class ExpenseService {
 	 */
 	async saveReportAsFile(report: PeriodReport): Promise<TFile> {
 		// Ensure reports folder exists
-		const reportsFolder = `${this.settingsFolder}/Reports`;
+		const reportsFolder = `${this.settings.expenseFolder}/Reports`;
 		const folder = this.app.vault.getAbstractFileByPath(reportsFolder);
 		if (!folder) {
 			await this.app.vault.createFolder(reportsFolder);

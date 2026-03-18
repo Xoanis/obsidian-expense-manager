@@ -1,25 +1,23 @@
 import { App } from 'obsidian';
 import { BaseHandler } from './base-handler';
 import { HandlerResult, TransactionData, TransactionType } from '../types';
+import { ExpenseManagerSettings } from '../settings';
 import { ExpenseModal } from '../ui/expense-modal';
 
 export class ManualHandler extends BaseHandler {
 	private app: App;
-	private defaultType: TransactionType;
-	private defaultCurrency: string;
-	private categories: string[];
+	private settings: ExpenseManagerSettings;
+	private type: TransactionType;
 
 	constructor(
 		app: App, 
-		defaultType: TransactionType = 'expense',
-		defaultCurrency: string = 'RUB',
-		categories: string[] = []
+		settings: ExpenseManagerSettings,
+        type: TransactionType
 	) {
 		super();
 		this.app = app;
-		this.defaultType = defaultType;
-		this.defaultCurrency = defaultCurrency;
-		this.categories = categories;
+		this.settings = settings;
+		this.type = type;
 	}
 
 	getName(): string {
@@ -30,9 +28,9 @@ export class ManualHandler extends BaseHandler {
 		return new Promise((resolve) => {
 			const modal = new ExpenseModal(
 				this.app,
-				this.defaultType,
-				this.defaultCurrency,
-				this.categories
+				this.type,
+				this.settings.defaultCurrency,
+				this.type === 'expense' ? this.settings.expenseCategories : this.settings.incomeCategories
 			);
 
 			modal.onComplete = (data: TransactionData) => {
