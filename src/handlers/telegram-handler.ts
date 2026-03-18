@@ -52,33 +52,84 @@ export class TelegramHandler extends BaseHandler {
 		return true;
 	}
 
+
+    parseArgs(args: string): { amount: number, comment: string } | null {
+        // Split by the first space(s) found
+        const [amountStr, ...commentParts] = args.trim().split(/\s+/);
+        
+        // Join the rest of the array back into a single string
+        const comment = commentParts.join(' ');
+        const amount = parseFloat(amountStr);
+
+        if (isNaN(amount) || !comment) {
+            return null;
+        }
+
+        return { amount, comment };
+    }
+
+    makeTransactionData(type: TransactionType, amount: number, comment: string): TransactionData {
+        return {
+            type,
+            amount,
+            currency: 'RUB',
+            dateTime: new Date().toISOString(),
+            comment,
+            tags: ['telegram'],
+            category: 'Other',
+            source: 'telegram'
+        };
+    }
+
 	/**
 	 * Handle /expense command
 	 */
-	private async handleExpenseCommand(processed_before: boolean): Promise<any> {
+	private async handleExpenseCommand(args: string, processed_before: boolean): Promise<any> {
 		if (processed_before) {
 			return { processed: false, answer: null };
 		}
 
-		// This would need interactive dialog - for now return instructions
-		const message = 'To add an expense, send:\n/expense <amount> <comment>\n\nExample:\n/expense 500 Lunch at cafe';
-		await this.telegramApi?.sendMessage(message);
-		
-		return { processed: true, answer: null };
+        const parsed_args = this.parseArgs(args);
+        if (!parsed_args) {
+            const message = 'To add an expense, send:\n/expense <amount> <comment>\n\nExample:\n/expense 500 Lunch at cafe';            
+            return { processed: true, answer: message };
+        } else {
+            try {
+                const { amount, comment } = parsed_args;
+                await this.expenseService.createTransaction(this.makeTransactionData('expense', amount, comment));                
+                const emoji = '💸';
+
+                return { processed: true, answer: `${emoji} Saved: ${amount.toFixed(2)} RUB ${comment}` };
+            } catch (error) {
+                return { processed: true, answer: 'Error saving transaction: ' + (error as Error).message };
+            }
+        }
 	}
 
 	/**
 	 * Handle /income command
 	 */
-	private async handleIncomeCommand(processed_before: boolean): Promise<any> {
+	private async handleIncomeCommand(args: string, processed_before: boolean): Promise<any> {
 		if (processed_before) {
 			return { processed: false, answer: null };
 		}
 
-		const message = 'To add income, send:\n/income <amount> <comment>\n\nExample:\n/income 50000 Salary';
-		await this.telegramApi?.sendMessage(message);
-		
-		return { processed: true, answer: null };
+        const parsed_args = this.parseArgs(args);
+        if (!parsed_args) {
+            const message = 'To add income, send:\n/income <amount> <comment>\n\nExample:\n/income 50000 Salary';            
+            return { processed: true, answer: message };
+        } else {
+            try {
+                const { amount, comment } = parsed_args;
+                await this.expenseService.createTransaction(this.makeTransactionData('income', amount, comment));
+                
+                const emoji = '💰';
+
+                return { processed: true, answer: `${emoji} Saved: ${amount.toFixed(2)} RUB ${comment}` };
+            } catch (error) {
+                return { processed: true, answer: 'Error saving transaction: ' + (error as Error).message };
+            }
+        }
 	}
 
 	/**

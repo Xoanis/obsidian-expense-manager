@@ -5,7 +5,7 @@ export type HandlerResult = {
 	processed: boolean;
 	answer: Reply;
 };
-export type CommandHandler = (processed_before: boolean) => Promise<HandlerResult>;
+export type CommandHandler = (args: string, processed_before: boolean) => Promise<HandlerResult>;
 export type TextHandler = (text: string, processed_before: boolean) => Promise<HandlerResult>;
 export type FileHandler = (file: TFile, processed_before: boolean, caption?: string) => Promise<HandlerResult>;
 export interface ITelegramBotPluginAPIv1 {
