@@ -4,7 +4,7 @@
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
 	"description": "Track your expenses and income with multiple input methods including QR code receipts and Telegram bot integration.",
-	"author": "Your Name",
-	"authorUrl": "https://github.com/yourusername",
+	"author": "Petrov Ivan",
+	"authorUrl": "https://github.com/Xoanis",
 	"isDesktopOnly": false
 }
