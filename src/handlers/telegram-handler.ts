@@ -5,12 +5,13 @@ import { ITelegramBotPluginAPIv1, CommandHandler, TextHandler, FileHandler } fro
 import { ExpenseManagerSettings } from '../settings';
 import { ExpenseService } from '../services/expense-service';
 import { ProverkaChekaClient } from '../utils/api-client';
+import { PLUGIN_UNIT_NAME } from '../utils/constants';
 
 export class TelegramHandler extends BaseHandler {
 	private app: App;
 	private expenseService: ExpenseService;
 	private telegramApi: ITelegramBotPluginAPIv1 | null = null;
-	private unitName = 'expense-manager';
+	private unitName = PLUGIN_UNIT_NAME;
 	private settings: ExpenseManagerSettings;
 
 	constructor(
@@ -99,6 +100,8 @@ export class TelegramHandler extends BaseHandler {
                 await this.expenseService.createTransaction(this.makeTransactionData('expense', amount, comment));                
                 const emoji = '💸';
 
+                console.log(`Saved expense: ${amount.toFixed(2)} RUB ${comment}`);
+
                 return { processed: true, answer: `${emoji} Saved: ${amount.toFixed(2)} RUB ${comment}` };
             } catch (error) {
                 return { processed: true, answer: 'Error saving transaction: ' + (error as Error).message };
@@ -124,6 +127,7 @@ export class TelegramHandler extends BaseHandler {
                 await this.expenseService.createTransaction(this.makeTransactionData('income', amount, comment));
                 
                 const emoji = '💰';
+                console.log(`Saved income: ${amount.toFixed(2)} RUB ${comment}`);
 
                 return { processed: true, answer: `${emoji} Saved: ${amount.toFixed(2)} RUB ${comment}` };
             } catch (error) {
@@ -151,8 +155,8 @@ export class TelegramHandler extends BaseHandler {
 		const amount = parseFloat(amountStr);
 
 		if (isNaN(amount) || amount <= 0) {
-			await this.telegramApi?.sendMessage('Invalid amount. Please use format: /expense 500 Comment');
-			return { processed: true, answer: null };
+            const message = 'Invalid amount. Please use format: /expense 500 Comment';
+			return { processed: true, answer: message };
 		}
 
 		try {
@@ -168,16 +172,13 @@ export class TelegramHandler extends BaseHandler {
 			};
 
 			await this.expenseService.createTransaction(data);
-			
+			console.log(`Saved ${type}: ${amount.toFixed(2)} RUB ${comment}`);
 			const emoji = type === 'expense' ? '💸' : '💰';
-			await this.telegramApi?.sendMessage(
-				`${emoji} Saved: ${type} ${amount.toFixed(2)} RUB\n${comment}`
-			);
-
-			return { processed: true, answer: null };
+            const message = `${emoji} Saved: ${type} ${amount.toFixed(2)} RUB\n${comment}`;
+			return { processed: true, answer: message };
 		} catch (error) {
-			await this.telegramApi?.sendMessage('Error saving transaction: ' + (error as Error).message);
-			return { processed: true, answer: null };
+			const message = 'Error saving transaction: ' + (error as Error).message;
+			return { processed: true, answer: message };
 		}
 	}
 
@@ -210,10 +211,9 @@ export class TelegramHandler extends BaseHandler {
 			const result = await client.processReceiptHybrid(blob);
 			
 			if (result.hasError) {
-				await this.telegramApi?.sendMessage(
-					`❌ Error processing receipt: ${result.error || 'Failed to decode QR code'}`
-				);
-				return { processed: true, answer: null };
+                const message = `❌ Error processing receipt: ${result.error || 'Failed to decode QR code'}`;
+
+				return { processed: true, answer: message };
 			}
 			
 			// Update comment with caption if provided
@@ -223,21 +223,20 @@ export class TelegramHandler extends BaseHandler {
 			
 			// Save transaction
 			await this.expenseService.createTransaction(result.data);
-			
+			console.log(`Saved ${result.data.type}: ${result.data.amount.toFixed(2)} RUB ${result.data.comment}`);
 			// Send confirmation
 			const emoji = result.data.type === 'expense' ? '💸' : '💰';
 			const sourceText = result.source === 'api' ? 'via ProverkaCheka API' : 'via local QR';
-			
-			await this.telegramApi?.sendMessage(
-				`${emoji} Saved: ${result.data.type} ${result.data.amount.toFixed(2)} RUB\n` +
-				`${result.data.comment}\n` +
-				`Source: ${sourceText}`
-			);
 
-			return { processed: true, answer: null };
+            const message = `${emoji} Saved: ${result.data.type} ${result.data.amount.toFixed(2)} RUB\n` +
+				`${result.data.comment}\n` +
+				`Source: ${sourceText}`;
+
+			return { processed: true, answer: message };
 		} catch (error) {
-			await this.telegramApi?.sendMessage('Error processing image: ' + (error as Error).message);
-			return { processed: true, answer: null };
+			const message = 'Error processing image: ' + (error as Error).message;
+
+			return { processed: true, answer: message };
 		}
 	}
 

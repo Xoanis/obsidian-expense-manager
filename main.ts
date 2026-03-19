@@ -13,6 +13,7 @@ import { registerGenerateReportCommand } from './src/commands/generate-report';
 import { registerGenerateReportFileCommand } from './src/commands/generate-report-file';
 import { ReportsModal } from './src/ui/reports-modal';
 import { ITelegramBotPluginAPIv1 } from './telegram_plugin_api';
+import { PLUGIN_UNIT_NAME } from './src/utils/constants';
 
 // Try to import Telegram API (may not be available)
 let TelegramApiClass: any = null;
@@ -60,7 +61,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 	}
 
 	onunload() {
-		// Cleanup
+		console.log('Unloading plugin Expense Manager')
+		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 	}
 
 	async loadSettings() {

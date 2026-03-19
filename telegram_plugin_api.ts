@@ -15,4 +15,9 @@ export interface ITelegramBotPluginAPIv1 {
 
 	sendMessage(text: string): Promise<void>;
 
+	/**
+	 * Removes all handlers (command, text, file) associated with the specified unit name.
+	 * Call this when a unit is unloaded or no longer needs to handle Telegram events.
+	 */
+	disposeHandlersForUnit(unit_name: string): void;
 }
