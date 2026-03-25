@@ -562,6 +562,14 @@ export class ExpenseService {
 		return this.app.vault.create(filepath, content);
 	}
 
+	hydrateReportWithBudgetState(
+		report: PeriodReport,
+		budgetLimit: number | null,
+		alertState: ReportBudgetAlertState,
+	): PeriodReport {
+		return this.applyPersistedBudgetState(report, budgetLimit, alertState);
+	}
+
 	async findReportFile(
 		periodKind: ReportPeriodKind,
 		startDate: Date,
@@ -614,6 +622,56 @@ export class ExpenseService {
 			return null;
 		}
 		return this.readReportBudget(reportFile);
+	}
+
+	async getReportBudgetAlertState(file: TFile): Promise<ReportBudgetAlertState> {
+		return this.readReportBudgetAlertState(file);
+	}
+
+	createBudgetAlertStatePatch(
+		currentState: ReportBudgetAlertState,
+		alertLevel: ReportBudgetAlertLevel,
+		timestamp = new Date().toISOString(),
+	): ReportBudgetAlertState {
+		if (alertLevel === 'critical') {
+			return {
+				sentWarning: true,
+				sentForecast: true,
+				sentCritical: true,
+				lastAlertAt: timestamp,
+			};
+		}
+
+		if (alertLevel === 'forecast') {
+			return {
+				...currentState,
+				sentForecast: true,
+				lastAlertAt: timestamp,
+			};
+		}
+
+		if (alertLevel === 'warning') {
+			return {
+				...currentState,
+				sentWarning: true,
+				lastAlertAt: timestamp,
+			};
+		}
+
+		return currentState;
+	}
+
+	async updateReportBudgetAlertState(file: TFile, state: ReportBudgetAlertState): Promise<void> {
+		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+			frontmatter.budget_alert_state_warning_sent = state.sentWarning;
+			frontmatter.budget_alert_state_forecast_sent = state.sentForecast;
+			frontmatter.budget_alert_state_critical_sent = state.sentCritical;
+			if (state.lastAlertAt) {
+				frontmatter.budget_alert_state_last_alert_at = state.lastAlertAt;
+			} else {
+				delete frontmatter.budget_alert_state_last_alert_at;
+			}
+		});
 	}
 
 	isTransactionFile(file: TFile): boolean {

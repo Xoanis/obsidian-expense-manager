@@ -1,247 +1,341 @@
 # Expense Manager for Obsidian
 
-A comprehensive expense and income tracking plugin for Obsidian with support for multiple input methods including QR code receipts, manual entry, and Telegram bot integration.
+`Expense Manager` is an Obsidian plugin for personal finance tracking inside your vault.
 
-## Features
+It can work in three modes:
+- standalone markdown finance tracker
+- finance domain plugin on top of `para_core_plugin`
+- finance layer with Telegram input and reporting when `obsidian-telegram-bot` is installed
 
-### 📝 Multiple Input Methods
-- **Manual Entry**: Quick modal interface for adding expenses and income
-- **QR Code Receipts**: Scan receipt QR codes using [proverkacheka.com](https://proverkacheka.com) API
-- **Telegram Bot**: Add expenses/income via Telegram messages (requires Telegram Bot plugin)
+The plugin stores every transaction as a note, builds period reports from transactions, keeps balances cumulative across periods, and exposes the same finance context in notes, dashboard widgets, and Telegram.
 
-### 📊 Analytics & Reports
-- Monthly expense reports with category breakdowns
-- Visual charts and graphs (powered by Chart.js)
-- Transaction lists with filtering capabilities
-- Summary cards showing total income, expenses, and balance
+## What it does
 
-### 💾 Data Storage
-- Each transaction is stored as a separate markdown file
-- YAML frontmatter for easy querying and filtering
-- Organized in configurable folder structure
+- create expense and income notes
+- save receipt images and QR-based transactions
+- build monthly, quarterly, half-year, yearly, and custom reports
+- keep report balances cumulative instead of `income - expense` for only one period
+- maintain report notes automatically when transactions change
+- support budgets on report notes
+- compute budget alerts: `warning`, `forecast`, `critical`
+- show monthly finance reports in Telegram with sections, charts, and month navigation
+- register finance contributions for PARA projects, areas, dashboard, and Telegram cards when PARA Core is available
 
-### 🔧 Extensible Architecture
-- Handler-based design allows adding new input methods
-- Future support planned for PDF bank statements
-- Category management with predefined and custom tags
+## Companion plugins
+
+### Optional but recommended
+
+- `para_core_plugin`
+  - enables finance as a domain plugin
+  - stores finance records inside PARA records structure
+  - adds dashboard and template contributions
+  - enables linked `project` and `area` context
+
+- `obsidian-telegram-bot`
+  - enables Telegram input flows
+  - enables `/finance_summary` and `/finance_report`
+  - enables inline keyboard navigation and PNG charts in Telegram
+
+### Optional for QR enrichment
+
+- [proverkacheka.com](https://proverkacheka.com)
+  - used only when QR receipt parsing via external API is enabled
+  - local-only QR mode is also supported
 
 ## Installation
 
-### From Community Plugins (Pending)
-1. Open Obsidian Settings
-2. Go to Community plugins
-3. Search for "Expense Manager"
-4. Click Install and Enable
+### Manual install
 
-### Manual Installation
-1. Download the latest release from GitHub
-2. Extract files to `<vault>/.obsidian/plugins/expense-manager/`
-3. Enable the plugin in Obsidian Settings → Community plugins
-
-## Configuration
-
-### Required Settings
-
-**ProverkaCheka API Token** (for QR code processing):
-1. Register at [proverkacheka.com](https://proverkacheka.com)
-2. Get your API token from dashboard
-3. Enter it in plugin settings
-
-⚠️ **Important**: The service uses `token` parameter (not `api_key`) for authentication.
-
-### Optional Settings
-
-- **Expense Folder**: Where transaction files are stored (default: `Expenses`)
-- **Default Currency**: Your primary currency (default: `RUB`)
-- **Auto-save QR**: Skip review after QR processing (default: disabled)
-- **Categories**: Manage predefined expense and income categories
-- **Telegram Integration**: Enable/disable Telegram bot features
-
-## Usage
-
-### Adding Expenses
-
-#### Method 1: Command Palette
-1. Press `Ctrl/Cmd + P`
-2. Select "Expense Manager: Add expense"
-3. Fill in the form and save
-
-#### Method 2: Ribbon Icon
-1. Click the wallet icon in the left ribbon
-2. Fill in expense details
-3. Save
-
-#### Method 3: QR Code Receipt
-1. Press `Ctrl/Cmd + P`
-2. Select "Expense Manager: Add expense via QR code"
-3. Upload receipt image or drag & drop
-4. Review processed data (or auto-save if enabled)
-5. Edit if needed and save
-
-#### Method 4: Telegram Bot
-If you have the Telegram Bot plugin installed:
-```
-/expense 500 Lunch at cafe
-/income 50000 Salary
-```
-
-### Generating Reports
-
-1. Press `Ctrl/Cmd + P`
-2. Select "Expense Manager: Generate monthly expense report"
-3. View summary cards, category breakdown, and transaction list
-
-### Data Structure
-
-Each transaction creates a markdown file with this structure:
-
-```markdown
----
-type: expense
-amount: 1500.00
-currency: RUB
-dateTime: 2024-03-13T14:30:00
-comment: "Grocery shopping"
-tags: ["groceries", "food"]
-category: "Food"
-source: qr
----
-
-# Expense: Grocery shopping
-
-**Date:** 2024-03-13 14:30
-**Amount:** 1500.00 RUB
-**Category:** Food
-**Source:** qr
-
-## Items
-- Milk: 100.00 x 1 = 100.00
-- Bread: 50.00 x 2 = 100.00
-- ...
-```
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `Add expense` | Open modal to add new expense |
-| `Add income` | Open modal to add new income |
-| `Add expense via QR code` | Process receipt QR code |
-| `Generate monthly expense report` | View current month analytics |
-
-## Keyboard Shortcuts
-
-You can assign hotkeys to any command:
-1. Settings → Hotkeys
-2. Search for "Expense Manager"
-3. Assign your preferred shortcuts
-
-## Privacy & Security
-
-- All data stored locally in your vault
-- QR code images sent to proverkacheka.com API only when processing
-- No telemetry or data collection
-- Telegram integration requires separate Telegram Bot plugin
-
-## Technical Details
-
-### Dependencies
-- **Chart.js**: For analytics visualization
-- **proverkacheka.com API**: For QR code receipt processing
-
-### File Naming Convention
-Transactions are named automatically:
-```
-YYYY-MM-DD-HH-mm-ss-type-amount-comment.md
-```
-
-Example: `2024-03-13-14-30-00-exp-1500-grocery-shopping.md`
-
-### Supported Image Formats for QR
-- JPG/JPEG
-- PNG
-- WEBP
-- GIF
-
-## Troubleshooting
-
-### QR Code Processing Fails
-- Verify API token is correct in settings (check for extra spaces)
-- Ensure you're using `token` parameter format, not `api_key`
-- Check image quality (QR code must be clearly visible)
-- Ensure image format is supported (JPG, PNG, WEBP)
-- Check internet connection
-- If error says "still being processed", wait a few seconds and try again
-- If "limit exceeded", wait until your quota resets
-
-### Plugin Doesn't Load
-- Ensure `main.js`, `manifest.json`, and `styles.css` are in correct location
-- Check Obsidian version (requires 0.15.0+)
-- Try disabling and re-enabling plugin
-
-### Telegram Integration Not Working
-- Install Telegram Bot plugin first
-- Enable Telegram integration in Expense Manager settings
-- Restart Obsidian after enabling
-
-## Development
-
-### Build from Source
+1. Build the plugin:
 
 ```bash
 npm install
-npm run dev      # Development mode (watch)
-npm run build    # Production build
+npm run build
 ```
 
-### Project Structure
-```
-src/
-  commands/          # Command implementations
-  handlers/          # Input method handlers
-  services/          # Business logic
-  ui/                # Modal components
-  utils/             # Utility functions
-  main.ts            # Plugin entry point
-  settings.ts        # Settings interface
-  types.ts           # TypeScript types
+2. Copy these files into your vault plugin folder:
+
+```text
+<vault>/.obsidian/plugins/expense-manager/
+  main.js
+  manifest.json
 ```
 
-## Roadmap
+3. Enable the plugin in **Settings → Community plugins**.
 
-### Planned Features
-- [ ] PDF bank statement parsing
-- [ ] Budget tracking and alerts
-- [ ] Recurring transactions
-- [ ] Multi-currency support with exchange rates
-- [ ] Export to CSV/Excel
-- [ ] Advanced filtering and search
-- [ ] Dashboard view with quick stats
-- [ ] Backup and sync utilities
+## Quick start
 
-## Contributing
+### 1. Configure the basics
 
-Contributions welcome! Please:
-1. Fork the repository
-2. Create feature branch
-3. Submit pull request
+Open **Settings → Expense Manager** and set:
+- `Expense folder`
+- `Default currency`
+- QR settings if you use receipt parsing
+- report automation settings
+- budget alert thresholds if you use budgets
+
+### 2. Add transactions
+
+Use one of these commands:
+- `Add expense`
+- `Add income`
+- `Add expense via QR code (receipt)`
+
+### 3. Generate reports
+
+Use:
+- `Open current month finance report`
+- `Save current month finance report`
+- `Generate finance report for custom period`
+
+### 4. Migrate old notes if needed
+
+If you already used an older version of the plugin, run:
+- `Migrate legacy finance notes`
+
+This updates old finance notes to the current schema.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `Add expense` | Create an expense note manually |
+| `Add income` | Create an income note manually |
+| `Add expense via QR code (receipt)` | Parse a receipt image or QR and create a transaction |
+| `Open current month finance report` | Open the current month report in a modal |
+| `Save current month finance report` | Save the current month report note to the vault |
+| `Generate finance report for custom period` | Build a report for any date range |
+| `Migrate legacy finance notes` | Upgrade old finance notes to the current schema |
+
+## Telegram workflow
+
+When `obsidian-telegram-bot` is installed and Telegram integration is enabled, the plugin supports:
+
+### Transaction input
+
+```text
+/expense 500 Lunch
+/income 50000 Salary
+```
+
+You can also add scoped metadata:
+
+```text
+/expense 1200 Taxi | area=Life | project=Trip
+```
+
+And you can send a receipt image with QR code in focused capture flows.
+
+### Reporting
+
+```text
+/finance_summary
+/finance_summary 2026-03
+
+/finance_report
+/finance_report 2026-03
+/finance_report prev
+```
+
+`/finance_report` supports:
+- monthly summary
+- categories
+- top expenses
+- projects
+- areas
+- chart picker
+- month navigation
+
+### Telegram charts
+
+Current PNG charts:
+- `Expense pie`
+- `Year trend`
+- `Balance trend`
+
+## Data model
+
+### Transaction note
+
+Every transaction is stored as a markdown note with frontmatter.
+
+Typical fields:
+
+```yaml
+---
+type: "finance-expense"
+dateTime: 2026-03-25T21:30:00.000Z
+amount: 1250
+currency: "RUB"
+description: "Lunch"
+category: "Food"
+source: "telegram"
+project: "[[Projects/Trip]]"
+area: "[[Areas/Life]]"
+artifact: "[[Finance/Artifacts/receipt-1.jpg]]"
+tags: ["finance","expense","telegram"]
+---
+```
+
+The body is intentionally small. It keeps only useful structured additions such as:
+- `Items`
+- `Artifact`
+
+### Report note
+
+Report notes are generated from transactions and updated by upsert, not recreated blindly.
+
+Important frontmatter fields:
+
+```yaml
+---
+type: "finance-report"
+periodKind: "month"
+periodKey: "2026-Mar"
+periodLabel: "March 2026"
+periodStart: 2026-03-01
+periodEnd: 2026-03-31
+openingBalance: 18500.00
+totalExpenses: 42300.00
+totalIncome: 95000.00
+netChange: 52700.00
+closingBalance: 71200.00
+budget: 50000.00
+budget_spent: 42300.00
+budget_remaining: 7700.00
+budget_usage_percentage: 84.60
+budget_alert_level: "warning"
+---
+```
+
+The report note is not treated as source of truth for calculations. Reports are rebuilt from transaction notes.
+
+## Budgets and budget alerts
+
+Budget is attached to a report note through the `budget` field in frontmatter.
+
+If a report has a budget, the plugin computes:
+- spent
+- remaining
+- usage percentage
+- projected month-end spend for the current month
+- alert level
+
+Current alert levels:
+- `ok`
+- `warning`
+- `forecast`
+- `critical`
+- `none`
+
+Settings:
+- `Enable budget alerts`
+- `Budget warning threshold`
+- `Enable budget forecast alerts`
+- `Forecast alerts start day`
+
+At the moment budget alerts are shown in reports and Telegram summaries.
+The stored `budget_alert_state_*` fields are there to support future proactive Telegram notifications without duplicate spam.
+
+## Automatic reports
+
+The plugin can keep these report types updated automatically:
+- monthly
+- quarterly
+- half-year
+- yearly
+
+Expected behavior:
+- if a report for a period exists, it is updated
+- if it does not exist, it is created
+- following periods are recalculated so cumulative balances stay correct
+- manual edits to transaction notes are picked up on next sync
+
+## QR receipts
+
+Two QR modes are supported:
+
+- local-only decoding
+- API-assisted decoding through `proverkacheka.com`
+
+Receipt artifacts can be stored alongside transactions and linked back from the note.
+
+## PARA Core integration
+
+When `para_core_plugin` is installed, `Expense Manager` acts as a finance domain plugin.
+
+It registers:
+- finance domain
+- note types:
+  - `finance-expense`
+  - `finance-income`
+  - `finance-report`
+- project and area finance summaries
+- template contributions
+- dashboard contributions
+- Telegram card contributions
+
+This means finance becomes part of the same operational layer as your PARA vault instead of living as an isolated tracker.
+
+## Development
+
+### Build
+
+```bash
+npm install
+npm run build
+```
+
+### Dev mode
+
+```bash
+npm run dev
+```
+
+### Generate test data
+
+The repository includes a generator for synthetic finance data across the last two years.
+
+Example:
+
+```bash
+npm run generate:test-finance-data -- "C:\path\to\test-vault" 800
+```
+
+Replace generated notes:
+
+```bash
+node scripts/generate-finance-test-data.mjs "C:\path\to\test-vault" 800 --replace-generated
+```
+
+Useful options:
+- `--months 24`
+- `--seed 12345`
+
+## Privacy
+
+- finance notes are stored locally in your vault
+- no hidden telemetry
+- receipt data is sent to external API only if you enable API-based QR processing
+- Telegram integration depends on the separate Telegram plugin and your own bot setup
+
+## Current scope
+
+Already implemented:
+- standalone finance tracking
+- PARA Core domain integration
+- Telegram v1/v2 compatibility
+- monthly Telegram reports with navigation and PNG charts
+- automatic report sync
+- cumulative balances
+- budget alerts
+- legacy note migration
+
+Not implemented yet:
+- proactive budget alert push messages in Telegram
+- dedicated budget management UX beyond frontmatter editing
+- PDF export for Telegram finance reports
 
 ## License
 
-MIT License - See LICENSE file for details
-
-## Support
-
-- **Issues**: Report bugs on GitHub Issues
-- **Discussions**: Feature requests and questions on GitHub Discussions
-- **Documentation**: Check this README and Obsidian help docs
-
-## Acknowledgments
-
-- Built with [Obsidian Sample Plugin](https://github.com/obsidianmd/obsidian-sample-plugin)
-- QR processing powered by [proverkacheka.com](https://proverkacheka.com)
-- Charts powered by [Chart.js](https://www.chartjs.org/)
-
----
-
-**Made with ❤️ for the Obsidian community**
+MIT

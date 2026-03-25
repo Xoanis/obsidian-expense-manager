@@ -22,6 +22,7 @@ import { FinanceTelegramBridgeV2 } from './src/integrations/telegram-v2/finance-
 import { getTelegramBotApiV2, TelegramBotApiV2 } from './src/integrations/telegram-v2/client';
 import { ReportSyncService } from './src/services/report-sync-service';
 import { TelegramChartService } from './src/services/telegram-chart-service';
+import { TelegramBudgetAlertService } from './src/services/telegram-budget-alert-service';
 import { MigrationService } from './src/services/migration-service';
 import { ReportPeriodModal } from './src/ui/report-period-modal';
 import { ReportsModal } from './src/ui/reports-modal';
@@ -49,6 +50,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private financeDomain: RegisteredParaDomain | null = null;
 	private reportSyncService!: ReportSyncService;
 	private telegramChartService!: TelegramChartService;
+	private telegramBudgetAlertService!: TelegramBudgetAlertService;
 
 	async onload() {
 		await this.loadSettings();
@@ -59,7 +61,13 @@ export default class ExpenseManagerPlugin extends Plugin {
 		// Initialize services
 		this.expenseService = new ExpenseService(this.app, this.settings, this.paraCoreApi, this.financeDomain);
 		this.analyticsService = new AnalyticsService(this.expenseService);
-		this.reportSyncService = new ReportSyncService(this.app, this.expenseService, this.settings);
+		this.telegramBudgetAlertService = new TelegramBudgetAlertService(this.app, this.settings);
+		this.reportSyncService = new ReportSyncService(
+			this.app,
+			this.expenseService,
+			this.settings,
+			this.telegramBudgetAlertService,
+		);
 		this.telegramChartService = new TelegramChartService(this.reportSyncService);
 		this.registerParaCoreTelegramCardContributions();
 
@@ -111,7 +119,13 @@ export default class ExpenseManagerPlugin extends Plugin {
 		);
 		this.analyticsService = new AnalyticsService(this.expenseService);
 		this.reportSyncService?.destroy();
-		this.reportSyncService = new ReportSyncService(this.app, this.expenseService, this.settings);
+		this.telegramBudgetAlertService = new TelegramBudgetAlertService(this.app, this.settings);
+		this.reportSyncService = new ReportSyncService(
+			this.app,
+			this.expenseService,
+			this.settings,
+			this.telegramBudgetAlertService,
+		);
 		this.telegramChartService = new TelegramChartService(this.reportSyncService);
 		this.registerParaCoreTelegramCardContributions();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
@@ -136,6 +150,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerFinanceTemplateContributions(
 			this.paraCoreApi,
 			`${this.financeDomain.recordsPath}/Transactions`,
+			this.settings.dashboardContributionMode,
 		);
 		this.registerParaCoreMetadataContributions();
 		console.log('Expense Manager: registered PARA Core template contributions');
@@ -582,6 +597,30 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 						this.plugin.settings.budgetForecastStartDay = Math.max(1, Math.min(31, Math.round(parsed)));
 						await this.plugin.saveSettings();
 					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Dashboard contribution mode')
+			.setDesc('Choose between a lighter dashboard and the full interactive finance dashboard')
+			.addDropdown(dropdown => dropdown
+				.addOption('simple', 'Simple')
+				.addOption('interactive', 'Interactive')
+				.setValue(this.plugin.settings.dashboardContributionMode)
+				.onChange(async (value) => {
+					if (value === 'simple' || value === 'interactive') {
+						this.plugin.settings.dashboardContributionMode = value;
+						await this.plugin.saveSettings();
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Proactive Telegram budget alerts')
+			.setDesc('Send Telegram notifications for current-month budget crossing events: warning, forecast, critical')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.sendProactiveTelegramBudgetAlerts)
+				.onChange(async (value) => {
+					this.plugin.settings.sendProactiveTelegramBudgetAlerts = value;
+					await this.plugin.saveSettings();
 				}));
 
 		// Telegram integration

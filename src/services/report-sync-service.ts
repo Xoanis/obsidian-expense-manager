@@ -1,7 +1,8 @@
 import { App, TAbstractFile, TFile } from 'obsidian';
 import { ExpenseManagerSettings } from '../settings';
 import { ExpenseService } from './expense-service';
-import { PeriodReport, ReportPeriodDescriptor } from '../types';
+import { PeriodReport, ReportPeriodDescriptor, ReportBudgetAlertLevel, ReportBudgetAlertState } from '../types';
+import { TelegramBudgetAlertService } from './telegram-budget-alert-service';
 import {
 	createCustomPeriodDescriptor,
 	enumeratePeriodsInRange,
@@ -17,6 +18,7 @@ export class ReportSyncService {
 		private readonly app: App,
 		private readonly expenseService: ExpenseService,
 		private readonly settings: ExpenseManagerSettings,
+		private readonly telegramBudgetAlertService?: TelegramBudgetAlertService,
 	) {}
 
 	async initialize(): Promise<void> {
@@ -79,13 +81,32 @@ export class ReportSyncService {
 			for (const kind of enabledKinds) {
 				const descriptors = enumeratePeriodsInRange(kind, earliestDate, now, true);
 				for (const descriptor of descriptors) {
+					const existingFile = await this.expenseService.findReportFile(
+						descriptor.kind,
+						descriptor.startDate,
+						descriptor.endDate,
+					);
 					const budget = await this.expenseService.getExistingBudgetForDescriptor(descriptor);
+					const existingState = existingFile
+						? await this.expenseService.getReportBudgetAlertState(existingFile)
+						: {
+							sentWarning: false,
+							sentForecast: false,
+							sentCritical: false,
+							lastAlertAt: null,
+						};
 					const report = this.expenseService.buildPeriodReportFromTransactions(
 						allTransactions,
 						descriptor,
 						budget,
 					);
-					const file = await this.expenseService.upsertReportFile(report);
+					const hydratedReport = this.expenseService.hydrateReportWithBudgetState(
+						report,
+						budget,
+						existingState,
+					);
+					const file = await this.expenseService.upsertReportFile(hydratedReport, { existingFile });
+					await this.maybeSendBudgetAlert(file, hydratedReport, existingState, now);
 					savedFiles.push(file);
 				}
 			}
@@ -121,5 +142,52 @@ export class ReportSyncService {
 		const allTransactions = await this.expenseService.getAllTransactions();
 		const budget = await this.expenseService.getExistingBudgetForDescriptor(descriptor);
 		return this.expenseService.buildPeriodReportFromTransactions(allTransactions, descriptor, budget);
+	}
+
+	private async maybeSendBudgetAlert(
+		file: TFile,
+		report: PeriodReport,
+		existingState: ReportBudgetAlertState,
+		now: Date,
+	): Promise<void> {
+		if (!this.telegramBudgetAlertService || !this.settings.sendProactiveTelegramBudgetAlerts) {
+			return;
+		}
+		if (!report.budget || report.periodKind !== 'month') {
+			return;
+		}
+		if (!this.isCurrentMonthlyReport(report, now)) {
+			return;
+		}
+
+		const alertLevel = report.budget.alertLevel;
+		if (!this.shouldSendAlert(alertLevel, existingState)) {
+			return;
+		}
+
+		const sent = await this.telegramBudgetAlertService.sendBudgetAlert(report, alertLevel);
+		if (!sent) {
+			return;
+		}
+
+		const nextState = this.expenseService.createBudgetAlertStatePatch(existingState, alertLevel, now.toISOString());
+		await this.expenseService.updateReportBudgetAlertState(file, nextState);
+	}
+
+	private isCurrentMonthlyReport(report: PeriodReport, now: Date): boolean {
+		return now.getTime() >= report.startDate.getTime() && now.getTime() <= report.endDate.getTime();
+	}
+
+	private shouldSendAlert(level: ReportBudgetAlertLevel, state: ReportBudgetAlertState): boolean {
+		if (level === 'critical') {
+			return !state.sentCritical;
+		}
+		if (level === 'forecast') {
+			return !state.sentForecast;
+		}
+		if (level === 'warning') {
+			return !state.sentWarning;
+		}
+		return false;
 	}
 }

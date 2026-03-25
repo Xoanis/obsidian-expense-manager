@@ -1,5 +1,7 @@
 import { TransactionType } from './types';
 
+export type DashboardContributionMode = 'simple' | 'interactive';
+
 /**
  * Plugin settings interface
  */
@@ -63,6 +65,12 @@ export interface ExpenseManagerSettings {
 
 	/** Start forecast alerts after this calendar day of month */
 	budgetForecastStartDay: number;
+
+	/** Dashboard contribution complexity mode */
+	dashboardContributionMode: DashboardContributionMode;
+
+	/** Send proactive Telegram budget alerts for current monthly report */
+	sendProactiveTelegramBudgetAlerts: boolean;
 }
 
 /**
@@ -104,4 +112,6 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	budgetAlertWarningThresholdPercent: 80,
 	enableBudgetForecastAlerts: true,
 	budgetForecastStartDay: 5,
+	dashboardContributionMode: 'interactive',
+	sendProactiveTelegramBudgetAlerts: false,
 };
