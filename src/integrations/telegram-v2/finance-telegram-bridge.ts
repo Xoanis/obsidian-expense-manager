@@ -1,7 +1,19 @@
 import { App, TFile } from 'obsidian';
-import { ExpenseService } from '../../services/expense-service';
+import { DuplicateTransactionError, ExpenseService } from '../../services/expense-service';
+import { ReportSyncService } from '../../services/report-sync-service';
+import {
+	TelegramChartService,
+	TelegramChartType,
+	TELEGRAM_CHART_DESCRIPTORS,
+} from '../../services/telegram-chart-service';
 import { ExpenseManagerSettings } from '../../settings';
 import { TransactionData, TransactionType } from '../../types';
+import {
+	formatMonthlyReportMessages,
+	formatMonthlySectionMessage,
+	formatMonthlySummaryMessage,
+	MonthlyReportSection,
+} from '../../utils/report-formatters';
 import { ProverkaChekaClient } from '../../utils/api-client';
 import { PLUGIN_UNIT_NAME } from '../../utils/constants';
 import {
@@ -18,9 +30,13 @@ import {
 import { IParaCoreApi } from '../para-core/types';
 
 const CALLBACK_ACTIONS = {
-	startCapture: 'start-capture',
-	projectBudgetPrompt: 'project-budget-prompt',
+	startCapture: 'sc',
+	projectBudgetPrompt: 'pb',
+	monthlyReportOpen: 'mr',
+	monthlyChartSend: 'mc',
 } as const;
+
+const CALLBACK_UNIT_ALIAS = 'f';
 
 type CaptureTarget = 'project' | 'area' | 'generic';
 
@@ -32,12 +48,15 @@ interface ParsedTelegramTransactionInput {
 }
 
 interface CallbackTokenState {
-	kind: 'capture' | 'project-budget';
-	path: string;
-	page: number;
+	kind: 'capture' | 'project-budget' | 'monthly-report' | 'monthly-chart';
 	createdAt: number;
+	path?: string;
+	page?: number;
 	transactionType?: TransactionType;
 	target?: Exclude<CaptureTarget, 'generic'>;
+	monthKey?: string;
+	section?: MonthlyReportSection;
+	chartType?: TelegramChartType;
 }
 
 interface CaptureStartOptions {
@@ -59,6 +78,8 @@ export class FinanceTelegramBridgeV2 {
 	constructor(
 		private readonly app: App,
 		private readonly expenseService: ExpenseService,
+		private readonly reportSyncService: ReportSyncService,
+		private readonly telegramChartService: TelegramChartService,
 		private readonly settings: ExpenseManagerSettings,
 	) {
 		this.api = getTelegramBotApiV2(app);
@@ -136,6 +157,56 @@ export class FinanceTelegramBridgeV2 {
 		}
 
 		const command = message.command.name.toLowerCase();
+		if (command === 'finance_summary') {
+			try {
+				const reportDate = this.parseMonthlyReportArgument(message.command.args);
+				const report = await this.reportSyncService.generateStandardPeriodReport('month', reportDate);
+				const previousReport = await this.reportSyncService.generateStandardPeriodReport(
+					'month',
+					new Date(reportDate.getFullYear(), reportDate.getMonth() - 1, 1),
+				);
+				return {
+					processed: true,
+					answer: formatMonthlySummaryMessage(report, previousReport),
+				};
+			} catch (error) {
+				return {
+					processed: true,
+					answer: `Error generating finance summary: ${(error as Error).message}`,
+				};
+			}
+		}
+		if (command === 'finance_report') {
+			try {
+				const reportDate = this.parseMonthlyReportArgument(message.command.args);
+				if (!this.api) {
+					const report = await this.reportSyncService.generateStandardPeriodReport('month', reportDate);
+					const previousReport = await this.reportSyncService.generateStandardPeriodReport(
+						'month',
+						new Date(reportDate.getFullYear(), reportDate.getMonth() - 1, 1),
+					);
+					const messages = formatMonthlyReportMessages(report, previousReport);
+					return {
+						processed: true,
+						answer: messages[0] ?? 'No data for this month.',
+					};
+				}
+
+				await this.sendOrEditMonthlyReport({
+					date: reportDate,
+					section: 'summary',
+				});
+				return {
+					processed: true,
+					answer: null,
+				};
+			} catch (error) {
+				return {
+					processed: true,
+					answer: `Error generating finance report: ${(error as Error).message}`,
+				};
+			}
+		}
 		if (command !== 'expense' && command !== 'income') {
 			return { processed: false, answer: null };
 		}
@@ -172,6 +243,12 @@ export class FinanceTelegramBridgeV2 {
 				answer: this.formatSuccessMessage(data, 'Saved from command.'),
 			};
 		} catch (error) {
+			if (error instanceof DuplicateTransactionError) {
+				return {
+					processed: true,
+					answer: 'Duplicate transaction found. Skipping save.',
+				};
+			}
 			return {
 				processed: true,
 				answer: `Error saving transaction: ${(error as Error).message}`,
@@ -187,9 +264,7 @@ export class FinanceTelegramBridgeV2 {
 			return { processed: false, answer: null };
 		}
 
-		const payload = this.api.decodeCallbackPayload
-			? this.api.decodeCallbackPayload(callback.data)
-			: this.tryDecodeCallbackPayload(callback.data);
+		const payload = this.decodeCallbackPayload(callback.data);
 		if (!payload || payload.unit !== PLUGIN_UNIT_NAME) {
 			return { processed: false, answer: null };
 		}
@@ -200,7 +275,7 @@ export class FinanceTelegramBridgeV2 {
 			}
 
 			const state = this.callbackTokens.get(payload.token);
-			if (!state || state.kind !== 'project-budget') {
+			if (!state || state.kind !== 'project-budget' || !state.path || typeof state.page !== 'number') {
 				return { processed: true, answer: 'Budget action expired. Open the metadata menu again and retry.' };
 			}
 
@@ -216,12 +291,63 @@ export class FinanceTelegramBridgeV2 {
 			};
 		}
 
+		if (payload.action === CALLBACK_ACTIONS.monthlyReportOpen) {
+			if (!payload.token) {
+				return { processed: true, answer: 'Report action is missing context.' };
+			}
+
+			const state = this.callbackTokens.get(payload.token);
+			if (!state || state.kind !== 'monthly-report' || !state.monthKey) {
+				return { processed: true, answer: 'Report action expired. Run /finance_report again.' };
+			}
+
+			try {
+				await this.sendOrEditMonthlyReport({
+					date: this.parseMonthKey(state.monthKey),
+					section: state.section ?? 'summary',
+					messageId: callback.messageId,
+				});
+				await this.api.answerCallbackQuery?.(callback.callbackId);
+				return { processed: true, answer: null };
+			} catch (error) {
+				return {
+					processed: true,
+					answer: `Error opening finance report: ${(error as Error).message}`,
+				};
+			}
+		}
+
+		if (payload.action === CALLBACK_ACTIONS.monthlyChartSend) {
+			if (!payload.token) {
+				return { processed: true, answer: 'Chart action is missing context.' };
+			}
+
+			const state = this.callbackTokens.get(payload.token);
+			if (!state || state.kind !== 'monthly-chart' || !state.monthKey || !state.chartType) {
+				return { processed: true, answer: 'Chart action expired. Open /finance_report again.' };
+			}
+
+			try {
+				const sent = await this.sendMonthlyReportChart(this.parseMonthKey(state.monthKey), state.chartType);
+				await this.api.answerCallbackQuery?.(
+					callback.callbackId,
+					sent ? 'Chart sent' : 'No data for this chart',
+				);
+				return { processed: true, answer: null };
+			} catch (error) {
+				return {
+					processed: true,
+					answer: `Error generating chart: ${(error as Error).message}`,
+				};
+			}
+		}
+
 		if (payload.action !== CALLBACK_ACTIONS.startCapture || !payload.token) {
 			return { processed: false, answer: null };
 		}
 
 		const state = this.callbackTokens.get(payload.token);
-		if (!state || state.kind !== 'capture') {
+		if (!state || state.kind !== 'capture' || !state.path || typeof state.page !== 'number') {
 			return { processed: true, answer: 'Finance action expired. Open the card again and retry.' };
 		}
 
@@ -309,6 +435,12 @@ export class FinanceTelegramBridgeV2 {
 				answer: this.formatSuccessMessage(data, 'Saved from focused input.'),
 			};
 		} catch (error) {
+			if (error instanceof DuplicateTransactionError) {
+				return {
+					processed: true,
+					answer: 'Duplicate transaction found. Skipping save.',
+				};
+			}
 			return {
 				processed: true,
 				answer: `Error saving transaction: ${(error as Error).message}`,
@@ -368,8 +500,11 @@ export class FinanceTelegramBridgeV2 {
 			result.data.area = captionMetadata.area ?? this.getFocusContextString(focus, 'area') ?? undefined;
 			result.data.project = captionMetadata.project ?? this.getFocusContextString(focus, 'project') ?? undefined;
 			if (captionMetadata.comment) {
-				result.data.comment = captionMetadata.comment;
+				result.data.description = captionMetadata.comment;
 			}
+			result.data.artifactBytes = arrayBuffer;
+			result.data.artifactFileName = file.suggestedName;
+			result.data.artifactMimeType = file.mimeType;
 
 			await this.expenseService.createTransaction(result.data);
 			return {
@@ -378,6 +513,17 @@ export class FinanceTelegramBridgeV2 {
 					result.data,
 					result.source === 'api' ? 'Saved from receipt via API.' : 'Saved from local QR.',
 				),
+			};
+		} catch (error) {
+			if (error instanceof DuplicateTransactionError) {
+				return {
+					processed: true,
+					answer: 'Duplicate transaction found. Skipping save.',
+				};
+			}
+			return {
+				processed: true,
+				answer: `Error saving receipt transaction: ${(error as Error).message}`,
 			};
 		} finally {
 			await this.app.vault.delete(savedFile);
@@ -422,6 +568,110 @@ export class FinanceTelegramBridgeV2 {
 		);
 	}
 
+	private async sendOrEditMonthlyReport(options: {
+		date: Date;
+		section: MonthlyReportSection;
+		messageId?: number;
+	}): Promise<void> {
+		if (!this.api) {
+			return;
+		}
+
+		const report = await this.reportSyncService.generateStandardPeriodReport('month', options.date);
+		const previousReport = await this.reportSyncService.generateStandardPeriodReport(
+			'month',
+			new Date(options.date.getFullYear(), options.date.getMonth() - 1, 1),
+		);
+		const text = formatMonthlySectionMessage(report, options.section, previousReport);
+		const inlineKeyboard = this.buildMonthlyReportKeyboard(options.date, options.section);
+
+		if (typeof options.messageId === 'number' && this.api.editMessage) {
+			await this.api.editMessage(options.messageId, text, { inlineKeyboard });
+			return;
+		}
+
+		await this.api.sendMessage(text, { inlineKeyboard });
+	}
+
+	private buildMonthlyReportKeyboard(date: Date, activeSection: MonthlyReportSection): TelegramInlineKeyboard {
+		if (activeSection === 'charts') {
+			return this.buildMonthlyChartKeyboard(date);
+		}
+
+		const previousDate = new Date(date.getFullYear(), date.getMonth() - 1, 1);
+		const nextDate = new Date(date.getFullYear(), date.getMonth() + 1, 1);
+		return [
+			[
+				this.buildMonthlyReportButton('Prev', previousDate, activeSection),
+				this.buildMonthlyReportButton('Next', nextDate, activeSection),
+			],
+			[
+				this.buildMonthlyReportButton(activeSection === 'summary' ? 'Summary •' : 'Summary', date, 'summary'),
+				this.buildMonthlyReportButton(activeSection === 'categories' ? 'Categories •' : 'Categories', date, 'categories'),
+				this.buildMonthlyReportButton(activeSection === 'top-expenses' ? 'Top •' : 'Top', date, 'top-expenses'),
+			],
+			[
+				this.buildMonthlyReportButton(activeSection === 'projects' ? 'Projects •' : 'Projects', date, 'projects'),
+				this.buildMonthlyReportButton(activeSection === 'areas' ? 'Areas •' : 'Areas', date, 'areas'),
+				this.buildMonthlyReportButton('Charts', date, 'charts'),
+			],
+		];
+	}
+
+	private buildMonthlyChartKeyboard(date: Date): TelegramInlineKeyboard {
+		const previousDate = new Date(date.getFullYear(), date.getMonth() - 1, 1);
+		const nextDate = new Date(date.getFullYear(), date.getMonth() + 1, 1);
+		const chartButtons = TELEGRAM_CHART_DESCRIPTORS.map((chart) => this.buildMonthlyChartButton(chart.label, date, chart.type));
+		return [
+			[
+				this.buildMonthlyReportButton('Prev', previousDate, 'charts'),
+				this.buildMonthlyReportButton('Next', nextDate, 'charts'),
+			],
+			chartButtons,
+			[
+				this.buildMonthlyReportButton('Back', date, 'summary'),
+			],
+		];
+	}
+
+	private buildMonthlyReportButton(
+		text: string,
+		date: Date,
+		section: MonthlyReportSection,
+	) {
+		return {
+			text,
+			callbackData: this.encodeCallbackPayload({
+				unit: PLUGIN_UNIT_NAME,
+				action: CALLBACK_ACTIONS.monthlyReportOpen,
+				token: this.createCallbackToken({
+					kind: 'monthly-report',
+					monthKey: this.toMonthKey(date),
+					section,
+				}),
+			}),
+		};
+	}
+
+	private buildMonthlyChartButton(
+		text: string,
+		date: Date,
+		type: TelegramChartType,
+	) {
+		return {
+			text,
+			callbackData: this.encodeCallbackPayload({
+				unit: PLUGIN_UNIT_NAME,
+				action: CALLBACK_ACTIONS.monthlyChartSend,
+				token: this.createCallbackToken({
+					kind: 'monthly-chart',
+					monthKey: this.toMonthKey(date),
+					chartType: type,
+				}),
+			}),
+		};
+	}
+
 	private async renderProjectSection(path: string): Promise<string | null> {
 		const file = this.app.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile)) {
@@ -449,13 +699,31 @@ export class FinanceTelegramBridgeV2 {
 			lines.push('', 'Recent transactions:');
 			for (const transaction of summary.recentTransactions.slice(0, 3)) {
 				const sign = transaction.type === 'expense' ? '-' : '+';
-				lines.push(
-					`- ${transaction.dateTime.slice(0, 10)} ${sign}${transaction.amount.toFixed(2)} ${transaction.currency} ${transaction.comment}`,
-				);
+			lines.push(
+				`- ${transaction.dateTime.slice(0, 10)} ${sign}${transaction.amount.toFixed(2)} ${transaction.currency} ${transaction.description}`,
+			);
 			}
 		}
 
 		return lines.join('\n');
+	}
+
+	private async sendMonthlyReportChart(date: Date, type: TelegramChartType): Promise<boolean> {
+		if (!this.api?.sendPhoto) {
+			return false;
+		}
+
+		const report = await this.reportSyncService.generateStandardPeriodReport('month', date);
+		const chart = await this.telegramChartService.renderMonthlyChart(report, type);
+		if (!chart) {
+			return false;
+		}
+
+		await this.api.sendPhoto(chart.bytes, {
+			caption: chart.caption,
+			fileName: chart.fileName,
+		});
+		return true;
 	}
 
 	private async renderAreaSection(path: string): Promise<string | null> {
@@ -479,7 +747,7 @@ export class FinanceTelegramBridgeV2 {
 			for (const transaction of summary.recentTransactions.slice(0, 3)) {
 				const sign = transaction.type === 'expense' ? '-' : '+';
 				lines.push(
-					`- ${transaction.dateTime.slice(0, 10)} ${sign}${transaction.amount.toFixed(2)} ${transaction.currency} ${transaction.comment}`,
+					`- ${transaction.dateTime.slice(0, 10)} ${sign}${transaction.amount.toFixed(2)} ${transaction.currency} ${transaction.description}`,
 				);
 			}
 		}
@@ -567,6 +835,41 @@ export class FinanceTelegramBridgeV2 {
 		};
 	}
 
+	private parseMonthlyReportArgument(rawArgs: string | undefined): Date {
+		const value = rawArgs?.trim().toLowerCase() ?? '';
+		const now = new Date();
+		if (!value || value === 'current' || value === 'now' || value === 'this') {
+			return new Date(now.getFullYear(), now.getMonth(), 1);
+		}
+		if (value === 'prev' || value === 'previous') {
+			return new Date(now.getFullYear(), now.getMonth() - 1, 1);
+		}
+
+		const monthMatch = value.match(/^(\d{4})-(\d{2})$/);
+		if (monthMatch) {
+			const year = Number(monthMatch[1]);
+			const month = Number(monthMatch[2]);
+			if (month >= 1 && month <= 12) {
+				return new Date(year, month - 1, 1);
+			}
+		}
+
+		return new Date(now.getFullYear(), now.getMonth(), 1);
+	}
+
+	private toMonthKey(date: Date): string {
+		return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+	}
+
+	private parseMonthKey(value: string): Date {
+		const match = value.match(/^(\d{4})-(\d{2})$/);
+		if (!match) {
+			const now = new Date();
+			return new Date(now.getFullYear(), now.getMonth(), 1);
+		}
+		return new Date(Number(match[1]), Number(match[2]) - 1, 1);
+	}
+
 	private parseCaption(caption: string): { comment: string; area?: string; project?: string } {
 		const parts = caption
 			.split('|')
@@ -620,7 +923,7 @@ export class FinanceTelegramBridgeV2 {
 			amount,
 			currency: 'RUB',
 			dateTime: new Date().toISOString(),
-			comment,
+			description: comment,
 			area: metadata?.area,
 			project: metadata?.project,
 			tags: ['telegram'],
@@ -643,7 +946,7 @@ export class FinanceTelegramBridgeV2 {
 		const emoji = data.type === 'expense' ? '💸' : '💰';
 		const lines = [
 			`${emoji} Saved: ${data.amount.toFixed(2)} ${data.currency}`,
-			data.comment,
+			data.description,
 			sourceText,
 		];
 		if (data.project) {
@@ -692,13 +995,35 @@ export class FinanceTelegramBridgeV2 {
 	}
 
 	private encodeCallbackPayload(payload: TelegramCallbackPayload): string {
+		if (payload.token) {
+			return `${CALLBACK_UNIT_ALIAS}:${payload.action}:${payload.token}`;
+		}
 		if (!this.api?.encodeCallbackPayload) {
 			return JSON.stringify(payload);
 		}
 		return this.api.encodeCallbackPayload(payload);
 	}
 
-	private tryDecodeCallbackPayload(data: string): TelegramCallbackPayload | null {
+	private decodeCallbackPayload(data: string): TelegramCallbackPayload | null {
+		const compactMatch = data.match(/^([a-z]):([a-z]{2}):([a-z0-9]+)$/i);
+		if (compactMatch) {
+			const [, unitAlias, action, token] = compactMatch;
+			if (unitAlias === CALLBACK_UNIT_ALIAS) {
+				return {
+					unit: PLUGIN_UNIT_NAME,
+					action,
+					token,
+				};
+			}
+		}
+
+		if (this.api?.decodeCallbackPayload) {
+			const decoded = this.api.decodeCallbackPayload(data);
+			if (decoded) {
+				return decoded;
+			}
+		}
+
 		try {
 			return JSON.parse(data) as TelegramCallbackPayload;
 		} catch {

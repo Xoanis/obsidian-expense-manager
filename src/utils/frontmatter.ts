@@ -9,12 +9,13 @@ export function generateFrontmatter(data: TransactionData): string {
 		amount: data.amount,
 		currency: data.currency,
 		dateTime: data.dateTime,
-		comment: data.comment,
+		description: data.description,
 		area: data.area,
 		project: data.project,
 		tags: data.tags,
 		category: data.category || data.tags[0] || 'uncategorized',
-		source: data.source
+		source: data.source,
+		artifact: data.artifact,
 	};
 
 	// Add fiscal document fields if available
@@ -37,6 +38,8 @@ export function generateFrontmatter(data: TransactionData): string {
 		
 		if (Array.isArray(value)) {
 			yaml += `${key}: ${JSON.stringify(value)}\n`;
+		} else if (typeof value === 'string' && isYamlDateLikeField(key)) {
+			yaml += `${key}: ${value}\n`;
 		} else if (typeof value === 'string') {
 			// Escape quotes in strings
 			const escaped = value.replace(/"/g, '\\"');
@@ -53,7 +56,7 @@ export function generateFrontmatter(data: TransactionData): string {
 /**
  * Parse YAML frontmatter from markdown content
  */
-export function parseFrontmatter(content: string): Partial<TransactionData> | null {
+export function parseYamlFrontmatter(content: string): Record<string, unknown> | null {
 	// Check if content starts with frontmatter delimiter
 	if (!content.startsWith('---\n')) {
 		return null;
@@ -105,7 +108,11 @@ export function parseFrontmatter(content: string): Partial<TransactionData> | nu
 		}
 	}
 
-	return parsed as Partial<TransactionData>;
+	return parsed;
+}
+
+export function parseFrontmatter(content: string): Partial<TransactionData> | null {
+	return parseYamlFrontmatter(content) as Partial<TransactionData> | null;
 }
 
 /**
@@ -142,34 +149,23 @@ export function parseDetailsFromContent(content: string): TransactionDetail[] | 
  * Generate markdown content body from transaction data
  */
 export function generateContentBody(data: TransactionData): string {
-	let content = '';
-
-	// Add header
-	content += `# ${data.type === 'expense' ? 'Expense' : 'Income'}: ${data.comment}\n\n`;
-
-	// Add summary info
-	content += `**Date:** ${formatDateTime(data.dateTime)}\n`;
-	content += `**Amount:** ${data.amount.toFixed(2)} ${data.currency}\n`;
-	content += `**Category:** ${data.category || 'uncategorized'}\n`;
-	content += `**Source:** ${data.source}\n\n`;
+	const lines: string[] = [];
 
 	// Add details if available
 	if (data.details && data.details.length > 0) {
-		content += '## Items\n\n';
+		lines.push('## Items', '');
 		for (const detail of data.details) {
 			const lineTotal = (detail.price * detail.quantity).toFixed(2);
-			content += `- ${detail.name}: ${detail.price.toFixed(2)} x ${detail.quantity} = ${lineTotal}\n`;
+			lines.push(`- ${detail.name}: ${detail.price.toFixed(2)} x ${detail.quantity} = ${lineTotal}`);
 		}
-		content += '\n';
+		lines.push('');
 	}
 
-	// Add tags section
-	if (data.tags.length > 0) {
-		content += '## Tags\n\n';
-		content += data.tags.map(tag => `#${tag}`).join(' ') + '\n';
+	if (data.artifact) {
+		lines.push('## Artifact', '', data.artifact, '');
 	}
 
-	return content;
+	return lines.length > 0 ? `${lines.join('\n').trim()}\n` : '';
 }
 
 /**
@@ -197,15 +193,30 @@ export function formatDateTime(isoString: string, format = 'YYYY-MM-DD HH:mm'): 
  */
 export function generateFilename(data: TransactionData): string {
 	const date = new Date(data.dateTime);
-	const dateStr = date.toISOString().split('T')[0]; // YYYY-MM-DD
+	const dateStr = formatLocalDate(date);
 	const timeStr = date.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-mm-ss
 	const typeShort = data.type === 'expense' ? 'exp' : 'inc';
 	const amountStr = data.amount.toFixed(0);
-	const commentShort = data.comment
+	const descriptionShort = data.description
 		.substring(0, 20)
 		.replace(/[^a-zA-Z0-9а-яА-ЯёЁ\s-]/g, '')
 		.replace(/\s+/g, '-')
 		.toLowerCase();
 
-	return `${dateStr}-${timeStr}-${typeShort}-${amountStr}-${commentShort}.md`;
+	return `${dateStr}-${timeStr}-${typeShort}-${amountStr}-${descriptionShort}.md`;
+}
+
+function isYamlDateLikeField(key: string): boolean {
+	return key === 'dateTime'
+		|| key === 'generatedAt'
+		|| key === 'periodStart'
+		|| key === 'periodEnd'
+		|| key === 'created';
+}
+
+function formatLocalDate(date: Date): string {
+	const year = date.getFullYear();
+	const month = String(date.getMonth() + 1).padStart(2, '0');
+	const day = String(date.getDate()).padStart(2, '0');
+	return `${year}-${month}-${day}`;
 }

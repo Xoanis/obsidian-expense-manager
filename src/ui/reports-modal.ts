@@ -33,7 +33,15 @@ export class ReportsModal extends Modal {
 
 		// Summary cards
 		const summaryContainer = contentEl.createDiv({ cls: 'summary-cards' });
-		summaryContainer.style.cssText = 'display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 30px;';
+		summaryContainer.style.cssText = 'display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 30px;';
+
+		const openingCard = summaryContainer.createDiv({ cls: 'summary-card opening' });
+		openingCard.style.cssText = 'padding: 15px; background: var(--background-secondary-alt); border-radius: 8px;';
+		openingCard.createEl('div', { text: '🏦 Opening balance' });
+		openingCard.createEl('div', {
+			text: `${this.report.openingBalance.toFixed(2)} RUB`,
+			cls: 'mod-xl'
+		});
 
 		// Income card
 		const incomeCard = summaryContainer.createDiv({ cls: 'summary-card income' });
@@ -56,11 +64,22 @@ export class ReportsModal extends Modal {
 		// Balance card
 		const balanceCard = summaryContainer.createDiv({ cls: 'summary-card balance' });
 		balanceCard.style.cssText = `padding: 15px; background: ${this.report.balance >= 0 ? 'var(--background-modifier-success)' : 'var(--background-modifier-error)'}; border-radius: 8px; color: white;`;
-		balanceCard.createEl('div', { text: '📊 Balance' });
+		balanceCard.createEl('div', { text: '📊 Closing balance' });
 		balanceCard.createEl('div', { 
 			text: `${this.report.balance.toFixed(2)} RUB`,
 			cls: 'mod-xl'
 		});
+
+		if (this.report.budget) {
+			const budgetCard = contentEl.createDiv({ cls: 'summary-card budget' });
+			budgetCard.style.cssText = 'padding: 15px; background: var(--background-secondary); border-radius: 8px; margin-bottom: 20px;';
+			budgetCard.createEl('div', { text: `Budget: ${this.report.budget.limit.toFixed(2)} RUB` });
+			budgetCard.createEl('div', { text: `Spent: ${this.report.budget.spent.toFixed(2)} RUB` });
+			budgetCard.createEl('div', { text: `Remaining: ${this.report.budget.remaining.toFixed(2)} RUB` });
+			budgetCard.createEl('div', {
+				text: `Used: ${this.report.budget.usagePercentage === null ? '-' : `${this.report.budget.usagePercentage.toFixed(1)}%`}`,
+			});
+		}
 
 		// Category breakdown table
 		contentEl.createEl('h3', { text: 'Category Breakdown' });
@@ -83,7 +102,7 @@ export class ReportsModal extends Modal {
 		const tbody = table.createEl('tbody');
 		
 		// Sort by total descending
-		const sortedCategories = [...this.report.byCategory].sort((a, b) => b.total - a.total);
+		const sortedCategories = [...this.report.expenseByCategory].sort((a, b) => b.total - a.total);
 
 		for (const cat of sortedCategories) {
 			const row = tbody.createEl('tr');
@@ -117,7 +136,7 @@ export class ReportsModal extends Modal {
 						style: 'display: flex; justify-content: space-between; padding: 8px; border-bottom: 1px solid var(--background-modifier-border);'
 					}
 				});
-				item.createEl('div', { text: `${t.comment} (${formatDateTime(t.dateTime)})` });
+				item.createEl('div', { text: `${t.description} (${formatDateTime(t.dateTime)})` });
 				item.createEl('div', { 
 					text: `+${t.amount.toFixed(2)} ${t.currency}`,
 					attr: {
@@ -137,7 +156,7 @@ export class ReportsModal extends Modal {
 						style: 'display: flex; justify-content: space-between; padding: 8px; border-bottom: 1px solid var(--background-modifier-border);'
 					}
 				});
-				item.createEl('div', { text: `${t.comment} (${formatDateTime(t.dateTime)})` });
+				item.createEl('div', { text: `${t.description} (${formatDateTime(t.dateTime)})` });
 				item.createEl('div', { 
 					text: `-${t.amount.toFixed(2)} ${t.currency}`,
 					attr: {

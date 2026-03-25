@@ -11,6 +11,8 @@ import { registerAddIncomeCommand } from './src/commands/add-income';
 import { registerAddQrExpenseCommand } from './src/commands/add-qr-expense';
 import { registerGenerateReportCommand } from './src/commands/generate-report';
 import { registerGenerateReportFileCommand } from './src/commands/generate-report-file';
+import { registerGenerateCustomReportCommand } from './src/commands/generate-custom-report';
+import { registerMigrateLegacyNotesCommand } from './src/commands/migrate-legacy-notes';
 import { getParaCoreApi } from './src/integrations/para-core/para-core-client';
 import { registerFinanceDomain } from './src/integrations/para-core/register-finance-domain';
 import { registerFinanceMetadataContributions } from './src/integrations/para-core/register-metadata-contributions';
@@ -18,6 +20,10 @@ import { registerFinanceTemplateContributions } from './src/integrations/para-co
 import { IParaCoreApi, RegisteredParaDomain } from './src/integrations/para-core/types';
 import { FinanceTelegramBridgeV2 } from './src/integrations/telegram-v2/finance-telegram-bridge';
 import { getTelegramBotApiV2, TelegramBotApiV2 } from './src/integrations/telegram-v2/client';
+import { ReportSyncService } from './src/services/report-sync-service';
+import { TelegramChartService } from './src/services/telegram-chart-service';
+import { MigrationService } from './src/services/migration-service';
+import { ReportPeriodModal } from './src/ui/report-period-modal';
 import { ReportsModal } from './src/ui/reports-modal';
 import { ITelegramBotPluginAPIv1 } from './telegram_plugin_api';
 import { PLUGIN_UNIT_NAME } from './src/utils/constants';
@@ -41,6 +47,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private financeTelegramBridgeV2: FinanceTelegramBridgeV2 | null = null;
 	private paraCoreApi: IParaCoreApi | null = null;
 	private financeDomain: RegisteredParaDomain | null = null;
+	private reportSyncService!: ReportSyncService;
+	private telegramChartService!: TelegramChartService;
 
 	async onload() {
 		await this.loadSettings();
@@ -51,6 +59,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 		// Initialize services
 		this.expenseService = new ExpenseService(this.app, this.settings, this.paraCoreApi, this.financeDomain);
 		this.analyticsService = new AnalyticsService(this.expenseService);
+		this.reportSyncService = new ReportSyncService(this.app, this.expenseService, this.settings);
+		this.telegramChartService = new TelegramChartService(this.reportSyncService);
 		this.registerParaCoreTelegramCardContributions();
 
 		// Initialize Telegram handler if API is available
@@ -62,6 +72,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerAddQrExpenseCommand(this);
 		registerGenerateReportCommand(this);
 		registerGenerateReportFileCommand(this);
+		registerGenerateCustomReportCommand(this);
+		registerMigrateLegacyNotesCommand(this);
 
 		// Add ribbon icon
 		this.addRibbonIcon('wallet', 'Add Expense', () => {
@@ -70,6 +82,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 
 		// Add settings tab
 		this.addSettingTab(new ExpenseManagerSettingTab(this.app, this));
+		this.registerReportSyncListeners();
+		await this.reportSyncService.initialize();
 
 		// Show startup notice
 		new Notice('Expense Manager loaded');
@@ -77,6 +91,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 
 	onunload() {
 		console.log('Unloading plugin Expense Manager')
+		this.reportSyncService?.destroy();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 		this.telegramApiV2?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 	}
@@ -95,10 +110,14 @@ export default class ExpenseManagerPlugin extends Plugin {
 			this.financeDomain,
 		);
 		this.analyticsService = new AnalyticsService(this.expenseService);
+		this.reportSyncService?.destroy();
+		this.reportSyncService = new ReportSyncService(this.app, this.expenseService, this.settings);
+		this.telegramChartService = new TelegramChartService(this.reportSyncService);
 		this.registerParaCoreTelegramCardContributions();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 		this.telegramApiV2?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 		await this.initializeTelegramIntegration();
+		await this.reportSyncService.initialize();
 	}
 
 	/**
@@ -197,7 +216,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	 */
 	async handleGenerateReport() {
 		try {
-			const report = await this.analyticsService.generateCurrentMonthReport();
+			const report = await this.reportSyncService.generateCurrentMonthReport();
 			const modal = new ReportsModal(this.app, report, this.expenseService);
 			modal.open();
 		} catch (error) {
@@ -210,7 +229,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	 */
 	async handleGenerateReportFile() {
 		try {
-			const report = await this.analyticsService.generateCurrentMonthReport();
+			const report = await this.reportSyncService.generateCurrentMonthReport();
 			const file = await this.expenseService.saveReportAsFile(report);
 			new Notice(`Report saved to ${file.path}`);
 			
@@ -228,27 +247,26 @@ export default class ExpenseManagerPlugin extends Plugin {
 	 */
 	private async saveTransaction(data: TransactionData) {
 		try {
-			// Check for duplicates if fiscal data is available
-			if (data.fn || data.fd || data.fp) {
-				const isDuplicate = await this.expenseService.isDuplicateTransaction(
-					data.fn,
-					data.fd,
-					data.fp,
-					data.dateTime
-				);
-				
-				if (isDuplicate) {
-					new Notice(`⚠️ Duplicate transaction detected! Skipping.`);
-					console.log('Duplicate transaction prevented:', data.comment);
-					return;
-				}
+			const isDuplicate = await this.expenseService.isDuplicateTransaction(
+				data.fn,
+				data.fd,
+				data.fp,
+				data.dateTime,
+				data.amount,
+				data.type,
+			);
+			if (isDuplicate) {
+				new Notice(`⚠️ Duplicate transaction detected! Skipping.`);
+				console.log('Duplicate transaction prevented:', data.description);
+				return;
 			}
 			
 			const file = await this.expenseService.createTransaction(data);
+			this.reportSyncService.scheduleAutoSync(`transaction-saved:${file.path}`);
 			
 			if (this.settings.showConfirmationNotice) {
 				const emoji = data.type === 'expense' ? '💸' : '💰';
-				new Notice(`${emoji} Saved: ${data.amount.toFixed(2)} ${data.currency} - ${data.comment}`);
+				new Notice(`${emoji} Saved: ${data.amount.toFixed(2)} ${data.currency} - ${data.description}`);
 			}
 		} catch (error) {
 			new Notice(`Error saving transaction: ${(error as Error).message}`);
@@ -274,6 +292,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 				this.financeTelegramBridgeV2 = new FinanceTelegramBridgeV2(
 					this.app,
 					this.expenseService,
+					this.reportSyncService,
+					this.telegramChartService,
 					this.settings,
 				);
 				if (this.financeTelegramBridgeV2.register()) {
@@ -300,6 +320,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 			this.telegramHandler = new TelegramHandler(
 				this.app,
 				this.expenseService,
+				this.reportSyncService,
+				this.telegramChartService,
 				this.settings,
 				this.telegramApi
 			);
@@ -307,6 +329,69 @@ export default class ExpenseManagerPlugin extends Plugin {
 			console.log('Telegram v1 fallback integration initialized');
 		} catch (error) {
 			console.log('Telegram integration not available:', error);
+		}
+	}
+
+	private registerReportSyncListeners() {
+		this.registerEvent(this.app.vault.on('create', (file) => {
+			if (this.reportSyncService.shouldSyncForFile(file)) {
+				this.reportSyncService.scheduleAutoSync(`create:${file.path}`);
+			}
+		}));
+
+		this.registerEvent(this.app.vault.on('modify', (file) => {
+			if (this.reportSyncService.shouldSyncForFile(file)) {
+				this.reportSyncService.scheduleAutoSync(`modify:${file.path}`);
+			}
+		}));
+
+		this.registerEvent(this.app.vault.on('delete', (file) => {
+			if (this.reportSyncService.shouldSyncForFile(file)) {
+				this.reportSyncService.scheduleAutoSync(`delete:${file.path}`);
+			}
+		}));
+
+		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+			if (this.reportSyncService.shouldSyncForFile(file) || oldPath.startsWith(`${this.settings.expenseFolder}/`)) {
+				this.reportSyncService.scheduleAutoSync(`rename:${oldPath}`);
+			}
+		}));
+	}
+
+	async handleGenerateCustomReport() {
+		const modal = new ReportPeriodModal(this.app, async (descriptor) => {
+			try {
+				const report = await this.reportSyncService.generateCustomReport(
+					descriptor.startDate,
+					descriptor.endDate,
+				);
+				new ReportsModal(this.app, report, this.expenseService).open();
+			} catch (error) {
+				new Notice(`Error generating report: ${(error as Error).message}`);
+			}
+		});
+		modal.open();
+	}
+
+	async handleMigrateLegacyNotes() {
+		try {
+			const migrationService = new MigrationService(
+				this.app,
+				this.expenseService,
+				this.reportSyncService,
+			);
+			const summary = await migrationService.migrateLegacyNotes();
+			new Notice(
+				[
+					`Migrated transaction notes: ${summary.transactionNotesUpdated}`,
+					`Migrated report notes: ${summary.reportNotesUpdated}`,
+					`Renamed report notes: ${summary.reportNotesRenamed}`,
+				].join(' | '),
+				10000,
+			);
+		} catch (error) {
+			new Notice(`Error during migration: ${(error as Error).message}`);
+			console.error('Migration error:', error);
 		}
 	}
 }
@@ -395,6 +480,108 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.showConfirmationNotice = value;
 					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createEl('h3', { text: 'Reports' });
+
+		new Setting(containerEl)
+			.setName('Auto-sync reports on vault changes')
+			.setDesc('Rebuild finance reports automatically after transaction notes change')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.autoSyncReportsOnVaultChanges)
+				.onChange(async (value) => {
+					this.plugin.settings.autoSyncReportsOnVaultChanges = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Automatic monthly reports')
+			.setDesc('Keep monthly finance reports updated with cumulative balance')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.autoMonthlyReports)
+				.onChange(async (value) => {
+					this.plugin.settings.autoMonthlyReports = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Automatic quarterly reports')
+			.setDesc('Keep quarterly finance reports updated')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.autoQuarterlyReports)
+				.onChange(async (value) => {
+					this.plugin.settings.autoQuarterlyReports = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Automatic half-year reports')
+			.setDesc('Keep half-year finance reports updated')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.autoHalfYearReports)
+				.onChange(async (value) => {
+					this.plugin.settings.autoHalfYearReports = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Automatic yearly reports')
+			.setDesc('Keep yearly finance reports updated')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.autoYearlyReports)
+				.onChange(async (value) => {
+					this.plugin.settings.autoYearlyReports = value;
+					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createEl('h3', { text: 'Budget alerts' });
+
+		new Setting(containerEl)
+			.setName('Enable budget alerts')
+			.setDesc('Show warning, forecast, and critical budget state inside finance reports')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableBudgetAlerts)
+				.onChange(async (value) => {
+					this.plugin.settings.enableBudgetAlerts = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Budget warning threshold')
+			.setDesc('Mark report as warning when spending reaches this percent of the budget')
+			.addText(text => text
+				.setPlaceholder('80')
+				.setValue(String(this.plugin.settings.budgetAlertWarningThresholdPercent))
+				.onChange(async (value) => {
+					const parsed = Number(value);
+					if (Number.isFinite(parsed)) {
+						this.plugin.settings.budgetAlertWarningThresholdPercent = Math.min(100, Math.max(1, parsed));
+						await this.plugin.saveSettings();
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Enable budget forecast alerts')
+			.setDesc('Estimate month-end overspend for the current month and show forecast alerts')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableBudgetForecastAlerts)
+				.onChange(async (value) => {
+					this.plugin.settings.enableBudgetForecastAlerts = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Forecast alerts start day')
+			.setDesc('Do not show forecast alerts before this day of the month')
+			.addText(text => text
+				.setPlaceholder('5')
+				.setValue(String(this.plugin.settings.budgetForecastStartDay))
+				.onChange(async (value) => {
+					const parsed = Number(value);
+					if (Number.isFinite(parsed)) {
+						this.plugin.settings.budgetForecastStartDay = Math.max(1, Math.min(31, Math.round(parsed)));
+						await this.plugin.saveSettings();
+					}
 				}));
 
 		// Telegram integration

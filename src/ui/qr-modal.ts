@@ -202,6 +202,11 @@ export class QrModal extends Modal {
 			}
 			
 			this.processedData = result.data;
+			if (this.selectedFile) {
+				this.processedData.artifactFileName = this.selectedFile.name;
+				this.processedData.artifactMimeType = this.selectedFile.type;
+				this.processedData.artifactBytes = await this.selectedFile.arrayBuffer();
+			}
 			
 			// Show success message with source info
 			const sourceText = result.source === 'api' ? 'via ProverkaCheka API' : 'via local QR';

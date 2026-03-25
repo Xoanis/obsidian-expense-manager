@@ -3,8 +3,11 @@ import { BaseHandler } from './base-handler';
 import { HandlerResult, TransactionData, TransactionType } from '../types';
 import { ITelegramBotPluginAPIv1, CommandHandler, TextHandler, FileHandler } from '../../telegram_plugin_api';
 import { ExpenseManagerSettings } from '../settings';
-import { ExpenseService } from '../services/expense-service';
+import { DuplicateTransactionError, ExpenseService } from '../services/expense-service';
+import { ReportSyncService } from '../services/report-sync-service';
+import { TelegramChartService } from '../services/telegram-chart-service';
 import { ProverkaChekaClient } from '../utils/api-client';
+import { formatMonthlyReportMessages, formatMonthlySummaryMessage } from '../utils/report-formatters';
 import { PLUGIN_UNIT_NAME } from '../utils/constants';
 
 interface ParsedTelegramTransactionInput {
@@ -20,16 +23,22 @@ export class TelegramHandler extends BaseHandler {
 	private telegramApi: ITelegramBotPluginAPIv1 | null = null;
 	private unitName = PLUGIN_UNIT_NAME;
 	private settings: ExpenseManagerSettings;
+	private reportSyncService: ReportSyncService;
+	private telegramChartService: TelegramChartService;
 
 	constructor(
 		app: App,
 		expenseService: ExpenseService,
+		reportSyncService: ReportSyncService,
+		telegramChartService: TelegramChartService,
 		settings: ExpenseManagerSettings,
 		telegramApi?: ITelegramBotPluginAPIv1
 	) {
 		super();
 		this.app = app;
 		this.expenseService = expenseService;
+		this.reportSyncService = reportSyncService;
+		this.telegramChartService = telegramChartService;
 		this.settings = settings;
 		this.telegramApi = telegramApi || null;
 	}
@@ -50,6 +59,8 @@ export class TelegramHandler extends BaseHandler {
 		// Register command handlers
 		this.telegramApi.addCommandHandler('expense', this.handleExpenseCommand.bind(this), this.unitName);
 		this.telegramApi.addCommandHandler('income', this.handleIncomeCommand.bind(this), this.unitName);
+		this.telegramApi.addCommandHandler('finance_summary', this.handleFinanceSummaryCommand.bind(this), this.unitName);
+		this.telegramApi.addCommandHandler('finance_report', this.handleFinanceReportCommand.bind(this), this.unitName);
 		
 		// Register text handler for parsing expense messages
 		this.telegramApi.addTextHandler(this.handleTextMessage.bind(this), this.unitName);
@@ -99,9 +110,9 @@ export class TelegramHandler extends BaseHandler {
             amount,
             currency: 'RUB',
             dateTime: new Date().toISOString(),
-            comment,
-			area: metadata?.area,
-			project: metadata?.project,
+            description: comment,
+            area: metadata?.area,
+            project: metadata?.project,
             tags: ['telegram'],
             category: 'Other',
             source: 'telegram'
@@ -118,7 +129,7 @@ export class TelegramHandler extends BaseHandler {
 
         const parsed_args = this.parseArgs(args);
         if (!parsed_args) {
-            const message = 'To add an expense, send:\n/expense <amount> <comment>\nOptional metadata: | area=Health | project=My Project\n\nExample:\n/expense 500 Lunch at cafe | area=Health';            
+            const message = 'To add an expense, send:\n/expense <amount> <description>\nOptional metadata: | area=Health | project=My Project\n\nExample:\n/expense 500 Lunch at cafe | area=Health';            
             return { processed: true, answer: message };
         } else {
             try {
@@ -132,6 +143,9 @@ export class TelegramHandler extends BaseHandler {
 
                 return { processed: true, answer: `${emoji} Saved: ${amount.toFixed(2)} RUB ${comment}` };
             } catch (error) {
+				if (error instanceof DuplicateTransactionError) {
+					return { processed: true, answer: 'Duplicate transaction found. Skipping save.' };
+				}
                 return { processed: true, answer: 'Error saving transaction: ' + (error as Error).message };
             }
         }
@@ -147,7 +161,7 @@ export class TelegramHandler extends BaseHandler {
 
         const parsed_args = this.parseArgs(args);
         if (!parsed_args) {
-            const message = 'To add income, send:\n/income <amount> <comment>\nOptional metadata: | area=Career | project=My Project\n\nExample:\n/income 50000 Salary | area=Career';            
+            const message = 'To add income, send:\n/income <amount> <description>\nOptional metadata: | area=Career | project=My Project\n\nExample:\n/income 50000 Salary | area=Career';            
             return { processed: true, answer: message };
         } else {
             try {
@@ -161,6 +175,9 @@ export class TelegramHandler extends BaseHandler {
 
                 return { processed: true, answer: `${emoji} Saved: ${amount.toFixed(2)} RUB ${comment}` };
             } catch (error) {
+				if (error instanceof DuplicateTransactionError) {
+					return { processed: true, answer: 'Duplicate transaction found. Skipping save.' };
+				}
                 return { processed: true, answer: 'Error saving transaction: ' + (error as Error).message };
             }
         }
@@ -199,6 +216,9 @@ export class TelegramHandler extends BaseHandler {
             const message = `${emoji} Saved: ${type} ${parsed.amount.toFixed(2)} RUB\n${parsed.comment}`;
 			return { processed: true, answer: message };
 		} catch (error) {
+			if (error instanceof DuplicateTransactionError) {
+				return { processed: true, answer: 'Duplicate transaction found. Skipping save.' };
+			}
 			const message = 'Error saving transaction: ' + (error as Error).message;
 			return { processed: true, answer: message };
 		}
@@ -238,27 +258,33 @@ export class TelegramHandler extends BaseHandler {
 				return { processed: true, answer: message };
 			}
 			
-			// Update comment with caption if provided
+			// Update description with caption if provided
 			if (caption && caption.trim()) {
 				const parsedCaption = this.parseCaption(caption);
-				result.data.comment = parsedCaption.comment || result.data.comment;
+				result.data.description = parsedCaption.comment || result.data.description;
 				result.data.area = parsedCaption.area;
 				result.data.project = parsedCaption.project;
 			}
+			result.data.artifactBytes = arrayBuffer;
+			result.data.artifactFileName = file.name;
+			result.data.artifactMimeType = 'image/jpeg';
 			
 			// Save transaction
 			await this.expenseService.createTransaction(result.data);
-			console.log(`Saved ${result.data.type}: ${result.data.amount.toFixed(2)} RUB ${result.data.comment}`);
+			console.log(`Saved ${result.data.type}: ${result.data.amount.toFixed(2)} RUB ${result.data.description}`);
 			// Send confirmation
 			const emoji = result.data.type === 'expense' ? '💸' : '💰';
 			const sourceText = result.source === 'api' ? 'via ProverkaCheka API' : 'via local QR';
 
             const message = `${emoji} Saved: ${result.data.type} ${result.data.amount.toFixed(2)} RUB\n` +
-				`${result.data.comment}\n` +
+				`${result.data.description}\n` +
 				`Source: ${sourceText}`;
 
 			return { processed: true, answer: message };
 		} catch (error) {
+			if (error instanceof DuplicateTransactionError) {
+				return { processed: true, answer: 'Duplicate transaction found. Skipping save.' };
+			}
 			const message = 'Error processing image: ' + (error as Error).message;
 
 			return { processed: true, answer: message };
@@ -274,6 +300,60 @@ export class TelegramHandler extends BaseHandler {
 			success: false,
 			error: 'Telegram handler works via bot commands, not direct invocation'
 		};
+	}
+
+	private async handleFinanceSummaryCommand(args: string, processed_before: boolean): Promise<any> {
+		if (processed_before) {
+			return { processed: false, answer: null };
+		}
+
+		try {
+			const reportDate = this.parseMonthlyReportArgument(args);
+			const report = await this.reportSyncService.generateStandardPeriodReport('month', reportDate);
+			const previousReport = await this.reportSyncService.generateStandardPeriodReport(
+				'month',
+				new Date(reportDate.getFullYear(), reportDate.getMonth() - 1, 1),
+			);
+			return {
+				processed: true,
+				answer: formatMonthlySummaryMessage(report, previousReport),
+			};
+		} catch (error) {
+			return {
+				processed: true,
+				answer: 'Error generating finance summary: ' + (error as Error).message,
+			};
+		}
+	}
+
+	private async handleFinanceReportCommand(args: string, processed_before: boolean): Promise<any> {
+		if (processed_before) {
+			return { processed: false, answer: null };
+		}
+
+		try {
+			const reportDate = this.parseMonthlyReportArgument(args);
+			const report = await this.reportSyncService.generateStandardPeriodReport('month', reportDate);
+			const previousReport = await this.reportSyncService.generateStandardPeriodReport(
+				'month',
+				new Date(reportDate.getFullYear(), reportDate.getMonth() - 1, 1),
+			);
+			const messages = formatMonthlyReportMessages(report, previousReport);
+			if (this.telegramApi) {
+				for (const extraMessage of messages.slice(1)) {
+					await this.telegramApi.sendMessage(extraMessage);
+				}
+			}
+			return {
+				processed: true,
+				answer: messages[0] ?? 'No data for this month.',
+			};
+		} catch (error) {
+			return {
+				processed: true,
+				answer: 'Error generating finance report: ' + (error as Error).message,
+			};
+		}
 	}
 
 	private parseCaption(caption: string): { comment: string; area?: string; project?: string } {
@@ -324,5 +404,27 @@ export class TelegramHandler extends BaseHandler {
 			return trimmed;
 		}
 		return `[[${trimmed}]]`;
+	}
+
+	private parseMonthlyReportArgument(rawArgs: string | undefined): Date {
+		const value = rawArgs?.trim().toLowerCase() ?? '';
+		const now = new Date();
+		if (!value || value === 'current' || value === 'now' || value === 'this') {
+			return new Date(now.getFullYear(), now.getMonth(), 1);
+		}
+		if (value === 'prev' || value === 'previous') {
+			return new Date(now.getFullYear(), now.getMonth() - 1, 1);
+		}
+
+		const monthMatch = value.match(/^(\d{4})-(\d{2})$/);
+		if (monthMatch) {
+			const year = Number(monthMatch[1]);
+			const month = Number(monthMatch[2]);
+			if (month >= 1 && month <= 12) {
+				return new Date(year, month - 1, 1);
+			}
+		}
+
+		return new Date(now.getFullYear(), now.getMonth(), 1);
 	}
 }

@@ -1,5 +1,4 @@
-import { PeriodReport, TransactionData } from '../../types';
-import { formatDateTime } from '../../utils/frontmatter';
+import { TransactionData } from '../../types';
 import { NoteTypeDefinition, TemplateContext } from './types';
 
 type FinanceTransactionNoteType = 'finance-expense' | 'finance-income';
@@ -11,15 +10,15 @@ interface FinanceTransactionFrontmatter {
 	status: FinanceTransactionStatus;
 	domain: 'finance';
 	created: string;
-	date: string;
 	dateTime: string;
 	amount: number;
 	currency: string;
-	comment: string;
+	description: string;
 	area?: string | null;
 	project?: string | null;
 	category?: string | null;
 	source: string;
+	artifact?: string | null;
 	tags: string[];
 	fn?: string;
 	fd?: string;
@@ -32,14 +31,20 @@ interface FinanceReportFrontmatter {
 	status: FinanceReportStatus;
 	domain: 'finance';
 	created: string;
+	periodKind: string;
+	periodKey: string;
+	periodLabel: string;
 	periodStart: string;
 	periodEnd: string;
 	currency: string;
+	openingBalance: number;
 	totalExpenses: number;
 	totalIncome: number;
+	netChange: number;
+	closingBalance: number;
 	balance: number;
+	budget?: number | null;
 	tags: string[];
-	report?: PeriodReport;
 }
 
 const TRANSACTIONS_FOLDER_KEY = 'records:/Finance/Transactions';
@@ -70,15 +75,15 @@ function createFinanceTransactionNoteType(
 			status: 'recorded',
 			domain: 'finance',
 			created: date,
-			date,
 			dateTime: new Date(`${date}T00:00:00`).toISOString(),
 			amount: 0,
 			currency: 'RUB',
-			comment: '',
+			description: '',
 			area: null,
 			project: null,
 			category: null,
 			source: 'manual',
+			artifact: null,
 			tags: ['finance', categoryTag],
 			details: [],
 		}),
@@ -99,12 +104,19 @@ function createFinanceReportNoteType(): NoteTypeDefinition<FinanceReportFrontmat
 			status: 'generated',
 			domain: 'finance',
 			created: date,
+			periodKind: 'custom',
+			periodKey: date,
+			periodLabel: date,
 			periodStart: date,
 			periodEnd: date,
 			currency: 'RUB',
+			openingBalance: 0,
 			totalExpenses: 0,
 			totalIncome: 0,
+			netChange: 0,
+			closingBalance: 0,
 			balance: 0,
+			budget: null,
 			tags: ['finance', 'report'],
 		}),
 		template: (ctx) => renderFinanceReportTemplate(ctx),
@@ -122,31 +134,22 @@ function renderFinanceTransactionTemplate(
 		status: frontmatter.status,
 		domain: frontmatter.domain,
 		created: frontmatter.created,
-		date: frontmatter.date,
 		dateTime: frontmatter.dateTime,
 		amount: frontmatter.amount,
 		currency: frontmatter.currency,
-		comment: frontmatter.comment,
+		description: frontmatter.description,
 		area: frontmatter.area,
 		project: frontmatter.project,
 		category: frontmatter.category,
 		source: frontmatter.source,
+		artifact: frontmatter.artifact,
 		tags: frontmatter.tags,
 		fn: frontmatter.fn,
 		fd: frontmatter.fd,
 		fp: frontmatter.fp,
 	};
 
-	const body: string[] = [
-		`# ${label}: ${frontmatter.comment || ctx.title}`,
-		'',
-		`**Date:** ${formatDateTime(frontmatter.dateTime)}`,
-		`**Amount:** ${Number(frontmatter.amount).toFixed(2)} ${frontmatter.currency}`,
-		`**Category:** ${frontmatter.category || 'uncategorized'}`,
-		frontmatter.area ? `**Area:** ${frontmatter.area}` : '',
-		frontmatter.project ? `**Project:** ${frontmatter.project}` : '',
-		`**Source:** ${frontmatter.source}`,
-	];
+	const body: string[] = [];
 
 	if (frontmatter.details && frontmatter.details.length > 0) {
 		body.push('', '## Items', '');
@@ -156,18 +159,17 @@ function renderFinanceTransactionTemplate(
 		}
 	}
 
-	if (frontmatter.tags && frontmatter.tags.length > 0) {
-		body.push('', '## Tags', '', frontmatter.tags.map((tag) => `#${tag}`).join(' '));
+	if (frontmatter.artifact) {
+		body.push('', '## Artifact', '', frontmatter.artifact);
 	}
 
-	return `${renderFrontmatter(selectedFrontmatter)}\n\n${body.filter(Boolean).join('\n')}\n`;
+	return `${renderFrontmatter(selectedFrontmatter)}${body.length > 0 ? `\n\n${body.filter(Boolean).join('\n')}\n` : '\n'}`;
 }
 
 function renderFinanceReportTemplate(
 	ctx: TemplateContext<FinanceReportFrontmatter>,
 ): string {
 	const frontmatter = ctx.frontmatter;
-	const report = frontmatter.report;
 	const selectedFrontmatter = {
 		type: frontmatter.type,
 		status: frontmatter.status,
@@ -175,59 +177,21 @@ function renderFinanceReportTemplate(
 		created: frontmatter.created,
 		periodStart: frontmatter.periodStart,
 		periodEnd: frontmatter.periodEnd,
+		periodKind: frontmatter.periodKind,
+		periodKey: frontmatter.periodKey,
+		periodLabel: frontmatter.periodLabel,
 		currency: frontmatter.currency,
+		openingBalance: frontmatter.openingBalance,
 		totalExpenses: frontmatter.totalExpenses,
 		totalIncome: frontmatter.totalIncome,
+		netChange: frontmatter.netChange,
+		closingBalance: frontmatter.closingBalance,
 		balance: frontmatter.balance,
+		budget: frontmatter.budget,
 		tags: frontmatter.tags,
 	};
 
-	const body: string[] = [
-		'# Financial Report',
-		'',
-		`**Period:** ${frontmatter.periodStart} - ${frontmatter.periodEnd}`,
-		'',
-		'## Summary',
-		'',
-		`- Total income: ${Number(frontmatter.totalIncome).toFixed(2)} ${frontmatter.currency}`,
-		`- Total expenses: ${Number(frontmatter.totalExpenses).toFixed(2)} ${frontmatter.currency}`,
-		`- Balance: ${Number(frontmatter.balance).toFixed(2)} ${frontmatter.currency}`,
-	];
-
-	if (report) {
-		const incomes = report.transactions.filter((item) => item.type === 'income');
-		const expenses = report.transactions.filter((item) => item.type === 'expense');
-		body.push(
-			'',
-			'## Income',
-			'',
-			...renderReportTableLines(incomes),
-			'',
-			'## Expenses',
-			'',
-			...renderReportTableLines(expenses),
-		);
-	}
-
-	return `${renderFrontmatter(selectedFrontmatter)}\n\n${body.join('\n')}\n`;
-}
-
-function renderReportTableLines(items: TransactionData[]): string[] {
-	if (items.length === 0) {
-		return ['_No records in this period._'];
-	}
-
-	const lines = [
-		'| Date | Amount | Comment | Category |',
-		'|------|--------|---------|----------|',
-	];
-	for (const item of items) {
-		const date = new Date(item.dateTime).toLocaleDateString();
-		lines.push(
-			`| ${date} | ${item.amount.toFixed(2)} ${item.currency} | ${escapePipes(item.comment)} | ${escapePipes(item.category || '')} |`,
-		);
-	}
-	return lines;
+	return `${renderFrontmatter(selectedFrontmatter)}\n`;
 }
 
 function renderFrontmatter(values: Record<string, unknown>): string {
@@ -242,6 +206,11 @@ function renderFrontmatter(values: Record<string, unknown>): string {
 			continue;
 		}
 
+		if (typeof value === 'string' && isDateLikeField(key)) {
+			lines.push(`${key}: ${value}`);
+			continue;
+		}
+
 		if (typeof value === 'string') {
 			lines.push(`${key}: "${value.replace(/"/g, '\\"')}"`);
 			continue;
@@ -253,6 +222,6 @@ function renderFrontmatter(values: Record<string, unknown>): string {
 	return lines.join('\n');
 }
 
-function escapePipes(value: string): string {
-	return value.replace(/\|/g, '\\|');
+function isDateLikeField(key: string): boolean {
+	return key === 'created' || key === 'dateTime' || key === 'periodStart' || key === 'periodEnd';
 }

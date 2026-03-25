@@ -43,8 +43,8 @@ export class AnalyticsService {
 	async generateCategoryChartData(startDate: Date, endDate: Date): Promise<ChartData> {
 		const report = await this.expenseService.generatePeriodReport(startDate, endDate);
 		
-		const labels = report.byCategory.map(c => c.category);
-		const values = report.byCategory.map(c => c.total);
+		const labels = report.expenseByCategory.map(c => c.category);
+		const values = report.expenseByCategory.map(c => c.total);
 		
 		// Generate colors
 		const colors = this.generateColors(report.byCategory.length);

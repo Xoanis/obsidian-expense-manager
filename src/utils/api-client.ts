@@ -117,10 +117,10 @@ export class ProverkaChekaClient {
 		// Determine transaction type from operation type
 		const type = qrData.n ? operationTypeToTransactionType(qrData.n) : 'expense';
 		
-		// Generate comment from available data
-		let comment = 'Receipt';
+		// Generate description from available data
+		let description = 'Receipt';
 		if (qrData.fn) {
-			comment = `Receipt`;
+			description = `Receipt`;
 		}
 		
 		// Build tags - no longer include fn, fp, i
@@ -131,7 +131,7 @@ export class ProverkaChekaClient {
 			amount: qrData.amount || 0,
 			currency: 'RUB',
 			dateTime: qrData.dateTime || now,
-			comment: comment,
+			description,
 			tags: tags,
 			category: type === 'expense' ? 'Shopping' : 'Other',
 			source: 'qr',
@@ -235,7 +235,7 @@ export class ProverkaChekaClient {
 			amount: 0,
 			currency: 'RUB',
 			dateTime: new Date().toISOString(),
-			comment: 'Failed to process receipt',
+			description: 'Failed to process receipt',
 			tags: ['receipt', 'qr', 'error'],
 			category: 'Other',
 			source: 'qr'
@@ -356,16 +356,16 @@ export class ProverkaChekaClient {
 			type = 'expense'; // Возврат расхода - return of payout
 		}
 
-		// Generate comment from receipt info
-		let comment = 'Receipt';
+		// Generate description from receipt info
+		let description = 'Receipt';
 		if (json.user) {
-			comment = `Receipt from ${json.user}`;
+			description = `Receipt from ${json.user}`;
 		} else if (json.kktRegId) {
-			comment = `Receipt from KKT ${json.kktRegId}`;
+			description = `Receipt from KKT ${json.kktRegId}`;
 		} else if (details.length > 0) {
-			comment = `Receipt: ${details.slice(0, 3).map(d => d.name).join(', ')}`;
+			description = `Receipt: ${details.slice(0, 3).map(d => d.name).join(', ')}`;
 			if (details.length > 3) {
-				comment += ` +${details.length - 3} more`;
+				description += ` +${details.length - 3} more`;
 			}
 		}
 
@@ -377,7 +377,7 @@ export class ProverkaChekaClient {
 			amount: totalRubles,
 			currency: 'RUB',
 			dateTime: dateTime,
-			comment: comment,
+			description,
 			tags: tags,
 			category: type === 'expense' ? 'Shopping' : 'Other',
 			details: details,

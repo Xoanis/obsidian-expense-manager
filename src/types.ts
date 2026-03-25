@@ -24,8 +24,11 @@ export interface TransactionData {
 	/** Date and time of transaction (ISO format) */
 	dateTime: string;
 	
-	/** Comment or description */
-	comment: string;
+	/** Short human-readable description */
+	description: string;
+
+	/** Legacy alias kept for backward compatibility while reading old notes */
+	comment?: string;
 
 	/** Linked PARA area for semantic context, e.g. [[Health]] */
 	area?: string;
@@ -41,6 +44,14 @@ export interface TransactionData {
 	
 	/** Additional details (e.g., items from receipt) */
 	details?: TransactionDetail[];
+
+	/** Linked artifact such as a receipt image */
+	artifact?: string;
+
+	/** Transient artifact payload before note creation */
+	artifactBytes?: ArrayBuffer;
+	artifactFileName?: string;
+	artifactMimeType?: string;
 	
 	/** Source of the transaction (manual, qr, telegram, pdf, etc.) */
 	source: TransactionSource;
@@ -96,6 +107,15 @@ export interface HandlerResult {
  * Period report for analytics
  */
 export interface PeriodReport {
+	/** Period type */
+	periodKind: ReportPeriodKind;
+
+	/** Stable key for report note upsert */
+	periodKey: string;
+
+	/** Human-readable period label */
+	periodLabel: string;
+
 	/** Start date of period */
 	startDate: Date;
 	
@@ -107,15 +127,33 @@ export interface PeriodReport {
 	
 	/** Total income */
 	totalIncome: number;
-	
-	/** Balance (income - expenses) */
+
+	/** Net period change (income - expenses) */
+	netChange: number;
+
+	/** Balance at the start of period */
+	openingBalance: number;
+
+	/** Closing balance at the end of period */
+	closingBalance: number;
+
+	/** Backward-compatible alias for closing balance */
 	balance: number;
-	
+
+	/** Optional budget summary for this report */
+	budget: ReportBudgetSummary | null;
+
 	/** Transactions in this period */
 	transactions: TransactionData[];
-	
-	/** Grouped by category */
+
+	/** Combined category breakdown */
 	byCategory: CategorySummary[];
+
+	/** Expense-only category breakdown */
+	expenseByCategory: CategorySummary[];
+
+	/** Income-only category breakdown */
+	incomeByCategory: CategorySummary[];
 }
 
 /**
@@ -156,4 +194,37 @@ export interface FinanceContextSummary {
 	transactionCount: number;
 	linkedProjectCount: number;
 	recentTransactions: TransactionData[];
+}
+
+export type ReportPeriodKind = 'custom' | 'month' | 'quarter' | 'half-year' | 'year';
+
+export interface ReportPeriodDescriptor {
+	kind: ReportPeriodKind;
+	key: string;
+	label: string;
+	startDate: Date;
+	endDate: Date;
+}
+
+export interface ReportBudgetSummary {
+	limit: number;
+	spent: number;
+	remaining: number;
+	usagePercentage: number | null;
+	warningThresholdPercentage: number;
+	projectedSpent: number | null;
+	projectedDelta: number | null;
+	alertLevel: ReportBudgetAlertLevel;
+	alertsEnabled: boolean;
+	forecastEnabled: boolean;
+	alertState: ReportBudgetAlertState;
+}
+
+export type ReportBudgetAlertLevel = 'none' | 'ok' | 'warning' | 'forecast' | 'critical';
+
+export interface ReportBudgetAlertState {
+	sentWarning: boolean;
+	sentForecast: boolean;
+	sentCritical: boolean;
+	lastAlertAt: string | null;
 }

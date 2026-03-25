@@ -10,7 +10,7 @@ export class ExpenseModal extends Modal {
 	private amount: number = 0;
 	private type: TransactionType = 'expense';
 	private currency: string = 'RUB';
-	private comment: string = '';
+	private description: string = '';
 	private category: string = '';
 	private tagsInput: string = '';
 	private dateTime: string = new Date().toISOString();
@@ -148,15 +148,15 @@ export class ExpenseModal extends Modal {
 			},
 		);
 
-		// Comment/Description
+		// Description
 		new Setting(contentEl)
-			.setName('Comment')
+			.setName('Description')
 			.addTextArea(text => {
 				text
-					.setPlaceholder('What was this for?')
-					.setValue(this.comment)
+					.setPlaceholder('Short description')
+					.setValue(this.description)
 					.onChange(value => {
-						this.comment = value;
+						this.description = value;
 					});
 				text.inputEl.rows = 3;
 			});
@@ -208,7 +208,7 @@ export class ExpenseModal extends Modal {
 			amount: this.amount,
 			currency: this.currency,
 			dateTime: this.dateTime,
-			comment: this.comment,
+			description: this.description,
 			area: this.normalizeWikiLink(this.area),
 			project: this.normalizeWikiLink(this.project),
 			tags: tags,
@@ -234,8 +234,10 @@ export class ExpenseModal extends Modal {
 		if (typeof initialData.currency === 'string' && initialData.currency.trim()) {
 			this.currency = initialData.currency;
 		}
-		if (typeof initialData.comment === 'string') {
-			this.comment = initialData.comment;
+		if (typeof initialData.description === 'string') {
+			this.description = initialData.description;
+		} else if (typeof initialData.comment === 'string') {
+			this.description = initialData.comment;
 		}
 		if (typeof initialData.category === 'string') {
 			this.category = initialData.category;

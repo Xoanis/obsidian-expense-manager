@@ -36,6 +36,33 @@ export interface ExpenseManagerSettings {
 	
 	/** Show confirmation notice after saving transaction */
 	showConfirmationNotice: boolean;
+
+	/** Keep monthly reports updated automatically */
+	autoMonthlyReports: boolean;
+
+	/** Keep quarterly reports updated automatically */
+	autoQuarterlyReports: boolean;
+
+	/** Keep half-year reports updated automatically */
+	autoHalfYearReports: boolean;
+
+	/** Keep yearly reports updated automatically */
+	autoYearlyReports: boolean;
+
+	/** Rebuild reports automatically after relevant vault changes */
+	autoSyncReportsOnVaultChanges: boolean;
+
+	/** Show and compute budget alerts in reports */
+	enableBudgetAlerts: boolean;
+
+	/** Warning threshold for budget usage percentage */
+	budgetAlertWarningThresholdPercent: number;
+
+	/** Enable forecast-based budget alerts for current monthly report */
+	enableBudgetForecastAlerts: boolean;
+
+	/** Start forecast alerts after this calendar day of month */
+	budgetForecastStartDay: number;
 }
 
 /**
@@ -67,5 +94,14 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	defaultTransactionType: 'expense',
 	dateFormat: 'YYYY-MM-DD HH:mm',
 	enableTelegramIntegration: true,
-	showConfirmationNotice: true
+	showConfirmationNotice: true,
+	autoMonthlyReports: true,
+	autoQuarterlyReports: false,
+	autoHalfYearReports: false,
+	autoYearlyReports: true,
+	autoSyncReportsOnVaultChanges: true,
+	enableBudgetAlerts: true,
+	budgetAlertWarningThresholdPercent: 80,
+	enableBudgetForecastAlerts: true,
+	budgetForecastStartDay: 5,
 };
