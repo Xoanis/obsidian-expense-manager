@@ -24,6 +24,7 @@
 	},
 	"dependencies": {
 		"chart.js": "^4.4.0",
-		"jsqr": "^1.4.0"
+		"jsqr": "^1.4.0",
+		"obsidian-para-suite-contracts": "github:Xoanis/obsidian-para-suite-contracts#v0.1.0"
 	}
 }
