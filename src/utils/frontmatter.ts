@@ -10,6 +10,8 @@ export function generateFrontmatter(data: TransactionData): string {
 		currency: data.currency,
 		dateTime: data.dateTime,
 		comment: data.comment,
+		area: data.area,
+		project: data.project,
 		tags: data.tags,
 		category: data.category || data.tags[0] || 'uncategorized',
 		source: data.source

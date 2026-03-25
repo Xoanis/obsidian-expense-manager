@@ -231,13 +231,13 @@ export class QrModal extends Modal {
 		this.close();
 
 		// Open expense modal with pre-filled data
-		const editModal = new ExpenseModal(this.app, 'expense', this.processedData.currency, []);
-		
-		// Pre-fill with processed data
-		(editModal as any).amount = this.processedData.amount;
-		(editModal as any).comment = this.processedData.comment;
-		(editModal as any).tagsInput = this.processedData.tags.join(', ');
-		(editModal as any).category = this.processedData.category || '';
+		const editModal = new ExpenseModal(
+			this.app,
+			'expense',
+			this.processedData.currency,
+			[],
+			this.processedData,
+		);
 
 		editModal.onComplete = (data: TransactionData) => {
 			// Keep the details and fiscal data from original processing

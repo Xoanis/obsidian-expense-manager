@@ -26,6 +26,12 @@ export interface TransactionData {
 	
 	/** Comment or description */
 	comment: string;
+
+	/** Linked PARA area for semantic context, e.g. [[Health]] */
+	area?: string;
+
+	/** Linked PARA project when transaction belongs to a project */
+	project?: string;
 	
 	/** Tags/categories for the transaction */
 	tags: string[];
@@ -141,4 +147,13 @@ export interface ChartData {
 	
 	/** Colors for each segment */
 	colors?: string[];
+}
+
+export interface FinanceContextSummary {
+	totalExpenses: number;
+	totalIncome: number;
+	balance: number;
+	transactionCount: number;
+	linkedProjectCount: number;
+	recentTransactions: TransactionData[];
 }

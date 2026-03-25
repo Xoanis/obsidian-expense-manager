@@ -1,6 +1,7 @@
 import { App, TFile, TFolder } from 'obsidian';
-import { TransactionData, PeriodReport, CategorySummary } from '../types';
+import { TransactionData, PeriodReport, CategorySummary, FinanceContextSummary } from '../types';
 import { ExpenseManagerSettings } from '../settings';
+import { IParaCoreApi, RegisteredParaDomain } from '../integrations/para-core/types';
 import { 
 	generateFrontmatter, 
 	generateContentBody, 
@@ -12,15 +13,30 @@ import {
 export class ExpenseService {
 	private app: App;
 	private settings: ExpenseManagerSettings;
+	private paraCoreApi: IParaCoreApi | null;
+	private financeDomain: RegisteredParaDomain | null;
 
-	constructor(app: App, settings: ExpenseManagerSettings) {
+	constructor(
+		app: App,
+		settings: ExpenseManagerSettings,
+		paraCoreApi?: IParaCoreApi | null,
+		financeDomain?: RegisteredParaDomain | null,
+	) {
 		this.app = app;
 		this.settings = settings;
+		this.paraCoreApi = paraCoreApi || null;
+		this.financeDomain = financeDomain || null;
 	}
 	/**
 	 * Create a new transaction file
 	 */
 	async createTransaction(data: TransactionData): Promise<TFile> {
+		await this.validateLinkedContext(data);
+
+		if (this.canUseParaCoreRecords()) {
+			return this.createTransactionViaParaCore(data);
+		}
+
 		// Ensure expense folder exists
 		await this.ensureExpenseFolder();
 
@@ -43,13 +59,7 @@ export class ExpenseService {
 	 * Get all transactions from vault
 	 */
 	async getAllTransactions(): Promise<TransactionData[]> {
-		const expenseFolder = this.app.vault.getAbstractFileByPath(this.settings.expenseFolder);
-		
-		if (!expenseFolder || !(expenseFolder instanceof TFolder)) {
-			return [];
-		}
-
-		const files = expenseFolder.children.filter(f => f instanceof TFile && f.extension === 'md');
+		const files = this.getTransactionFiles();
 		const transactions: TransactionData[] = [];
 
 		for (const file of files) {
@@ -101,15 +111,20 @@ export class ExpenseService {
 
 			return {
 				id: file.path,
-				type: frontmatter.type as 'expense' | 'income',
+				type: this.normalizeTransactionType(frontmatter.type as string),
 				amount: Number(frontmatter.amount),
 				currency: (frontmatter.currency as string) || 'RUB',
 				dateTime: frontmatter.dateTime as string,
 				comment: frontmatter.comment as string || '',
+				area: frontmatter.area as string | undefined,
+				project: frontmatter.project as string | undefined,
 				tags: (frontmatter.tags as string[]) || [],
 				category: frontmatter.category as string,
 				details: details,
 				source: (frontmatter.source as any) || 'manual',
+				fd: frontmatter.fd as string | undefined,
+				fn: frontmatter.fn as string | undefined,
+				fp: frontmatter.fp as string | undefined,
 				file: file
 			};
 		} catch (error) {
@@ -178,6 +193,7 @@ export class ExpenseService {
 		}
 
 		const updated = { ...current, ...data };
+		await this.validateLinkedContext(updated);
 		const frontmatter = generateFrontmatter(updated);
 		const contentBody = generateContentBody(updated);
 		const fullContent = frontmatter + contentBody;
@@ -228,6 +244,14 @@ export class ExpenseService {
 		return allTransactions.filter(t => 
 			t.category === category || t.tags.includes(category)
 		);
+	}
+
+	async getProjectSummary(file: TFile): Promise<FinanceContextSummary> {
+		return this.getContextSummary('project', file);
+	}
+
+	async getAreaSummary(file: TFile): Promise<FinanceContextSummary> {
+		return this.getContextSummary('area', file);
 	}
 
 	/**
@@ -333,6 +357,10 @@ export class ExpenseService {
 	 * Save report as markdown file
 	 */
 	async saveReportAsFile(report: PeriodReport): Promise<TFile> {
+		if (this.canUseParaCoreRecords()) {
+			return this.saveReportViaParaCore(report);
+		}
+
 		// Ensure reports folder exists
 		const reportsFolder = `${this.settings.expenseFolder}/Reports`;
 		const folder = this.app.vault.getAbstractFileByPath(reportsFolder);
@@ -353,5 +381,207 @@ export class ExpenseService {
 		const file = await this.app.vault.create(filepath, content);
 		
 		return file;
+	}
+
+	private async createTransactionViaParaCore(data: TransactionData): Promise<TFile> {
+		if (!this.paraCoreApi) {
+			throw new Error('PARA Core API is not available');
+		}
+
+		const type = data.type === 'expense' ? 'finance-expense' : 'finance-income';
+		const filename = generateFilename(data).replace(/\.md$/i, '');
+		const date = data.dateTime.split('T')[0] || new Date(data.dateTime).toISOString().split('T')[0];
+		const tags = Array.from(new Set(['finance', data.type, ...data.tags]));
+
+		return this.paraCoreApi.createNote({
+			type,
+			title: data.comment || filename,
+			fileNameOverride: filename,
+			openAfterCreate: false,
+			frontmatterOverrides: {
+				date,
+				dateTime: data.dateTime,
+				amount: data.amount,
+				currency: data.currency,
+				comment: data.comment,
+				area: data.area ?? null,
+				project: data.project ?? null,
+				category: data.category || data.tags[0] || 'uncategorized',
+				source: data.source,
+				tags,
+				fn: data.fn,
+				fd: data.fd,
+				fp: data.fp,
+				details: data.details ?? [],
+			},
+		});
+	}
+
+	private async saveReportViaParaCore(report: PeriodReport): Promise<TFile> {
+		if (!this.paraCoreApi) {
+			throw new Error('PARA Core API is not available');
+		}
+
+		const startDate = report.startDate.toISOString().split('T')[0];
+		const endDate = report.endDate.toISOString().split('T')[0];
+		const title = `Financial Report ${startDate} to ${endDate}`;
+		const filename = `financial-report-${startDate}-to-${endDate}`;
+
+		return this.paraCoreApi.createNote({
+			type: 'finance-report',
+			title,
+			fileNameOverride: filename,
+			openAfterCreate: false,
+			frontmatterOverrides: {
+				periodStart: startDate,
+				periodEnd: endDate,
+				currency: this.settings.defaultCurrency,
+				totalExpenses: report.totalExpenses,
+				totalIncome: report.totalIncome,
+				balance: report.balance,
+				tags: ['finance', 'report'],
+				report,
+			},
+		});
+	}
+
+	private getTransactionFiles(): TFile[] {
+		const folders = [this.settings.expenseFolder];
+		if (this.financeDomain) {
+			folders.push(`${this.financeDomain.recordsPath}/Transactions`);
+		}
+
+		const filesByPath = new Map<string, TFile>();
+		for (const folderPath of folders) {
+			const folder = this.app.vault.getAbstractFileByPath(folderPath);
+			if (!folder || !(folder instanceof TFolder)) {
+				continue;
+			}
+
+			for (const child of folder.children) {
+				if (child instanceof TFile && child.extension === 'md') {
+					filesByPath.set(child.path, child);
+				}
+			}
+		}
+
+		return [...filesByPath.values()];
+	}
+
+	private normalizeTransactionType(type: string): 'expense' | 'income' {
+		if (type === 'finance-expense') {
+			return 'expense';
+		}
+		if (type === 'finance-income') {
+			return 'income';
+		}
+		return type === 'income' ? 'income' : 'expense';
+	}
+
+	private canUseParaCoreRecords(): boolean {
+		return Boolean(this.paraCoreApi && this.financeDomain);
+	}
+
+	private async getContextSummary(
+		target: 'project' | 'area',
+		file: TFile,
+	): Promise<FinanceContextSummary> {
+		const transactions = await this.getAllTransactions();
+		const matching = transactions.filter((transaction) =>
+			this.matchesLinkedFile(target === 'project' ? transaction.project : transaction.area, file),
+		);
+
+		const totalExpenses = matching
+			.filter((transaction) => transaction.type === 'expense')
+			.reduce((sum, transaction) => sum + transaction.amount, 0);
+		const totalIncome = matching
+			.filter((transaction) => transaction.type === 'income')
+			.reduce((sum, transaction) => sum + transaction.amount, 0);
+		const linkedProjectCount = new Set(
+			matching
+				.map((transaction) => transaction.project)
+				.filter((value): value is string => typeof value === 'string' && value.trim().length > 0),
+		).size;
+
+		return {
+			totalExpenses,
+			totalIncome,
+			balance: totalIncome - totalExpenses,
+			transactionCount: matching.length,
+			linkedProjectCount,
+			recentTransactions: matching
+				.slice()
+				.sort((left, right) => new Date(right.dateTime).getTime() - new Date(left.dateTime).getTime())
+				.slice(0, 5),
+		};
+	}
+
+	private async validateLinkedContext(data: Pick<TransactionData, 'area' | 'project'>): Promise<void> {
+		await this.validateTypedWikiReference(data.area, 'area', 'Area');
+		await this.validateTypedWikiReference(data.project, 'project', 'Project');
+	}
+
+	private async validateTypedWikiReference(
+		value: string | undefined,
+		expectedType: 'area' | 'project',
+		label: 'Area' | 'Project',
+	): Promise<void> {
+		const linkPath = this.extractLinkPath(value);
+		if (!linkPath) {
+			return;
+		}
+
+		const file = this.app.metadataCache.getFirstLinkpathDest(linkPath, '');
+		if (!file) {
+			throw new Error(`${label} ${this.formatReferenceLabel(linkPath)} does not exist`);
+		}
+
+		const frontmatterType = this.readFrontmatterType(file);
+		if (!frontmatterType) {
+			throw new Error(
+				`${label} ${this.formatReferenceLabel(linkPath)} must have frontmatter type "${expectedType}"`,
+			);
+		}
+		if (frontmatterType !== expectedType) {
+			throw new Error(
+				`${label} ${this.formatReferenceLabel(linkPath)} points to note with type "${frontmatterType}", expected "${expectedType}"`,
+			);
+		}
+	}
+
+	private extractLinkPath(value: string | undefined): string | null {
+		const trimmed = value?.trim();
+		if (!trimmed) {
+			return null;
+		}
+
+		const wikiLinkMatch = trimmed.match(/^\[\[([\s\S]+?)\]\]$/);
+		const rawLink = wikiLinkMatch ? wikiLinkMatch[1] : trimmed;
+		const linkTarget = rawLink.split('|')[0]?.trim();
+		if (!linkTarget) {
+			return null;
+		}
+
+		return linkTarget.split('#')[0]?.trim() || null;
+	}
+
+	private readFrontmatterType(file: TFile): string | null {
+		const cache = this.app.metadataCache.getFileCache(file);
+		const frontmatterType = cache?.frontmatter?.type;
+		return typeof frontmatterType === 'string' ? frontmatterType : null;
+	}
+
+	private formatReferenceLabel(linkPath: string): string {
+		return `[[${linkPath}]]`;
+	}
+
+	private matchesLinkedFile(reference: string | undefined, file: TFile): boolean {
+		const linkPath = this.extractLinkPath(reference);
+		if (!linkPath) {
+			return false;
+		}
+
+		const resolved = this.app.metadataCache.getFirstLinkpathDest(linkPath, '');
+		return resolved?.path === file.path;
 	}
 }

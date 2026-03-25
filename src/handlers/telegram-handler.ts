@@ -7,6 +7,13 @@ import { ExpenseService } from '../services/expense-service';
 import { ProverkaChekaClient } from '../utils/api-client';
 import { PLUGIN_UNIT_NAME } from '../utils/constants';
 
+interface ParsedTelegramTransactionInput {
+	amount: number;
+	comment: string;
+	area?: string;
+	project?: string;
+}
+
 export class TelegramHandler extends BaseHandler {
 	private app: App;
 	private expenseService: ExpenseService;
@@ -54,28 +61,47 @@ export class TelegramHandler extends BaseHandler {
 	}
 
 
-    parseArgs(args: string): { amount: number, comment: string } | null {
-        // Split by the first space(s) found
-        const [amountStr, ...commentParts] = args.trim().split(/\s+/);
-        
-        // Join the rest of the array back into a single string
-        const comment = commentParts.join(' ');
-        const amount = parseFloat(amountStr);
+    parseArgs(args: string): ParsedTelegramTransactionInput | null {
+		const trimmed = args.trim();
+		if (!trimmed) {
+			return null;
+		}
 
-        if (isNaN(amount) || !comment) {
-            return null;
-        }
+		const [head, ...metadataParts] = trimmed.split('|').map((part) => part.trim()).filter((part) => part.length > 0);
+		if (!head) {
+			return null;
+		}
 
-        return { amount, comment };
+		const [amountStr, ...commentParts] = head.split(/\s+/);
+		const amount = parseFloat(amountStr);
+		const comment = commentParts.join(' ').trim();
+		if (isNaN(amount) || !comment) {
+			return null;
+		}
+
+		const metadata = this.parseMetadataParts(metadataParts);
+		return {
+			amount,
+			comment,
+			area: metadata.area,
+			project: metadata.project,
+		};
     }
 
-    makeTransactionData(type: TransactionType, amount: number, comment: string): TransactionData {
+    makeTransactionData(
+		type: TransactionType,
+		amount: number,
+		comment: string,
+		metadata?: { area?: string; project?: string },
+	): TransactionData {
         return {
             type,
             amount,
             currency: 'RUB',
             dateTime: new Date().toISOString(),
             comment,
+			area: metadata?.area,
+			project: metadata?.project,
             tags: ['telegram'],
             category: 'Other',
             source: 'telegram'
@@ -92,12 +118,14 @@ export class TelegramHandler extends BaseHandler {
 
         const parsed_args = this.parseArgs(args);
         if (!parsed_args) {
-            const message = 'To add an expense, send:\n/expense <amount> <comment>\n\nExample:\n/expense 500 Lunch at cafe';            
+            const message = 'To add an expense, send:\n/expense <amount> <comment>\nOptional metadata: | area=Health | project=My Project\n\nExample:\n/expense 500 Lunch at cafe | area=Health';            
             return { processed: true, answer: message };
         } else {
             try {
-                const { amount, comment } = parsed_args;
-                await this.expenseService.createTransaction(this.makeTransactionData('expense', amount, comment));                
+                const { amount, comment, area, project } = parsed_args;
+                await this.expenseService.createTransaction(
+					this.makeTransactionData('expense', amount, comment, { area, project }),
+				);
                 const emoji = '💸';
 
                 console.log(`Saved expense: ${amount.toFixed(2)} RUB ${comment}`);
@@ -119,12 +147,14 @@ export class TelegramHandler extends BaseHandler {
 
         const parsed_args = this.parseArgs(args);
         if (!parsed_args) {
-            const message = 'To add income, send:\n/income <amount> <comment>\n\nExample:\n/income 50000 Salary';            
+            const message = 'To add income, send:\n/income <amount> <comment>\nOptional metadata: | area=Career | project=My Project\n\nExample:\n/income 50000 Salary | area=Career';            
             return { processed: true, answer: message };
         } else {
             try {
-                const { amount, comment } = parsed_args;
-                await this.expenseService.createTransaction(this.makeTransactionData('income', amount, comment));
+                const { amount, comment, area, project } = parsed_args;
+                await this.expenseService.createTransaction(
+					this.makeTransactionData('income', amount, comment, { area, project }),
+				);
                 
                 const emoji = '💰';
                 console.log(`Saved income: ${amount.toFixed(2)} RUB ${comment}`);
@@ -144,37 +174,29 @@ export class TelegramHandler extends BaseHandler {
 			return { processed: false, answer: null };
 		}
 
-		// Parse text like "/expense 500 Lunch" or "500 Lunch"
-		const match = text.match(/^\/?(expense|income)\s+([\d.]+)\s+(.+)$/i);
+		const match = text.match(/^\/?(expense|income)\s+(.+)$/i);
 		if (!match) {
 			return { processed: false, answer: null };
 		}
 
-		const [, typeStr, amountStr, comment] = match;
+		const [, typeStr, payload] = match;
 		const type: TransactionType = typeStr.toLowerCase() === 'income' ? 'income' : 'expense';
-		const amount = parseFloat(amountStr);
-
-		if (isNaN(amount) || amount <= 0) {
-            const message = 'Invalid amount. Please use format: /expense 500 Comment';
+		const parsed = this.parseArgs(payload);
+		if (!parsed || parsed.amount <= 0) {
+            const message = 'Invalid amount. Please use format: /expense 500 Comment | area=Health | project=My Project';
 			return { processed: true, answer: message };
 		}
 
 		try {
-			const data: TransactionData = {
-				type,
-				amount,
-				currency: 'RUB',
-				dateTime: new Date().toISOString(),
-				comment: comment.trim(),
-				tags: ['telegram'],
-				category: type === 'expense' ? 'Other' : 'Other',
-				source: 'telegram'
-			};
+			const data = this.makeTransactionData(type, parsed.amount, parsed.comment, {
+				area: parsed.area,
+				project: parsed.project,
+			});
 
 			await this.expenseService.createTransaction(data);
-			console.log(`Saved ${type}: ${amount.toFixed(2)} RUB ${comment}`);
+			console.log(`Saved ${type}: ${parsed.amount.toFixed(2)} RUB ${parsed.comment}`);
 			const emoji = type === 'expense' ? '💸' : '💰';
-            const message = `${emoji} Saved: ${type} ${amount.toFixed(2)} RUB\n${comment}`;
+            const message = `${emoji} Saved: ${type} ${parsed.amount.toFixed(2)} RUB\n${parsed.comment}`;
 			return { processed: true, answer: message };
 		} catch (error) {
 			const message = 'Error saving transaction: ' + (error as Error).message;
@@ -218,7 +240,10 @@ export class TelegramHandler extends BaseHandler {
 			
 			// Update comment with caption if provided
 			if (caption && caption.trim()) {
-				result.data.comment = caption.trim();
+				const parsedCaption = this.parseCaption(caption);
+				result.data.comment = parsedCaption.comment || result.data.comment;
+				result.data.area = parsedCaption.area;
+				result.data.project = parsedCaption.project;
 			}
 			
 			// Save transaction
@@ -249,5 +274,55 @@ export class TelegramHandler extends BaseHandler {
 			success: false,
 			error: 'Telegram handler works via bot commands, not direct invocation'
 		};
+	}
+
+	private parseCaption(caption: string): { comment: string; area?: string; project?: string } {
+		const parts = caption
+			.split('|')
+			.map((part) => part.trim())
+			.filter((part) => part.length > 0);
+		if (parts.length === 0) {
+			return { comment: '' };
+		}
+
+		const [comment, ...metadataParts] = parts;
+		const metadata = this.parseMetadataParts(metadataParts);
+		return {
+			comment,
+			area: metadata.area,
+			project: metadata.project,
+		};
+	}
+
+	private parseMetadataParts(parts: string[]): { area?: string; project?: string } {
+		const result: { area?: string; project?: string } = {};
+		for (const part of parts) {
+			const [rawKey, ...rawValueParts] = part.split('=');
+			if (!rawKey || rawValueParts.length === 0) {
+				continue;
+			}
+
+			const key = rawKey.trim().toLowerCase();
+			const rawValue = rawValueParts.join('=').trim();
+			if (!rawValue) {
+				continue;
+			}
+
+			if (key === 'area') {
+				result.area = this.normalizeWikiLink(rawValue);
+			}
+			if (key === 'project') {
+				result.project = this.normalizeWikiLink(rawValue);
+			}
+		}
+		return result;
+	}
+
+	private normalizeWikiLink(value: string): string {
+		const trimmed = value.trim();
+		if (/^\[\[.*\]\]$/.test(trimmed)) {
+			return trimmed;
+		}
+		return `[[${trimmed}]]`;
 	}
 }
