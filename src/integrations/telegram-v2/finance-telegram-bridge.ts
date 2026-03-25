@@ -187,7 +187,9 @@ export class FinanceTelegramBridgeV2 {
 			return { processed: false, answer: null };
 		}
 
-		const payload = this.api.decodeCallbackPayload(callback.data);
+		const payload = this.api.decodeCallbackPayload
+			? this.api.decodeCallbackPayload(callback.data)
+			: this.tryDecodeCallbackPayload(callback.data);
 		if (!payload || payload.unit !== PLUGIN_UNIT_NAME) {
 			return { processed: false, answer: null };
 		}
@@ -690,10 +692,18 @@ export class FinanceTelegramBridgeV2 {
 	}
 
 	private encodeCallbackPayload(payload: TelegramCallbackPayload): string {
-		if (!this.api) {
+		if (!this.api?.encodeCallbackPayload) {
 			return JSON.stringify(payload);
 		}
 		return this.api.encodeCallbackPayload(payload);
+	}
+
+	private tryDecodeCallbackPayload(data: string): TelegramCallbackPayload | null {
+		try {
+			return JSON.parse(data) as TelegramCallbackPayload;
+		} catch {
+			return null;
+		}
 	}
 
 	private normalizeWikiLink(value: string): string {
