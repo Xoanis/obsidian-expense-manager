@@ -297,6 +297,13 @@ It registers:
 
 This means finance becomes part of the same operational layer as your PARA vault instead of living as an isolated tracker.
 
+## Architecture
+
+Internal service interaction and the updated Telegram finance intake flow are documented in:
+
+- [docs/service-architecture.md](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/docs/service-architecture.md)
+- [docs/ai-finance-intake-provider.md](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/docs/ai-finance-intake-provider.md)
+
 ## Development
 
 ### Build

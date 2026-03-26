@@ -71,6 +71,18 @@ export interface ExpenseManagerSettings {
 
 	/** Send proactive Telegram budget alerts for current monthly report */
 	sendProactiveTelegramBudgetAlerts: boolean;
+
+	/** Enable AI-backed finance text intake for free-form inputs */
+	enableAiFinanceTextIntake: boolean;
+
+	/** Base URL for an OpenAI-compatible chat completions endpoint */
+	aiFinanceApiBaseUrl: string;
+
+	/** API key for the AI finance endpoint */
+	aiFinanceApiKey: string;
+
+	/** Model name for AI-backed finance text extraction */
+	aiFinanceModel: string;
 }
 
 /**
@@ -114,4 +126,8 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	budgetForecastStartDay: 5,
 	dashboardContributionMode: 'interactive',
 	sendProactiveTelegramBudgetAlerts: false,
+	enableAiFinanceTextIntake: false,
+	aiFinanceApiBaseUrl: 'https://api.openai.com/v1',
+	aiFinanceApiKey: '',
+	aiFinanceModel: 'gpt-4.1-mini',
 };

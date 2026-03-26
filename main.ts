@@ -24,6 +24,7 @@ import { ReportSyncService } from './src/services/report-sync-service';
 import { TelegramChartService } from './src/services/telegram-chart-service';
 import { TelegramBudgetAlertService } from './src/services/telegram-budget-alert-service';
 import { MigrationService } from './src/services/migration-service';
+import { FinanceIntakeService } from './src/services/finance-intake-service';
 import { ReportPeriodModal } from './src/ui/report-period-modal';
 import { ReportsModal } from './src/ui/reports-modal';
 import { ITelegramBotPluginAPIv1 } from './telegram_plugin_api';
@@ -51,6 +52,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private reportSyncService!: ReportSyncService;
 	private telegramChartService!: TelegramChartService;
 	private telegramBudgetAlertService!: TelegramBudgetAlertService;
+	private financeIntakeService!: FinanceIntakeService;
 
 	async onload() {
 		await this.loadSettings();
@@ -69,6 +71,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			this.telegramBudgetAlertService,
 		);
 		this.telegramChartService = new TelegramChartService(this.reportSyncService);
+		this.financeIntakeService = new FinanceIntakeService(this.settings);
 		this.registerParaCoreTelegramCardContributions();
 
 		// Initialize Telegram handler if API is available
@@ -127,6 +130,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			this.telegramBudgetAlertService,
 		);
 		this.telegramChartService = new TelegramChartService(this.reportSyncService);
+		this.financeIntakeService = new FinanceIntakeService(this.settings);
 		this.registerParaCoreTelegramCardContributions();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 		this.telegramApiV2?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
@@ -309,6 +313,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 					this.expenseService,
 					this.reportSyncService,
 					this.telegramChartService,
+					this.financeIntakeService,
 					this.settings,
 				);
 				if (this.financeTelegramBridgeV2.register()) {
@@ -494,6 +499,54 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.showConfirmationNotice)
 				.onChange(async (value) => {
 					this.plugin.settings.showConfirmationNotice = value;
+					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createEl('h3', { text: 'AI finance intake' });
+
+		new Setting(containerEl)
+			.setName('Enable AI finance text intake')
+			.setDesc('Use an OpenAI-compatible endpoint for free-form `/finance_record` text extraction')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableAiFinanceTextIntake)
+				.onChange(async (value) => {
+					this.plugin.settings.enableAiFinanceTextIntake = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('AI finance API base URL')
+			.setDesc('Base URL for an OpenAI-compatible chat completions API')
+			.addText(text => text
+				.setPlaceholder('https://api.openai.com/v1')
+				.setValue(this.plugin.settings.aiFinanceApiBaseUrl)
+				.onChange(async (value) => {
+					this.plugin.settings.aiFinanceApiBaseUrl = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('AI finance API key')
+			.setDesc('API key used for AI-backed finance text extraction')
+			.addText(text => {
+				text
+					.setPlaceholder('Enter your API key')
+					.setValue(this.plugin.settings.aiFinanceApiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.aiFinanceApiKey = value.trim();
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.type = 'password';
+			});
+
+		new Setting(containerEl)
+			.setName('AI finance model')
+			.setDesc('Model name for AI-backed finance text extraction')
+			.addText(text => text
+				.setPlaceholder('gpt-4.1-mini')
+				.setValue(this.plugin.settings.aiFinanceModel)
+				.onChange(async (value) => {
+					this.plugin.settings.aiFinanceModel = value.trim();
 					await this.plugin.saveSettings();
 				}));
 
