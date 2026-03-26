@@ -34,11 +34,17 @@ const CALLBACK_ACTIONS = {
 	projectBudgetPrompt: 'pb',
 	monthlyReportOpen: 'mr',
 	monthlyChartSend: 'mc',
+	proposalConfirm: 'pc',
+	proposalReject: 'pr',
+	proposalSetProject: 'pp',
+	proposalSetArea: 'pa',
 } as const;
 
 const CALLBACK_UNIT_ALIAS = 'f';
 
 type CaptureTarget = 'project' | 'area' | 'generic';
+type CaptureIntent = TransactionType | 'neutral';
+type ProposalField = 'project' | 'area';
 
 interface ParsedTelegramTransactionInput {
 	amount: number;
@@ -47,20 +53,25 @@ interface ParsedTelegramTransactionInput {
 	project?: string;
 }
 
+interface ParsedFlexibleTelegramTransactionInput extends ParsedTelegramTransactionInput {
+	transactionType: TransactionType;
+}
+
 interface CallbackTokenState {
-	kind: 'capture' | 'project-budget' | 'monthly-report' | 'monthly-chart';
+	kind: 'capture' | 'project-budget' | 'monthly-report' | 'monthly-chart' | 'proposal';
 	createdAt: number;
 	path?: string;
 	page?: number;
-	transactionType?: TransactionType;
+	intent?: CaptureIntent;
 	target?: Exclude<CaptureTarget, 'generic'>;
 	monthKey?: string;
 	section?: MonthlyReportSection;
 	chartType?: TelegramChartType;
+	proposalId?: string;
 }
 
 interface CaptureStartOptions {
-	transactionType: TransactionType;
+	intent: CaptureIntent;
 	target?: CaptureTarget;
 	path?: string;
 	page?: number;
@@ -69,11 +80,20 @@ interface CaptureStartOptions {
 	originLabel?: string;
 }
 
+interface PendingFinanceProposal {
+	id: string;
+	data: TransactionData;
+	createdAt: number;
+	updatedAt: number;
+}
+
 export class FinanceTelegramBridgeV2 {
 	private readonly api: TelegramBotApiV2 | null;
 	private readonly callbackTokenTtlMs = 1000 * 60 * 30;
 	private callbackTokenCounter = 0;
 	private readonly callbackTokens = new Map<string, CallbackTokenState>();
+	private proposalCounter = 0;
+	private readonly proposals = new Map<string, PendingFinanceProposal>();
 
 	constructor(
 		private readonly app: App,
@@ -207,51 +227,49 @@ export class FinanceTelegramBridgeV2 {
 				};
 			}
 		}
-		if (command !== 'expense' && command !== 'income') {
+		if (command !== 'expense' && command !== 'income' && command !== 'finance_record') {
 			return { processed: false, answer: null };
 		}
 
-		const transactionType: TransactionType = command === 'income' ? 'income' : 'expense';
+		const intent: CaptureIntent = command === 'income'
+			? 'income'
+			: command === 'expense'
+				? 'expense'
+				: 'neutral';
 		const args = message.command.args?.trim() ?? '';
 		if (!args) {
 			await this.beginCaptureFlow({
-				transactionType,
+				intent,
 				target: 'generic',
 			});
 			return {
 				processed: true,
-				answer: `Send the next message as ${transactionType}. You can send text or a receipt image.`,
+				answer: this.buildCapturePrompt(intent),
 			};
 		}
 
 		try {
-			const parsed = this.parseArgs(args);
+			const parsed = this.parseArgsForIntent(args, intent);
 			if (!parsed || parsed.amount <= 0) {
 				return {
 					processed: true,
-					answer: 'Invalid amount. Use `/expense 500 Lunch | area=Health | project=My Project` or call `/expense` and send the next message separately.',
+					answer: this.buildInvalidArgsPrompt(intent),
 				};
 			}
 
-			const data = this.makeTransactionData(transactionType, parsed.amount, parsed.comment, {
+			const data = this.makeTransactionData(parsed.transactionType, parsed.amount, parsed.comment, {
 				area: parsed.area,
 				project: parsed.project,
 			});
-			await this.expenseService.createTransaction(data);
+			await this.sendProposal(data);
 			return {
 				processed: true,
-				answer: this.formatSuccessMessage(data, 'Saved from command.'),
+				answer: null,
 			};
 		} catch (error) {
-			if (error instanceof DuplicateTransactionError) {
-				return {
-					processed: true,
-					answer: 'Duplicate transaction found. Skipping save.',
-				};
-			}
 			return {
 				processed: true,
-				answer: `Error saving transaction: ${(error as Error).message}`,
+				answer: `Error preparing transaction: ${(error as Error).message}`,
 			};
 		}
 	}
@@ -342,6 +360,38 @@ export class FinanceTelegramBridgeV2 {
 			}
 		}
 
+		if (
+			payload.action === CALLBACK_ACTIONS.proposalConfirm
+			|| payload.action === CALLBACK_ACTIONS.proposalReject
+			|| payload.action === CALLBACK_ACTIONS.proposalSetProject
+			|| payload.action === CALLBACK_ACTIONS.proposalSetArea
+		) {
+			if (!payload.token) {
+				return { processed: true, answer: 'Finance proposal action is missing context.' };
+			}
+
+			const state = this.callbackTokens.get(payload.token);
+			if (!state || state.kind !== 'proposal' || !state.proposalId) {
+				return { processed: true, answer: 'Finance proposal expired. Start the capture flow again.' };
+			}
+
+			if (payload.action === CALLBACK_ACTIONS.proposalConfirm) {
+				return this.confirmProposal(state.proposalId, callback.messageId);
+			}
+			if (payload.action === CALLBACK_ACTIONS.proposalReject) {
+				return this.rejectProposal(state.proposalId, callback.messageId);
+			}
+
+			const field: ProposalField = payload.action === CALLBACK_ACTIONS.proposalSetProject ? 'project' : 'area';
+			await this.beginProposalFieldFlow(field, state.proposalId, callback.messageId);
+			return {
+				processed: true,
+				answer: field === 'project'
+					? 'Send project note name or wiki link, or "-" to clear it.'
+					: 'Send area note name or wiki link, or "-" to clear it.',
+			};
+		}
+
 		if (payload.action !== CALLBACK_ACTIONS.startCapture || !payload.token) {
 			return { processed: false, answer: null };
 		}
@@ -357,7 +407,7 @@ export class FinanceTelegramBridgeV2 {
 		}
 
 		await this.beginCaptureFlow({
-			transactionType: state.transactionType ?? 'expense',
+			intent: state.intent ?? 'expense',
 			target: state.target ?? 'project',
 			path: state.path,
 			page: state.page,
@@ -368,7 +418,7 @@ export class FinanceTelegramBridgeV2 {
 
 		return {
 			processed: true,
-			answer: `Send the next message for ${state.transactionType ?? 'expense'} in ${file.basename}. Text or receipt image are both supported.`,
+			answer: `Finance capture opened for ${file.basename}. ${this.buildCapturePrompt(state.intent ?? 'expense')}`,
 		};
 	}
 
@@ -377,16 +427,21 @@ export class FinanceTelegramBridgeV2 {
 		focus: InputFocusState,
 	): Promise<TelegramHandlerResult> {
 		const action = this.getFocusAction(focus);
+		if (message.command?.name?.toLowerCase() === 'cancel' && action?.startsWith('finance.')) {
+			await this.api?.clearInputFocus(PLUGIN_UNIT_NAME);
+			return { processed: true, answer: 'Finance input cancelled.' };
+		}
 		if (action !== 'finance.capture') {
 			if (action === 'finance.project-budget') {
 				return this.handleProjectBudgetFocusedInput(message, focus);
 			}
+			if (action === 'finance.proposal.project') {
+				return this.handleProposalFieldFocusedInput(message, focus, 'project');
+			}
+			if (action === 'finance.proposal.area') {
+				return this.handleProposalFieldFocusedInput(message, focus, 'area');
+			}
 			return { processed: false, answer: null };
-		}
-
-		if (message.command?.name?.toLowerCase() === 'cancel') {
-			await this.api?.clearInputFocus(PLUGIN_UNIT_NAME);
-			return { processed: true, answer: 'Finance capture cancelled.' };
 		}
 
 		try {
@@ -398,15 +453,15 @@ export class FinanceTelegramBridgeV2 {
 			if (!text) {
 				return {
 					processed: true,
-					answer: 'Send text like `500 Lunch` or send a receipt image with QR code.',
+					answer: this.buildCapturePrompt(this.getFocusIntent(focus)),
 				};
 			}
 
-			const parsed = this.parseArgs(text);
+			const parsed = this.parseArgsForIntent(text, this.getFocusIntent(focus));
 			if (!parsed || parsed.amount <= 0) {
 				return {
 					processed: true,
-					answer: 'Could not parse transaction text. Example: `500 Lunch | area=Health | project=My Project`.',
+					answer: this.buildInvalidArgsPrompt(this.getFocusIntent(focus)),
 				};
 			}
 			const scopedMetadataError = this.validateScopedMetadata(focus, parsed);
@@ -418,7 +473,7 @@ export class FinanceTelegramBridgeV2 {
 			}
 
 			const data = this.makeTransactionData(
-				this.getFocusTransactionType(focus),
+				parsed.transactionType,
 				parsed.amount,
 				parsed.comment,
 				this.mergeCaptureMetadata(
@@ -429,21 +484,15 @@ export class FinanceTelegramBridgeV2 {
 					parsed,
 				),
 			);
-			await this.expenseService.createTransaction(data);
+			await this.sendProposal(data);
 			return {
 				processed: true,
-				answer: this.formatSuccessMessage(data, 'Saved from focused input.'),
+				answer: null,
 			};
 		} catch (error) {
-			if (error instanceof DuplicateTransactionError) {
-				return {
-					processed: true,
-					answer: 'Duplicate transaction found. Skipping save.',
-				};
-			}
 			return {
 				processed: true,
-				answer: `Error saving transaction: ${(error as Error).message}`,
+				answer: `Error preparing transaction: ${(error as Error).message}`,
 			};
 		}
 	}
@@ -495,7 +544,10 @@ export class FinanceTelegramBridgeV2 {
 					answer: scopedMetadataError,
 				};
 			}
-			result.data.type = this.getFocusTransactionType(focus);
+			const intent = this.getFocusIntent(focus);
+			if (intent !== 'neutral') {
+				result.data.type = intent;
+			}
 			result.data.source = 'telegram';
 			result.data.area = captionMetadata.area ?? this.getFocusContextString(focus, 'area') ?? undefined;
 			result.data.project = captionMetadata.project ?? this.getFocusContextString(focus, 'project') ?? undefined;
@@ -506,24 +558,15 @@ export class FinanceTelegramBridgeV2 {
 			result.data.artifactFileName = file.suggestedName;
 			result.data.artifactMimeType = file.mimeType;
 
-			await this.expenseService.createTransaction(result.data);
+			await this.sendProposal(result.data);
 			return {
 				processed: true,
-				answer: this.formatSuccessMessage(
-					result.data,
-					result.source === 'api' ? 'Saved from receipt via API.' : 'Saved from local QR.',
-				),
+				answer: null,
 			};
 		} catch (error) {
-			if (error instanceof DuplicateTransactionError) {
-				return {
-					processed: true,
-					answer: 'Duplicate transaction found. Skipping save.',
-				};
-			}
 			return {
 				processed: true,
-				answer: `Error saving receipt transaction: ${(error as Error).message}`,
+				answer: `Error preparing receipt transaction: ${(error as Error).message}`,
 			};
 		} finally {
 			await this.app.vault.delete(savedFile);
@@ -540,7 +583,7 @@ export class FinanceTelegramBridgeV2 {
 			expiresInMs: 1000 * 60 * 10,
 			context: {
 				action: 'finance.capture',
-				transactionType: options.transactionType,
+				intent: options.intent,
 				target: options.target ?? 'generic',
 				path: options.path,
 				page: options.page,
@@ -559,9 +602,9 @@ export class FinanceTelegramBridgeV2 {
 				: 'Optional metadata can still be added as `| area=Health | project=My Project`.';
 		await this.api.sendMessage(
 			[
-				`Send the next message for ${options.transactionType}.`,
+				`Send the next finance input in ${options.intent === 'neutral' ? 'neutral' : options.intent} mode.`,
 				targetHint,
-				'Supported now: plain text like `500 Lunch` or a receipt image with QR code.',
+				this.buildCapturePrompt(options.intent),
 				metadataHint,
 				'Use `/cancel` to stop this flow.',
 			].join('\n'),
@@ -779,7 +822,7 @@ export class FinanceTelegramBridgeV2 {
 				action: CALLBACK_ACTIONS.startCapture,
 				token: this.createCallbackToken({
 					kind: 'capture',
-					transactionType,
+					intent: transactionType,
 					target,
 					path,
 					page,
@@ -790,6 +833,7 @@ export class FinanceTelegramBridgeV2 {
 
 	private createCallbackToken(state: Omit<CallbackTokenState, 'createdAt'>): string {
 		this.cleanupExpiredCallbackTokens();
+		this.cleanupExpiredProposals();
 		this.callbackTokenCounter += 1;
 		const token = this.callbackTokenCounter.toString(36);
 		this.callbackTokens.set(token, {
@@ -833,6 +877,66 @@ export class FinanceTelegramBridgeV2 {
 			area: metadata.area,
 			project: metadata.project,
 		};
+	}
+
+	private parseArgsForIntent(
+		args: string,
+		intent: CaptureIntent,
+	): ParsedFlexibleTelegramTransactionInput | null {
+		if (intent === 'neutral') {
+			return this.parseNeutralArgs(args);
+		}
+
+		const parsed = this.parseArgs(args);
+		if (!parsed) {
+			return null;
+		}
+
+		return {
+			...parsed,
+			transactionType: intent,
+		};
+	}
+
+	private parseNeutralArgs(args: string): ParsedFlexibleTelegramTransactionInput | null {
+		const commandMatch = args.match(/^\/?(expense|income)\s+(.+)$/i);
+		if (commandMatch) {
+			const [, rawType, payload] = commandMatch;
+			const parsed = this.parseArgs(payload);
+			if (!parsed) {
+				return null;
+			}
+
+			return {
+				...parsed,
+				transactionType: rawType.toLowerCase() === 'income' ? 'income' : 'expense',
+			};
+		}
+
+		const parsed = this.parseArgs(args);
+		if (!parsed) {
+			return null;
+		}
+
+		const trimmed = args.trim();
+		const firstPart = trimmed.split('|')[0]?.trim() ?? '';
+		const amountToken = firstPart.split(/\s+/)[0] ?? '';
+		if (amountToken.startsWith('+')) {
+			return {
+				...parsed,
+				transactionType: 'income',
+				amount: Math.abs(parsed.amount),
+			};
+		}
+		if (amountToken.startsWith('-')) {
+			return {
+				...parsed,
+				transactionType: 'expense',
+				amount: Math.abs(parsed.amount),
+			};
+		}
+
+		return null;
 	}
 
 	private parseMonthlyReportArgument(rawArgs: string | undefined): Date {
@@ -958,6 +1062,210 @@ export class FinanceTelegramBridgeV2 {
 		return lines.join('\n');
 	}
 
+	private async sendProposal(data: TransactionData, messageId?: number): Promise<void> {
+		if (!this.api) {
+			return;
+		}
+
+		const proposal = this.createProposal(data);
+		const keyboard = this.buildProposalKeyboard(proposal.id);
+		const text = this.formatProposalMessage(proposal);
+		if (typeof messageId === 'number' && this.api.editMessage) {
+			await this.api.editMessage(messageId, text, { inlineKeyboard: keyboard });
+			return;
+		}
+
+		await this.api.sendMessage(text, { inlineKeyboard: keyboard });
+	}
+
+	private createProposal(data: TransactionData): PendingFinanceProposal {
+		this.cleanupExpiredProposals();
+		this.proposalCounter += 1;
+		const now = Date.now();
+		const proposal: PendingFinanceProposal = {
+			id: `fp-${this.proposalCounter.toString(36)}`,
+			data: {
+				...data,
+				amount: Number(data.amount.toFixed(2)),
+			},
+			createdAt: now,
+			updatedAt: now,
+		};
+		this.proposals.set(proposal.id, proposal);
+		return proposal;
+	}
+
+	private buildProposalKeyboard(proposalId: string): TelegramInlineKeyboard {
+		return [
+			[
+				this.buildProposalButton('Confirm', CALLBACK_ACTIONS.proposalConfirm, proposalId),
+				this.buildProposalButton('Reject', CALLBACK_ACTIONS.proposalReject, proposalId),
+			],
+			[
+				this.buildProposalButton('Set project', CALLBACK_ACTIONS.proposalSetProject, proposalId),
+				this.buildProposalButton('Set area', CALLBACK_ACTIONS.proposalSetArea, proposalId),
+			],
+		];
+	}
+
+	private buildProposalButton(
+		text: string,
+		action: typeof CALLBACK_ACTIONS.proposalConfirm
+			| typeof CALLBACK_ACTIONS.proposalReject
+			| typeof CALLBACK_ACTIONS.proposalSetProject
+			| typeof CALLBACK_ACTIONS.proposalSetArea,
+		proposalId: string,
+	) {
+		return {
+			text,
+			callbackData: this.encodeCallbackPayload({
+				unit: PLUGIN_UNIT_NAME,
+				action,
+				token: this.createCallbackToken({
+					kind: 'proposal',
+					proposalId,
+				}),
+			}),
+		};
+	}
+
+	private formatProposalMessage(proposal: PendingFinanceProposal, footer?: string): string {
+		const emoji = proposal.data.type === 'expense' ? '💸' : '💰';
+		const lines = [
+			`${emoji} Finance proposal`,
+			`Type: ${proposal.data.type}`,
+			`Amount: ${proposal.data.amount.toFixed(2)} ${proposal.data.currency}`,
+			`Date: ${proposal.data.dateTime}`,
+			`Description: ${proposal.data.description}`,
+			`Category: ${proposal.data.category || 'Other'}`,
+			`Project: ${proposal.data.project ?? 'not set'}`,
+			`Area: ${proposal.data.area ?? 'not set'}`,
+			`Source: ${proposal.data.source}`,
+		];
+		if (proposal.data.artifactFileName) {
+			lines.push(`Artifact: ${proposal.data.artifactFileName}`);
+		}
+		lines.push('', footer ?? 'Confirm to write this transaction to the vault, or refine the context first.');
+		return lines.join('\n');
+	}
+
+	private cleanupExpiredProposals(): void {
+		const now = Date.now();
+		for (const [proposalId, proposal] of this.proposals.entries()) {
+			if (now - proposal.updatedAt > this.callbackTokenTtlMs) {
+				this.proposals.delete(proposalId);
+			}
+		}
+	}
+
+	private async confirmProposal(
+		proposalId: string,
+		messageId?: number,
+	): Promise<TelegramHandlerResult> {
+		const proposal = this.proposals.get(proposalId);
+		if (!proposal) {
+			return { processed: true, answer: 'Finance proposal expired. Start capture again.' };
+		}
+
+		try {
+			await this.expenseService.createTransaction(proposal.data);
+			this.proposals.delete(proposalId);
+			if (typeof messageId === 'number' && this.api?.editMessage) {
+				await this.api.editMessage(
+					messageId,
+					this.formatSuccessMessage(proposal.data, 'Saved from Telegram finance proposal.'),
+				);
+			}
+			return { processed: true, answer: 'Finance transaction saved.' };
+		} catch (error) {
+			if (error instanceof DuplicateTransactionError) {
+				return { processed: true, answer: 'Duplicate transaction found. Proposal was not saved.' };
+			}
+			return {
+				processed: true,
+				answer: `Error saving finance proposal: ${(error as Error).message}`,
+			};
+		}
+	}
+
+	private async rejectProposal(
+		proposalId: string,
+		messageId?: number,
+	): Promise<TelegramHandlerResult> {
+		const proposal = this.proposals.get(proposalId);
+		if (!proposal) {
+			return { processed: true, answer: 'Finance proposal already expired.' };
+		}
+
+		this.proposals.delete(proposalId);
+		if (typeof messageId === 'number' && this.api?.editMessage) {
+			await this.api.editMessage(messageId, this.formatProposalMessage(proposal, 'Proposal rejected. Nothing was written to the vault.'));
+		}
+		return { processed: true, answer: 'Finance proposal rejected.' };
+	}
+
+	private async beginProposalFieldFlow(
+		field: ProposalField,
+		proposalId: string,
+		messageId?: number,
+	): Promise<void> {
+		if (!this.api) {
+			return;
+		}
+
+		await this.api.setInputFocus(PLUGIN_UNIT_NAME, {
+			mode: 'next-text',
+			expiresInMs: 1000 * 60 * 10,
+			context: {
+				action: field === 'project' ? 'finance.proposal.project' : 'finance.proposal.area',
+				proposalId,
+				messageId,
+			},
+		});
+	}
+
+	private async handleProposalFieldFocusedInput(
+		message: TelegramMessageContext,
+		focus: InputFocusState,
+		field: ProposalField,
+	): Promise<TelegramHandlerResult> {
+		const proposalId = this.getFocusContextString(focus, 'proposalId');
+		if (!proposalId) {
+			await this.api?.clearInputFocus(PLUGIN_UNIT_NAME);
+			return { processed: true, answer: 'Finance proposal context expired.' };
+		}
+
+		const proposal = this.proposals.get(proposalId);
+		if (!proposal) {
+			await this.api?.clearInputFocus(PLUGIN_UNIT_NAME);
+			return { processed: true, answer: 'Finance proposal expired. Start capture again.' };
+		}
+
+		const rawText = message.text?.trim();
+		if (!rawText) {
+			return {
+				processed: true,
+				answer: field === 'project'
+					? 'Send project note name or wiki link, or "-" to clear it.'
+					: 'Send area note name or wiki link, or "-" to clear it.',
+			};
+		}
+
+		const value = rawText === '-' ? undefined : this.normalizeWikiLink(rawText);
+		proposal.data[field] = value;
+		proposal.updatedAt = Date.now();
+		await this.api?.clearInputFocus(PLUGIN_UNIT_NAME);
+
+		const rawMessageId = focus.context?.messageId;
+		const proposalMessageId = typeof rawMessageId === 'number' ? rawMessageId : undefined;
+		await this.sendProposal(proposal.data, proposalMessageId);
+		this.proposals.delete(proposalId);
+		return {
+			processed: true,
+			answer: field === 'project' ? 'Project updated for the pending proposal.' : 'Area updated for the pending proposal.',
+		};
+	}
+
 	private isSupportedReceiptFile(file: TelegramFileDescriptor): boolean {
 		if (file.kind === 'photo') {
 			return true;
@@ -970,9 +1278,12 @@ export class FinanceTelegramBridgeV2 {
 		return typeof action === 'string' ? action : null;
 	}
 
-	private getFocusTransactionType(focus: InputFocusState): TransactionType {
-		const type = focus.context?.transactionType;
-		return type === 'income' ? 'income' : 'expense';
+	private getFocusIntent(focus: InputFocusState): CaptureIntent {
+		const intent = focus.context?.intent;
+		if (intent === 'income' || intent === 'neutral') {
+			return intent;
+		}
+		return 'expense';
 	}
 
 	private getFocusContextString(focus: InputFocusState, key: string): string | null {
@@ -992,6 +1303,20 @@ export class FinanceTelegramBridgeV2 {
 			return 'Area is already fixed by the current area card. Send the entry without `| area=...`.';
 		}
 		return null;
+	}
+
+	private buildCapturePrompt(intent: CaptureIntent): string {
+		if (intent === 'neutral') {
+			return 'For text, send `expense 500 Lunch` or `income 500 Salary`, or use signed amounts like `-500 Lunch` / `+500 Salary`. QR receipt images are also supported.';
+		}
+		return `Send plain text like \`500 Lunch\` or a receipt image with QR code. Every input becomes a proposal first, then you confirm it.`;
+	}
+
+	private buildInvalidArgsPrompt(intent: CaptureIntent): string {
+		if (intent === 'neutral') {
+			return 'Could not parse transaction text. Use `/finance_record expense 500 Lunch | area=Health | project=Trip` or `/finance_record +5000 Bonus`.';
+		}
+		return `Invalid amount. Use \`/${intent} 500 Lunch | area=Health | project=Trip\` or call \`/${intent}\` and send the next message separately.`;
 	}
 
 	private encodeCallbackPayload(payload: TelegramCallbackPayload): string {

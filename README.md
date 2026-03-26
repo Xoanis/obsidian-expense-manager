@@ -33,7 +33,7 @@ The plugin stores every transaction as a note, builds period reports from transa
 
 - `obsidian-telegram-bot`
   - enables Telegram input flows
-  - enables `/finance_summary` and `/finance_report`
+  - enables `/expense`, `/income`, `/finance_record`, `/finance_summary`, and `/finance_report`
   - enables inline keyboard navigation and PNG charts in Telegram
 
 ### Optional for QR enrichment
@@ -116,6 +116,8 @@ When `obsidian-telegram-bot` is installed and Telegram integration is enabled, t
 ```text
 /expense 500 Lunch
 /income 50000 Salary
+/finance_record expense 750 Taxi
+/finance_record +5000 Cashback
 ```
 
 You can also add scoped metadata:
@@ -124,7 +126,25 @@ You can also add scoped metadata:
 /expense 1200 Taxi | area=Life | project=Trip
 ```
 
-And you can send a receipt image with QR code in focused capture flows.
+You can also start an explicit finance capture without inline args:
+
+```text
+/expense
+/income
+/finance_record
+```
+
+Current Telegram finance intake is `proposal-first`:
+- the explicit command opens finance mode
+- the next text or QR receipt image is parsed into a proposed transaction
+- the bot shows `Confirm`, `Reject`, `Set project`, and `Set area`
+- the transaction is written to the vault only after `Confirm`
+
+`/finance_record` is the neutral mode:
+- for text, use `expense 500 Lunch`, `income 50000 Salary`, `-500 Lunch`, or `+5000 Bonus`
+- for QR receipts, the direction can come from the receipt data itself
+
+Receipt images with QR code are supported in focused capture flows.
 
 ### Reporting
 
