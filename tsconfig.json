@@ -1,6 +1,17 @@
 {
   "compilerOptions": {
     "baseUrl": ".",
+    "paths": {
+      "obsidian": [
+        "node_modules/obsidian"
+      ],
+      "obsidian-para-suite-contracts": [
+        "node_modules/obsidian-para-suite-contracts/src/index.ts"
+      ],
+      "obsidian-para-suite-contracts/*": [
+        "node_modules/obsidian-para-suite-contracts/src/*"
+      ]
+    },
     "inlineSourceMap": true,
     "inlineSources": true,
     "module": "ESNext",
