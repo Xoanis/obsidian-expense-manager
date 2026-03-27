@@ -17,6 +17,7 @@ import { getParaCoreApi } from './src/integrations/para-core/para-core-client';
 import { registerFinanceDomain } from './src/integrations/para-core/register-finance-domain';
 import { registerFinanceMetadataContributions } from './src/integrations/para-core/register-metadata-contributions';
 import { registerFinanceTemplateContributions } from './src/integrations/para-core/register-template-contributions';
+import { registerFinanceTelegramHelpContributions } from './src/integrations/para-core/register-telegram-help-contributions';
 import { IParaCoreApi, RegisteredParaDomain } from './src/integrations/para-core/types';
 import { FinanceTelegramBridgeV2 } from './src/integrations/telegram-v2/finance-telegram-bridge';
 import { getTelegramBotApiV2, TelegramBotApiV2 } from './src/integrations/telegram-v2/client';
@@ -204,6 +205,14 @@ export default class ExpenseManagerPlugin extends Plugin {
 		this.financeTelegramBridgeV2.registerParaCoreCardContributions(this.paraCoreApi);
 	}
 
+	private registerParaCoreTelegramHelpContributions() {
+		if (!this.paraCoreApi) {
+			return;
+		}
+
+		registerFinanceTelegramHelpContributions(this.paraCoreApi);
+	}
+
 	/**
 	 * Command handlers
 	 */
@@ -343,6 +352,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 				if (this.financeTelegramBridgeV2.register()) {
 					this.registerParaCoreMetadataContributions();
 					this.registerParaCoreTelegramCardContributions();
+					this.registerParaCoreTelegramHelpContributions();
 					console.log('Telegram v2 integration initialized');
 					return;
 				}
@@ -370,6 +380,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 				this.telegramApi
 			);
 			await this.telegramHandler.initialize();
+			this.registerParaCoreTelegramHelpContributions();
 			console.log('Telegram v1 fallback integration initialized');
 		} catch (error) {
 			console.log('Telegram integration not available:', error);
