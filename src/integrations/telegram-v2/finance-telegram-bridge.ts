@@ -40,6 +40,7 @@ const CALLBACK_ACTIONS = {
 	proposalConfirm: 'pc',
 	proposalReject: 'pr',
 	proposalSetCategory: 'ct',
+	proposalSetDescription: 'ds',
 	proposalSetProject: 'pp',
 	proposalSetArea: 'pa',
 	proposalSetDate: 'dt',
@@ -387,6 +388,7 @@ export class FinanceTelegramBridgeV2 {
 			payload.action === CALLBACK_ACTIONS.proposalConfirm
 			|| payload.action === CALLBACK_ACTIONS.proposalReject
 			|| payload.action === CALLBACK_ACTIONS.proposalSetCategory
+			|| payload.action === CALLBACK_ACTIONS.proposalSetDescription
 			|| payload.action === CALLBACK_ACTIONS.proposalSetProject
 			|| payload.action === CALLBACK_ACTIONS.proposalSetArea
 			|| payload.action === CALLBACK_ACTIONS.proposalSetDate
@@ -414,6 +416,13 @@ export class FinanceTelegramBridgeV2 {
 				return {
 					processed: true,
 					answer: 'Send a date like `2026-03-26`, `26.03.2026`, or `2026-03-26 18:30`.',
+				};
+			}
+			if (payload.action === CALLBACK_ACTIONS.proposalSetDescription) {
+				await this.beginProposalDescriptionFlow(state.proposalId, callback.messageId);
+				return {
+					processed: true,
+					answer: 'Send the new description text for this finance proposal.',
 				};
 			}
 			if (payload.action === CALLBACK_ACTIONS.proposalBack) {
@@ -483,6 +492,9 @@ export class FinanceTelegramBridgeV2 {
 			}
 			if (action === 'finance.proposal.date') {
 				return this.handleProposalDateFocusedInput(message, focus);
+			}
+			if (action === 'finance.proposal.description') {
+				return this.handleProposalDescriptionFocusedInput(message, focus);
 			}
 			return { processed: false, answer: null };
 		}
@@ -1057,6 +1069,9 @@ export class FinanceTelegramBridgeV2 {
 				this.buildProposalButton('Edit date', CALLBACK_ACTIONS.proposalSetDate, proposalId),
 			],
 			[
+				this.buildProposalButton('Edit description', CALLBACK_ACTIONS.proposalSetDescription, proposalId),
+			],
+			[
 				this.buildProposalButton('Set project', CALLBACK_ACTIONS.proposalSetProject, proposalId),
 				this.buildProposalButton('Set area', CALLBACK_ACTIONS.proposalSetArea, proposalId),
 			],
@@ -1178,6 +1193,25 @@ export class FinanceTelegramBridgeV2 {
 		});
 	}
 
+	private async beginProposalDescriptionFlow(
+		proposalId: string,
+		messageId?: number,
+	): Promise<void> {
+		if (!this.api) {
+			return;
+		}
+
+		await this.api.setInputFocus(PLUGIN_UNIT_NAME, {
+			mode: 'next-text',
+			expiresInMs: 1000 * 60 * 10,
+			context: {
+				action: 'finance.proposal.description',
+				proposalId,
+				messageId,
+			},
+		});
+	}
+
 	private async handleProposalDateFocusedInput(
 		message: TelegramMessageContext,
 		focus: InputFocusState,
@@ -1220,6 +1254,47 @@ export class FinanceTelegramBridgeV2 {
 		return {
 			processed: true,
 			answer: 'Date updated for the pending proposal.',
+		};
+	}
+
+	private async handleProposalDescriptionFocusedInput(
+		message: TelegramMessageContext,
+		focus: InputFocusState,
+	): Promise<TelegramHandlerResult> {
+		const proposalId = this.getFocusContextString(focus, 'proposalId');
+		if (!proposalId) {
+			await this.api?.clearInputFocus(PLUGIN_UNIT_NAME);
+			return { processed: true, answer: 'Finance proposal context expired.' };
+		}
+
+		const proposal = this.proposals.get(proposalId);
+		if (!proposal) {
+			await this.api?.clearInputFocus(PLUGIN_UNIT_NAME);
+			return { processed: true, answer: 'Finance proposal expired. Start capture again.' };
+		}
+
+		const rawText = message.text?.trim();
+		if (!rawText) {
+			return {
+				processed: true,
+				answer: 'Send non-empty description text for this proposal.',
+			};
+		}
+
+		proposal.data.description = rawText;
+		proposal.updatedAt = Date.now();
+		await this.api?.clearInputFocus(PLUGIN_UNIT_NAME);
+
+		const rawMessageId = focus.context?.messageId;
+		const proposalMessageId = typeof rawMessageId === 'number' ? rawMessageId : undefined;
+		await this.showProposalMessage(
+			proposal,
+			proposalMessageId,
+			'Description updated. Review the proposal and confirm when ready.',
+		);
+		return {
+			processed: true,
+			answer: 'Description updated for the pending proposal.',
 		};
 	}
 
