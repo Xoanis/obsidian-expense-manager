@@ -136,7 +136,7 @@ You can also start an explicit finance capture without inline args:
 
 Current Telegram finance intake is `proposal-first`:
 - the explicit command opens finance mode
-- the next text or QR receipt image is parsed into a proposed transaction
+- the next text, QR receipt image, or text-based PDF finance document is parsed into a proposed transaction
 - the bot shows `Confirm`, `Reject`, `Set project`, and `Set area`
 - the transaction is written to the vault only after `Confirm`
 
@@ -145,6 +145,8 @@ Current Telegram finance intake is `proposal-first`:
 - for QR receipts, the direction can come from the receipt data itself
 
 Receipt images with QR code are supported in focused capture flows.
+Text-based PDF finance documents are supported through local `pdf.js` extraction followed by AI normalization.
+Image-only or scanned PDFs are not supported in the current iteration.
 
 ### Reporting
 

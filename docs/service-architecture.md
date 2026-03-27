@@ -1,120 +1,124 @@
 # Expense Manager Service Architecture
 
-This document describes the main runtime interactions inside `obsidian-expense-manager`, with special focus on the updated Telegram finance intake flow.
+This document describes the current runtime structure of `obsidian-expense-manager` after the finance intake simplification pass.
 
-## Current State
+The main architectural rule for the current iteration is:
 
-This is the architecture that exists now.
+`explicit Telegram intent -> proposal creation -> human confirmation -> vault write`
 
-```mermaid
-flowchart TD
-    U["User"] --> TG["Telegram Bot Plugin"]
-    TG --> BR["FinanceTelegramBridgeV2<br/>transport + callbacks + focused input"]
-    BR --> FI["FinanceIntakeService<br/>proposal creation boundary"]
-    FI --> RP["RuleBasedFinanceIntakeProvider<br/>current extraction implementation"]
-    RP --> QR["ProverkaChekaClient<br/>QR / receipt extraction"]
-    BR --> ES["ExpenseService<br/>transaction persistence"]
-    ES --> VA["Obsidian Vault<br/>transaction notes + artifacts"]
-    ES --> PC["PARA Core API<br/>(optional)"]
-    ES --> RS["ReportSyncService"]
-    RS --> VA
-    RS --> TB["TelegramBudgetAlertService"]
-    RS --> TC["TelegramChartService"]
-    BR --> RS
-    BR --> TC
-    PC --> VA
-```
-
-## Near-Term Future State With AI Provider
-
-This is the intended next step after AI-backed extraction is added, but before the extraction concerns are fully separated into their own dedicated layer.
+## Current Runtime View
 
 ```mermaid
 flowchart TD
     U["User"] --> TG["Telegram Bot Plugin"]
-    TG --> BR["FinanceTelegramBridgeV2<br/>transport + callbacks + focused input"]
-    BR --> FI["FinanceIntakeService<br/>proposal creation boundary"]
-    FI --> AP["AiFinanceIntakeProvider<br/>structured extraction"]
-    FI --> RP["RuleBasedFinanceIntakeProvider<br/>fallback / deterministic parsing"]
-    AP --> AIP["Shared AI Provider Layer<br/>models + schema validation + retries"]
-    AP --> OCR["OCR / document text extraction"]
-    RP --> QR["ProverkaChekaClient<br/>QR / receipt extraction"]
-    BR --> ES["ExpenseService<br/>transaction persistence"]
-    ES --> VA["Obsidian Vault<br/>transaction notes + artifacts"]
-    ES --> PC["PARA Core API<br/>(optional)"]
+    TG --> BR["FinanceTelegramBridgeV2<br/>commands, callbacks, focused input"]
+    BR --> FI["FinanceIntakeService<br/>routing + proposal creation"]
+    FI --> RP["RuleBasedFinanceIntakeProvider<br/>structured text + QR-first receipts"]
+    FI --> AP["AiFinanceIntakeProvider<br/>free-form text + image + text-based PDF normalization"]
+    AP --> DX["DocumentExtractionService<br/>pdf.js text extraction only"]
+    AP --> AI["AI chat/completions endpoint"]
+    RP --> QR["ProverkaChekaClient"]
+    BR --> ES["ExpenseService<br/>validation + persistence"]
+    ES --> VA["Obsidian Vault"]
     ES --> RS["ReportSyncService"]
     RS --> VA
     RS --> TB["TelegramBudgetAlertService"]
     RS --> TC["TelegramChartService"]
-    BR --> RS
-    BR --> TC
-    PC --> VA
 ```
 
-## More Mature Target Architecture
-
-This is a cleaner long-term architecture after provider routing and extraction capabilities are separated more explicitly.
+## Current Responsibilities
 
 ```mermaid
-flowchart TD
-    U["User"] --> TG["Telegram Bot Plugin"]
-    TG --> BR["FinanceTelegramBridgeV2<br/>transport + callbacks + focused input"]
-    BR --> FI["FinanceIntakeService<br/>orchestration + routing policy"]
-    FI --> ROUTER["Provider Routing Policy"]
-    ROUTER --> AP["AiFinanceIntakeProvider"]
-    ROUTER --> RP["RuleBasedFinanceIntakeProvider"]
-    RP --> QRX["QrReceiptExtractor"]
-    AP --> DTX["DocumentTextExtractor"]
-    AP --> AIP["Shared AI Provider Layer<br/>models + schema validation + retries"]
-    DTX --> OCR["OCR / document extraction capability"]
-    BR --> ES["ExpenseService<br/>transaction persistence"]
-    ES --> VA["Obsidian Vault<br/>transaction notes + artifacts"]
-    ES --> PC["PARA Core API<br/>(optional)"]
-    ES --> RS["ReportSyncService"]
-    RS --> VA
-    RS --> TB["TelegramBudgetAlertService"]
-    RS --> TC["TelegramChartService"]
-    BR --> RS
-    BR --> TC
-    PC --> VA
+classDiagram
+    class FinanceTelegramBridgeV2 {
+      +handle commands
+      +collect focused input
+      +render confirmation UI
+      +apply edits
+    }
+
+    class FinanceIntakeService {
+      +routeTextRequest()
+      +routeReceiptRequest()
+      +createTextProposal()
+      +createReceiptProposal()
+    }
+
+    class RuleBasedFinanceIntakeProvider {
+      +createTextTransaction()
+      +createReceiptTransaction()
+    }
+
+    class AiFinanceIntakeProvider {
+      +extractText()
+      +extractReceipt()
+      +extractPdfReceipt()
+    }
+
+    class DocumentExtractionService {
+      <<interface>>
+      +extractPdf()
+    }
+
+    class PdfJsDocumentExtractionService {
+      +extractPdf()
+    }
+
+    class ExpenseService {
+      +createTransaction()
+      +validate linked context
+      +attach artifact
+    }
+
+    FinanceTelegramBridgeV2 --> FinanceIntakeService
+    FinanceTelegramBridgeV2 --> ExpenseService
+    FinanceIntakeService --> RuleBasedFinanceIntakeProvider
+    FinanceIntakeService --> AiFinanceIntakeProvider
+    AiFinanceIntakeProvider --> DocumentExtractionService
+    DocumentExtractionService <|.. PdfJsDocumentExtractionService
 ```
 
-## Main Responsibilities
+## Intake Paths
 
-- `FinanceTelegramBridgeV2`
-  - owns Telegram v2 transport integration
-  - handles commands, callbacks, focused input, and proposal confirmation UX
-  - does not own business persistence rules or low-level extraction logic
+### Text
 
-- `FinanceIntakeService`
-  - is the internal boundary for finance intake
-  - turns raw Telegram inputs into proposed `TransactionData`
-  - is the intended seam for a future AI-backed provider
+```mermaid
+flowchart LR
+    A["Focused text input"] --> B{"Simple structured text?"}
+    B -->|"Yes"| C["RuleBasedFinanceIntakeProvider"]
+    B -->|"No"| D["AiFinanceIntakeProvider"]
+    C --> E["Transaction proposal"]
+    D --> E
+```
 
-- `RuleBasedFinanceIntakeProvider`
-  - is the current implementation behind `FinanceIntakeService`
-  - parses explicit text inputs
-  - prepares receipt-based proposals from QR processing
-  - can later be replaced or augmented by an `AiFinanceIntakeProvider`
+### Receipt Image
 
-- `ExpenseService`
-  - validates linked `project` and `area`
-  - attaches artifacts
-  - performs duplicate detection
-  - persists transactions either directly to the vault or through PARA Core integration
+```mermaid
+flowchart LR
+    A["Receipt image / screenshot"] --> B["RuleBasedFinanceIntakeProvider"]
+    B --> C{"QR / deterministic parse succeeded?"}
+    C -->|"Yes"| D["Transaction proposal"]
+    C -->|"No"| E["AiFinanceIntakeProvider"]
+    E --> D
+```
 
-- `ReportSyncService`
-  - rebuilds period reports from transactions
-  - keeps cumulative balances correct
-  - coordinates budget-state-aware report generation
+### PDF
 
-- `TelegramChartService`
-  - renders PNG chart outputs for Telegram reports
+```mermaid
+flowchart LR
+    A["PDF finance document"] --> B["DocumentExtractionService"]
+    B --> C{"Usable text layer?"}
+    C -->|"Yes"| D["AiFinanceIntakeProvider"]
+    C -->|"No"| E["Unsupported PDF result"]
+    D --> F["Transaction proposal"]
+```
 
-- `TelegramBudgetAlertService`
-  - manages Telegram-oriented budget alert behavior
+Important current limitation:
 
-## Telegram Finance Intake Flow
+- only `text-based PDF` is supported
+- scanned, image-only, or otherwise textless PDF is rejected explicitly
+
+## Telegram Finance Flow
 
 ```mermaid
 sequenceDiagram
@@ -122,19 +126,19 @@ sequenceDiagram
     participant Telegram as Telegram Bot Plugin
     participant Bridge as FinanceTelegramBridgeV2
     participant Intake as FinanceIntakeService
-    participant Provider as RuleBasedFinanceIntakeProvider
+    participant Provider as Selected Provider
     participant Expense as ExpenseService
     participant Vault as Obsidian Vault
 
     User->>Telegram: /expense or /income or /finance_record
     Telegram->>Bridge: command + next focused input
-    User->>Telegram: text or QR receipt image
+    User->>Telegram: text, image, or PDF
     Telegram->>Bridge: TelegramMessageContext
     Bridge->>Intake: create proposal request
     Intake->>Provider: extract TransactionData
-    Provider-->>Intake: proposed transaction
+    Provider-->>Intake: proposal or explicit failure
     Intake-->>Bridge: proposal data
-    Bridge-->>User: proposal with Confirm / Reject / Set project / Set area
+    Bridge-->>User: Confirm / Reject / Edit description / Edit date / Set category / Set project / Set area
     User->>Bridge: Confirm
     Bridge->>Expense: createTransaction()
     Expense->>Vault: save note + artifact
@@ -142,36 +146,28 @@ sequenceDiagram
     Bridge-->>User: success message
 ```
 
-## Boundary for Future AI Integration
+## Why The Current Shape Is Simpler
 
-The intended next evolution is:
+The previous iteration experimented with:
 
-- keep `FinanceTelegramBridgeV2` as the Telegram-facing UX layer
-- keep `ExpenseService` as the persistence and domain-validation layer
-- introduce an AI-backed provider behind `FinanceIntakeService`
+- a custom PDF parser fallback
+- rendered-page vision fallback for PDF
 
-That keeps responsibilities stable:
+Those paths were removed from the current design because they increased code size and debugging cost faster than they increased reliability.
 
-- transport stays in Telegram bridge
-- extraction stays in intake provider
-- persistence stays in expense service
+The current design prefers:
 
-This separation is important because the future `AI provider` should improve proposal quality without forcing a rewrite of Telegram flows or finance storage behavior.
+- one supported PDF strategy
+- explicit unsupported results for out-of-scope documents
+- simpler logs
+- simpler mental model for maintenance
 
-## Evolution Summary
+## Near-Term Direction
 
-- Current state:
-  - `FinanceIntakeService` delegates to a rule-based provider
-  - receipt enrichment comes from QR-oriented extraction
-  - Telegram owns capture and confirmation UX
+The current architecture is intentionally conservative.
 
-- Near-term future state:
-  - `FinanceIntakeService` can route to an AI-backed provider
-  - AI extraction can use OCR, multimodal understanding, and schema validation
-  - rule-based parsing can remain as fallback for deterministic or low-cost paths
+The next evolution should happen only if it is justified by real usage:
 
-- More mature target:
-  - `FinanceIntakeService` owns orchestration and routing policy explicitly
-  - extraction capabilities are separated from providers
-  - QR extraction and document extraction stop being implied as “owned” by one provider
-  - AI and deterministic paths share clearer infrastructure boundaries
+- improve AI proposal quality inside the existing boundaries
+- keep Telegram confirmation UX as the stable control point
+- revisit OCR/scanned-PDF support only as a separate, clearly scoped iteration
