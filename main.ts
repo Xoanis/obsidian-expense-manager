@@ -29,6 +29,7 @@ import { ReportPeriodModal } from './src/ui/report-period-modal';
 import { ReportsModal } from './src/ui/reports-modal';
 import { ITelegramBotPluginAPIv1 } from './telegram_plugin_api';
 import { PLUGIN_UNIT_NAME } from './src/utils/constants';
+import { VaultDebugFileLogger } from './src/utils/plugin-debug-log';
 
 // Try to import Telegram API (may not be available)
 let TelegramApiClass: any = null;
@@ -53,9 +54,11 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private telegramChartService!: TelegramChartService;
 	private telegramBudgetAlertService!: TelegramBudgetAlertService;
 	private financeIntakeService!: FinanceIntakeService;
+	private debugLogger!: VaultDebugFileLogger;
 
 	async onload() {
 		await this.loadSettings();
+		this.debugLogger = new VaultDebugFileLogger(this.app, () => this.settings);
 
 		// Initialize PARA Core integration if available
 		this.initializeParaCoreIntegration();
@@ -71,7 +74,9 @@ export default class ExpenseManagerPlugin extends Plugin {
 			this.telegramBudgetAlertService,
 		);
 		this.telegramChartService = new TelegramChartService(this.reportSyncService);
-		this.financeIntakeService = new FinanceIntakeService(this.settings);
+		this.financeIntakeService = new FinanceIntakeService(this.settings, {
+			logger: this.debugLogger,
+		});
 		this.registerParaCoreTelegramCardContributions();
 
 		// Initialize Telegram handler if API is available
@@ -85,6 +90,13 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerGenerateReportFileCommand(this);
 		registerGenerateCustomReportCommand(this);
 		registerMigrateLegacyNotesCommand(this);
+		this.addCommand({
+			id: 'open-debug-log',
+			name: 'Open debug log',
+			callback: async () => {
+				await this.openDebugLog();
+			},
+		});
 
 		// Add ribbon icon
 		this.addRibbonIcon('wallet', 'Add Expense', () => {
@@ -130,12 +142,24 @@ export default class ExpenseManagerPlugin extends Plugin {
 			this.telegramBudgetAlertService,
 		);
 		this.telegramChartService = new TelegramChartService(this.reportSyncService);
-		this.financeIntakeService = new FinanceIntakeService(this.settings);
+		this.financeIntakeService = new FinanceIntakeService(this.settings, {
+			logger: this.debugLogger,
+		});
 		this.registerParaCoreTelegramCardContributions();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 		this.telegramApiV2?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 		await this.initializeTelegramIntegration();
 		await this.reportSyncService.initialize();
+	}
+
+	async openDebugLog() {
+		const file = await this.debugLogger.ensureLogFileExists();
+		if (!file) {
+			new Notice('Unable to create debug log file.');
+			return;
+		}
+
+		await this.app.workspace.getLeaf(true).openFile(file);
 	}
 
 	/**
@@ -548,6 +572,32 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.aiFinanceModel = value.trim();
 					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Write debug log to file')
+			.setDesc('Mirror AI finance intake logs into a markdown file inside the vault for easier debugging')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableDebugFileLogging)
+				.onChange(async (value) => {
+					this.plugin.settings.enableDebugFileLogging = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Debug log path')
+			.setDesc('Vault-relative markdown file used for expense-manager debug logs')
+			.addText(text => text
+				.setPlaceholder('ExpenseManager/debug-log.md')
+				.setValue(this.plugin.settings.debugLogFilePath)
+				.onChange(async (value) => {
+					this.plugin.settings.debugLogFilePath = value.trim() || 'ExpenseManager/debug-log.md';
+					await this.plugin.saveSettings();
+				}))
+			.addButton(button => button
+				.setButtonText('Open')
+				.onClick(async () => {
+					await this.plugin.openDebugLog();
 				}));
 
 		containerEl.createEl('h3', { text: 'Reports' });

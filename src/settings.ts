@@ -83,6 +83,12 @@ export interface ExpenseManagerSettings {
 
 	/** Model name for AI-backed finance text extraction */
 	aiFinanceModel: string;
+
+	/** Mirror selected runtime logs into a markdown file inside the vault */
+	enableDebugFileLogging: boolean;
+
+	/** Vault-relative path for the debug log markdown file */
+	debugLogFilePath: string;
 }
 
 /**
@@ -130,4 +136,6 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	aiFinanceApiBaseUrl: 'https://api.openai.com/v1',
 	aiFinanceApiKey: '',
 	aiFinanceModel: 'gpt-4.1-mini',
+	enableDebugFileLogging: true,
+	debugLogFilePath: 'ExpenseManager/debug-log.md',
 };
