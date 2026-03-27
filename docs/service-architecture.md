@@ -55,6 +55,24 @@ classDiagram
       +extractPdfReceipt()
     }
 
+    class AiFinancePrompting {
+      +build prompts
+      +build user payloads
+      +parse JSON envelopes
+    }
+
+    class AiFinanceNormalization {
+      +normalize extracted payload
+      +resolve description fallback
+      +map issues/confidences
+    }
+
+    class FinanceIntakeTypes {
+      +request/response contracts
+      +routing decision
+      +provider interface
+    }
+
     class DocumentExtractionService {
       <<interface>>
       +extractPdf()
@@ -74,7 +92,12 @@ classDiagram
     FinanceTelegramBridgeV2 --> ExpenseService
     FinanceIntakeService --> RuleBasedFinanceIntakeProvider
     FinanceIntakeService --> AiFinanceIntakeProvider
+    FinanceIntakeService --> FinanceIntakeTypes
     AiFinanceIntakeProvider --> DocumentExtractionService
+    AiFinanceIntakeProvider --> AiFinancePrompting
+    AiFinanceIntakeProvider --> AiFinanceNormalization
+    RuleBasedFinanceIntakeProvider --> FinanceIntakeTypes
+    AiFinanceIntakeProvider --> FinanceIntakeTypes
     DocumentExtractionService <|.. PdfJsDocumentExtractionService
 ```
 
@@ -161,6 +184,17 @@ The current design prefers:
 - explicit unsupported results for out-of-scope documents
 - simpler logs
 - simpler mental model for maintenance
+
+## Current File Split
+
+- [finance-intake-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/finance-intake-service.ts)
+  - orchestration only
+- [finance-intake-types.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/finance-intake-types.ts)
+  - shared intake contracts
+- [rule-based-finance-intake-provider.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/rule-based-finance-intake-provider.ts)
+  - deterministic text and QR-first logic
+- [ai-finance-intake-provider.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/ai-finance-intake-provider.ts)
+  - AI-backed extraction flow
 
 ## Near-Term Direction
 

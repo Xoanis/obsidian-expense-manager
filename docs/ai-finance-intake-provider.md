@@ -34,6 +34,8 @@ flowchart LR
     FI --> RP["RuleBasedFinanceIntakeProvider"]
     FI --> AP["AiFinanceIntakeProvider"]
     AP --> DX["DocumentExtractionService<br/>pdf.js text extraction only"]
+    AP --> PR["ai-finance-intake-prompts.ts"]
+    AP --> NM["ai-finance-intake-normalization.ts"]
     AP --> AI["AI chat/completions endpoint"]
     RP --> QR["ProverkaChekaClient"]
 ```
@@ -44,6 +46,25 @@ Interpretation:
 - `FinanceIntakeService` owns routing
 - `RuleBasedFinanceIntakeProvider` owns structured text and QR-first receipt handling
 - `AiFinanceIntakeProvider` owns free-form normalization and text-based PDF normalization
+
+## Internal Support Modules
+
+To keep `finance-intake-service.ts` readable, the AI provider now delegates two internal concerns:
+
+- [ai-finance-intake-prompts.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/ai-finance-intake-prompts.ts)
+  - prompt text
+  - user payload shapes
+  - JSON envelope parsing
+- [ai-finance-intake-normalization.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/ai-finance-intake-normalization.ts)
+  - payload normalization
+  - field confidences and issue mapping
+  - description fallback rule
+
+The main runtime files are now split like this:
+
+- [finance-intake-types.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/finance-intake-types.ts)
+- [ai-finance-intake-provider.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/ai-finance-intake-provider.ts)
+- [finance-intake-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/finance-intake-service.ts)
 
 ## Current Routing Policy
 
