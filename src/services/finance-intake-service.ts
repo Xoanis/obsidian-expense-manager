@@ -2,6 +2,14 @@ import { requestUrl } from 'obsidian';
 import { ExpenseManagerSettings } from '../settings';
 import { TransactionData, TransactionType } from '../types';
 import { ProverkaChekaClient } from '../utils/api-client';
+import { ConsolePluginLogger, PluginLogger } from '../utils/plugin-debug-log';
+import {
+	createDefaultDocumentExtractionService,
+	DocumentExtractionRequest,
+	DocumentExtractionResult,
+	DocumentExtractionService,
+	isUsableDocumentExtractionResult,
+} from './document-extraction-service';
 import type {
 	AiFinanceExtractionResult,
 	FinanceExtractionIssue,
@@ -69,6 +77,8 @@ interface ParsedFlexibleTelegramTransactionInput extends ParsedTelegramTransacti
 interface FinanceIntakeServiceOptions {
 	ruleProvider?: FinanceIntakeProvider;
 	aiProvider?: FinanceIntakeProvider;
+	documentExtractionService?: DocumentExtractionService;
+	logger?: PluginLogger;
 }
 
 interface OpenAiCompatibleChatCompletionResponse {
@@ -303,7 +313,11 @@ export class RuleBasedFinanceIntakeProvider implements FinanceIntakeProvider {
 }
 
 export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
-	constructor(private readonly settings: ExpenseManagerSettings) {}
+	constructor(
+		private readonly settings: ExpenseManagerSettings,
+		private readonly documentExtractionService: DocumentExtractionService = createDefaultDocumentExtractionService(),
+		private readonly logger: PluginLogger = new ConsolePluginLogger(),
+	) {}
 
 	async createTextTransaction(
 		request: FinanceTextProposalRequest,
@@ -315,15 +329,16 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 	async createReceiptTransaction(
 		request: FinanceReceiptProposalRequest,
 	): Promise<FinanceReceiptProposalResult> {
-		const result = await this.extractReceipt(request);
-		const data = this.toTransactionData(result, request.source ?? 'telegram');
+		const stableRequest = this.cloneReceiptRequest(request);
+		const result = await this.extractReceipt(stableRequest);
+		const data = this.toTransactionData(result, stableRequest.source ?? 'telegram');
 		if (!data) {
 			throw new Error(this.toFailureMessage(result.issues));
 		}
 
-		data.artifactBytes = request.bytes;
-		data.artifactFileName = request.fileName;
-		data.artifactMimeType = request.mimeType;
+		data.artifactBytes = this.cloneArrayBuffer(stableRequest.bytes);
+		data.artifactFileName = stableRequest.fileName;
+		data.artifactMimeType = stableRequest.mimeType;
 
 		return {
 			data,
@@ -335,7 +350,7 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 		request: FinanceTextProposalRequest,
 	): Promise<AiFinanceExtractionResult> {
 		if (!this.isConfigured()) {
-			console.warn('AiFinanceIntakeProvider.extractText: AI text extraction is not configured.');
+			this.logger.warn('AiFinanceIntakeProvider.extractText: AI text extraction is not configured.');
 			return this.createNotImplementedResult('ai-text', this.getTextSource(request), [
 				'AI finance text extraction is not configured.',
 			]);
@@ -361,7 +376,7 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 				source: this.getTextSource(request),
 				descriptionSourceText: request.text,
 			});
-			console.info('AiFinanceIntakeProvider.extractText: normalized result', {
+			this.logger.info('AiFinanceIntakeProvider.extractText: normalized result', {
 				status: result.status,
 				overallConfidence: result.overallConfidence,
 				type: result.transaction?.type,
@@ -371,7 +386,7 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 			});
 			return result;
 		} catch (error) {
-			console.error('AiFinanceIntakeProvider.extractText: request failed', error);
+			this.logger.error('AiFinanceIntakeProvider.extractText: request failed', error);
 			return this.createNotImplementedResult('ai-text', this.getTextSource(request), [
 				`AI finance extraction request failed: ${(error as Error).message}`,
 			]);
@@ -381,10 +396,20 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 	async extractReceipt(
 		request: FinanceReceiptProposalRequest,
 	): Promise<AiFinanceExtractionResult> {
+		if (this.isPdfRequest(request)) {
+			return this.extractPdfReceipt(request);
+		}
+
+		return this.extractImageReceipt(request);
+	}
+
+	private async extractImageReceipt(
+		request: FinanceReceiptProposalRequest,
+	): Promise<AiFinanceExtractionResult> {
 		const route: FinanceIntakeRoute = this.isPdfRequest(request) ? 'ai-pdf' : 'ai-image';
 		const source: FinanceProposalSource = this.isPdfRequest(request) ? 'telegram-pdf' : 'telegram-image';
 		if (!this.isConfigured()) {
-			console.warn('AiFinanceIntakeProvider.extractReceipt: AI receipt extraction is not configured.');
+			this.logger.warn('AiFinanceIntakeProvider.extractReceipt: AI receipt extraction is not configured.');
 			return this.createNotImplementedResult(route, source, [
 				'AI finance receipt extraction is not configured.',
 			]);
@@ -393,7 +418,7 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 		const artifactDataUrl = this.toDataUrl(request.bytes, request.mimeType || (this.isPdfRequest(request) ? 'application/pdf' : 'image/jpeg'));
 		if (!artifactDataUrl) {
 			return this.createNotImplementedResult(route, source, [
-				'Receipt artifact is too large for inline AI processing. Try a smaller image or a shorter PDF document.',
+				'Receipt artifact is too large for inline AI processing. Try a smaller image.',
 			]);
 		}
 
@@ -420,7 +445,7 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 				source,
 				descriptionSourceText: request.caption || request.fileName,
 			});
-			console.info('AiFinanceIntakeProvider.extractReceipt: normalized result', {
+			this.logger.info('AiFinanceIntakeProvider.extractReceipt: normalized result', {
 				status: result.status,
 				overallConfidence: result.overallConfidence,
 				type: result.transaction?.type,
@@ -430,7 +455,90 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 			});
 			return result;
 		} catch (error) {
-			console.error('AiFinanceIntakeProvider.extractReceipt: request failed', error);
+			this.logger.error('AiFinanceIntakeProvider.extractReceipt: request failed', error);
+			return this.createReceiptFailureResult(route, source, error as Error);
+		}
+	}
+
+	private async extractPdfReceipt(
+		request: FinanceReceiptProposalRequest,
+	): Promise<AiFinanceExtractionResult> {
+		const route: FinanceIntakeRoute = 'ai-pdf';
+		const source: FinanceProposalSource = 'telegram-pdf';
+		if (!this.isConfigured()) {
+			this.logger.warn('AiFinanceIntakeProvider.extractPdfReceipt: AI receipt extraction is not configured.');
+			return this.createNotImplementedResult(route, source, [
+				'AI finance receipt extraction is not configured.',
+			]);
+		}
+
+		try {
+			const extraction = await this.documentExtractionService.extractPdf(this.toDocumentExtractionRequest(request));
+			this.logger.info('AiFinanceIntakeProvider.extractPdfReceipt: document extraction result', {
+				status: extraction.status,
+				textLength: extraction.text.length,
+				pageCount: extraction.pages.length,
+				warnings: extraction.warnings,
+				provider: extraction.provider,
+				textPreview: extraction.text.slice(0, 800),
+			});
+			if (!isUsableDocumentExtractionResult(extraction)) {
+				this.logger.info('AiFinanceIntakeProvider.extractPdfReceipt: text extraction unusable, returning unsupported result', {
+					status: extraction.status,
+					warnings: extraction.warnings,
+					textLength: extraction.text.length,
+				});
+				return this.createNotImplementedResult(route, source, this.uniqueMessages([
+					...extraction.warnings,
+					'Only text-based PDFs are supported in the current iteration.',
+					'This PDF appears image-based, scanned, encrypted, or otherwise missing a usable text layer.',
+				]));
+			}
+
+			const parsed = await this.requestJsonChatCompletion([
+				{
+					role: 'system',
+					content: this.buildPdfSystemPrompt(),
+				},
+				{
+					role: 'user',
+					content: JSON.stringify(this.buildPdfUserPayload(request, extraction)),
+				},
+			], 'AiFinanceIntakeProvider.extractPdfReceipt', {
+				intent: request.intent,
+				fileName: request.fileName,
+				mimeType: request.mimeType,
+				textLength: extraction.text.length,
+				pageCount: extraction.pages.length,
+				warnings: extraction.warnings,
+			});
+			const result = this.normalizeAiExtractionResult(parsed, {
+				intent: request.intent,
+				route,
+				source,
+				descriptionSourceText: request.caption || extraction.text,
+			});
+			this.logger.info('AiFinanceIntakeProvider.extractPdfReceipt: normalized result', {
+				status: result.status,
+				overallConfidence: result.overallConfidence,
+				type: result.transaction?.type,
+				amount: result.transaction?.amount,
+				category: result.transaction?.category,
+				issueCount: result.issues.length,
+			});
+			if (extraction.warnings.length > 0) {
+				result.issues = [
+					...result.issues,
+					...extraction.warnings.map((message) => ({
+						code: 'document-extraction-failed' as const,
+						severity: 'warning' as const,
+						message,
+					})),
+				];
+			}
+			return result;
+		} catch (error) {
+			this.logger.error('AiFinanceIntakeProvider.extractPdfReceipt: request failed', error);
 			return this.createReceiptFailureResult(route, source, error as Error);
 		}
 	}
@@ -465,9 +573,8 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 		const lowerMessage = error.message.toLowerCase();
 		if (route === 'ai-pdf' && /status 5\d\d/.test(lowerMessage)) {
 			return this.createNotImplementedResult(route, source, [
-				'The configured AI endpoint returned a server error while processing the PDF.',
-				'This usually means the current chat/completions endpoint does not support PDF file inputs in the format we sent.',
-				'PDF extraction likely needs a dedicated document extraction layer or a provider-specific PDF API path.',
+				'The configured AI endpoint returned a server error while normalizing extracted PDF text.',
+				'The PDF text layer was extracted locally, but the AI endpoint could not finish the structured normalization step.',
 			]);
 		}
 
@@ -533,7 +640,7 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 		logLabel: string,
 		logContext: Record<string, unknown>,
 	): Promise<Record<string, unknown>> {
-		console.info(`${logLabel}: sending request`, {
+		this.logger.info(`${logLabel}: sending request`, {
 			model: this.settings.aiFinanceModel,
 			baseUrl: this.settings.aiFinanceApiBaseUrl,
 			...logContext,
@@ -556,7 +663,7 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 			}),
 		});
 
-		console.info(`${logLabel}: received response`, {
+		this.logger.info(`${logLabel}: received response`, {
 			status: response.status,
 			textLength: response.text.length,
 			responsePreview: response.text.slice(0, 400),
@@ -567,7 +674,7 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 			throw new Error('AI finance endpoint returned an empty response.');
 		}
 
-		console.info(`${logLabel}: content preview`, {
+		this.logger.info(`${logLabel}: content preview`, {
 			contentPreview: content.slice(0, 400),
 		});
 		return this.parseJsonObject(content);
@@ -610,10 +717,20 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 	private buildReceiptSystemPrompt(): string {
 		return [
 			this.buildSystemPrompt(),
-			'You may receive a receipt image, a banking operation screenshot, or a PDF bank confirmation.',
+			'You may receive a receipt image or a banking operation screenshot.',
 			'Use the visual or document evidence as the primary source.',
 			'If a caption is present, use it as a hint but do not let it override clearly visible document data.',
 			'For receipt or document inputs, prefer concise factual descriptions over generic phrases.',
+		].join('\n');
+	}
+
+	private buildPdfSystemPrompt(): string {
+		return [
+			this.buildSystemPrompt(),
+			'You receive text already extracted from a finance-related PDF document.',
+			'Rely on the extracted document text as the primary evidence.',
+			'If extraction warnings are present, be conservative and prefer ambiguous fields over fabricated certainty.',
+			'Do not assume the document is finance-related just because it came through a finance command.',
 		].join('\n');
 	}
 
@@ -647,6 +764,29 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 		};
 	}
 
+	private buildPdfUserPayload(
+		request: FinanceReceiptProposalRequest,
+		extraction: DocumentExtractionResult,
+	): Record<string, unknown> {
+		return {
+			intent: request.intent,
+			caption: request.caption ?? '',
+			fileName: request.fileName,
+			mimeType: request.mimeType ?? null,
+			defaultCurrency: this.settings.defaultCurrency,
+			defaultProject: request.project ?? null,
+			defaultArea: request.area ?? null,
+			knownCategories: request.knownCategories ?? this.getKnownCategoriesForIntent(request.intent),
+			knownProjects: request.knownProjects ?? [],
+			knownAreas: request.knownAreas ?? [],
+			documentProvider: extraction.provider,
+			documentWarnings: extraction.warnings,
+			documentText: extraction.text,
+			pages: extraction.pages,
+			now: new Date().toISOString(),
+		};
+	}
+
 	private buildReceiptUserContent(
 		request: FinanceReceiptProposalRequest,
 		artifactDataUrl: string,
@@ -656,17 +796,6 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 			text: JSON.stringify(this.buildReceiptUserPayload(request)),
 		}];
 
-		if (this.isPdfRequest(request)) {
-			content.push({
-				type: 'file',
-				file: {
-					filename: request.fileName,
-					file_data: artifactDataUrl,
-				},
-			});
-			return content;
-		}
-
 		content.push({
 			type: 'image_url',
 			image_url: {
@@ -674,6 +803,29 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 			},
 		});
 		return content;
+	}
+
+	private toDocumentExtractionRequest(request: FinanceReceiptProposalRequest): DocumentExtractionRequest {
+		return {
+			bytes: this.cloneArrayBuffer(request.bytes),
+			fileName: request.fileName,
+			mimeType: request.mimeType,
+		};
+	}
+
+	private cloneReceiptRequest(request: FinanceReceiptProposalRequest): FinanceReceiptProposalRequest {
+		return {
+			...request,
+			bytes: this.cloneArrayBuffer(request.bytes),
+		};
+	}
+
+	private cloneArrayBuffer(buffer: ArrayBuffer): ArrayBuffer {
+		return Uint8Array.from(new Uint8Array(buffer)).buffer;
+	}
+
+	private uniqueMessages(messages: string[]): string[] {
+		return Array.from(new Set(messages.filter(Boolean)));
 	}
 
 	private getKnownCategoriesForIntent(intent: FinanceIntakeIntent): string[] {
@@ -716,7 +868,7 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 				amount: this.asNumber(transactionPayload.amount) ?? undefined,
 				currency: this.asString(transactionPayload.currency) || this.settings.defaultCurrency,
 				dateTime: this.asString(transactionPayload.dateTime) || undefined,
-				description: this.preferSourceLanguageDescription(
+				description: this.resolveDescription(
 					context.descriptionSourceText,
 					this.asString(transactionPayload.description),
 				),
@@ -800,6 +952,18 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 		return null;
 	}
 
+	private resolveDescription(
+		sourceText: string,
+		extractedDescription: string | null,
+	): string | undefined {
+		if (typeof extractedDescription === 'string' && extractedDescription.trim()) {
+			return extractedDescription.trim();
+		}
+
+		const normalizedSource = sourceText.trim();
+		return normalizedSource || undefined;
+	}
+
 	private asTransactionType(
 		value: unknown,
 		intent: FinanceTextProposalRequest['intent'],
@@ -860,35 +1024,10 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 		return `[[${value}]]`;
 	}
 
-	private preferSourceLanguageDescription(
-		sourceText: string,
-		extractedDescription: string | null,
-	): string | undefined {
-		const normalizedSource = sourceText.trim();
-		if (!normalizedSource) {
-			return extractedDescription ?? undefined;
-		}
-
-		if (!extractedDescription) {
-			return normalizedSource;
-		}
-
-		if (this.containsCyrillic(normalizedSource) && !this.containsCyrillic(extractedDescription)) {
-			console.info('AiFinanceIntakeProvider.extractText: replacing translated description with source-language text.');
-			return normalizedSource;
-		}
-
-		return extractedDescription;
-	}
-
-	private containsCyrillic(value: string): boolean {
-		return /[А-Яа-яЁё]/.test(value);
-	}
-
 	private toDataUrl(bytes: ArrayBuffer, mimeType: string): string | null {
 		const maxInlineBytes = 4 * 1024 * 1024;
 		if (bytes.byteLength > maxInlineBytes) {
-			console.warn('AiFinanceIntakeProvider.toDataUrl: artifact exceeds inline size limit', {
+			this.logger.warn('AiFinanceIntakeProvider.toDataUrl: artifact exceeds inline size limit', {
 				byteLength: bytes.byteLength,
 				maxInlineBytes,
 				mimeType,
@@ -915,27 +1054,33 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 export class FinanceIntakeService {
 	private readonly ruleProvider: FinanceIntakeProvider;
 	private readonly aiProvider: FinanceIntakeProvider;
+	private readonly logger: PluginLogger;
 
 	constructor(
 		private readonly settings: ExpenseManagerSettings,
 		options?: FinanceIntakeServiceOptions,
 	) {
+		this.logger = options?.logger ?? new ConsolePluginLogger();
 		this.ruleProvider = options?.ruleProvider ?? new RuleBasedFinanceIntakeProvider(settings);
-		this.aiProvider = options?.aiProvider ?? new AiFinanceIntakeProvider(settings);
+		this.aiProvider = options?.aiProvider ?? new AiFinanceIntakeProvider(
+			settings,
+			options?.documentExtractionService ?? createDefaultDocumentExtractionService(),
+			this.logger,
+		);
 	}
 
 	async createTextProposal(
 		request: FinanceTextProposalRequest,
 	): Promise<TransactionData | null> {
 		const decision = this.routeTextRequest(request);
-		console.info('FinanceIntakeService.createTextProposal: route selected', decision);
+		this.logger.info('FinanceIntakeService.createTextProposal: route selected', decision);
 		if (decision.providerKind === 'ai') {
 			const aiResult = await this.aiProvider.createTextTransaction(request);
 			if (aiResult) {
-				console.info('FinanceIntakeService.createTextProposal: AI provider produced a transaction.');
+				this.logger.info('FinanceIntakeService.createTextProposal: AI provider produced a transaction.');
 				return aiResult;
 			}
-			console.warn('FinanceIntakeService.createTextProposal: AI provider returned no transaction, falling back to rule-based provider.');
+			this.logger.warn('FinanceIntakeService.createTextProposal: AI provider returned no transaction, falling back to rule-based provider.');
 			return this.ruleProvider.createTextTransaction(request);
 		}
 
@@ -946,14 +1091,14 @@ export class FinanceIntakeService {
 		request: FinanceReceiptProposalRequest,
 	): Promise<FinanceReceiptProposalResult> {
 		const decision = this.routeReceiptRequest(request);
-		console.info('FinanceIntakeService.createReceiptProposal: route selected', decision);
+		this.logger.info('FinanceIntakeService.createReceiptProposal: route selected', decision);
 		if (!this.isPdfRequest(request) && this.isAiTextEnabled()) {
 			try {
 				const ruleResult = await this.ruleProvider.createReceiptTransaction(request);
-				console.info('FinanceIntakeService.createReceiptProposal: rule-based receipt extraction succeeded before AI fallback was needed.');
+				this.logger.info('FinanceIntakeService.createReceiptProposal: rule-based receipt extraction succeeded before AI fallback was needed.');
 				return ruleResult;
 			} catch (error) {
-				console.warn('FinanceIntakeService.createReceiptProposal: rule-based receipt extraction failed, trying AI fallback.', error);
+				this.logger.warn('FinanceIntakeService.createReceiptProposal: rule-based receipt extraction failed, trying AI fallback.', error);
 			}
 		}
 
@@ -1010,7 +1155,7 @@ export class FinanceIntakeService {
 			return {
 				providerKind: 'ai',
 				route: 'ai-pdf',
-				reason: 'PDF finance documents are intended for the AI-backed extraction path.',
+				reason: 'Text-based PDF finance documents use local text extraction first and AI normalization second.',
 			};
 		}
 
