@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-expense-manager",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "Finance tracking plugin for Obsidian with PARA and Telegram integrations.",
 	"main": "main.js",
 	"scripts": {
@@ -28,7 +28,7 @@
 	"dependencies": {
 		"chart.js": "^4.4.0",
 		"jsqr": "^1.4.0",
-		"obsidian-para-suite-contracts": "github:Xoanis/obsidian-para-suite-contracts#v0.1.0",
+		"obsidian-para-suite-contracts": "git+https://github.com/Xoanis/obsidian-para-suite-contracts.git#v0.1.1",
 		"pdfjs-dist": "^5.5.207"
 	}
 }
