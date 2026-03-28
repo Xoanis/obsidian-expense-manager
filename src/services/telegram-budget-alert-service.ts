@@ -1,8 +1,7 @@
 import { App } from 'obsidian';
 import { ExpenseManagerSettings } from '../settings';
 import { PeriodReport, ReportBudgetAlertLevel } from '../types';
-import { getTelegramBotApiV2 } from '../integrations/telegram-v2/client';
-import { ITelegramBotPluginAPIv1 } from '../../telegram_plugin_api';
+import { getTelegramBotApi } from '../integrations/telegram/client';
 
 export class TelegramBudgetAlertService {
 	constructor(
@@ -23,28 +22,13 @@ export class TelegramBudgetAlertService {
 			return false;
 		}
 
-		const apiV2 = getTelegramBotApiV2(this.app);
-		if (apiV2) {
-			await apiV2.sendMessage(message);
-			return true;
-		}
-
-		const apiV1 = this.getTelegramApiV1();
-		if (apiV1) {
-			await apiV1.sendMessage(message);
+		const telegramApi = getTelegramBotApi(this.app);
+		if (telegramApi) {
+			await telegramApi.sendMessage(message);
 			return true;
 		}
 
 		return false;
-	}
-
-	private getTelegramApiV1(): ITelegramBotPluginAPIv1 | null {
-		// @ts-ignore runtime plugin registry
-		const telegramPlugin = this.app.plugins?.plugins?.['obsidian-telegram-bot-plugin'];
-		if (!telegramPlugin || typeof telegramPlugin.getAPIv1 !== 'function') {
-			return null;
-		}
-		return telegramPlugin.getAPIv1() as ITelegramBotPluginAPIv1 | null;
 	}
 
 	private formatBudgetAlertMessage(report: PeriodReport, level: ReportBudgetAlertLevel): string | null {

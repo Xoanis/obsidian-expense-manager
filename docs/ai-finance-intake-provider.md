@@ -30,7 +30,7 @@ The main goal of this iteration is clarity:
 
 ```mermaid
 flowchart LR
-    TG["FinanceTelegramBridgeV2"] --> FI["FinanceIntakeService"]
+TG["FinanceTelegramBridge"] --> FI["FinanceIntakeService"]
     FI --> RP["RuleBasedFinanceIntakeProvider"]
     FI --> AP["AiFinanceIntakeProvider"]
     AP --> DX["DocumentExtractionService<br/>pdf.js text extraction only"]
@@ -42,7 +42,7 @@ flowchart LR
 
 Interpretation:
 
-- `FinanceTelegramBridgeV2` owns transport and confirmation UX
+- `FinanceTelegramBridge` owns transport and confirmation UX
 - `FinanceIntakeService` owns routing
 - `RuleBasedFinanceIntakeProvider` owns structured text and QR-first receipt handling
 - `AiFinanceIntakeProvider` owns free-form normalization and text-based PDF normalization
@@ -151,7 +151,7 @@ classDiagram
 ```mermaid
 sequenceDiagram
     participant User
-    participant Bridge as FinanceTelegramBridgeV2
+participant Bridge as FinanceTelegramBridge
     participant Intake as FinanceIntakeService
     participant Extract as DocumentExtractionService
     participant AI as AiFinanceIntakeProvider

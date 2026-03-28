@@ -1,7 +1,7 @@
 export {
-	getTelegramBotApiV2,
+	getTelegramBotApi,
 	type InputFocusState,
-	type TelegramBotApiV2,
+	type TelegramBotApi,
 	type TelegramCallbackContext,
 	type TelegramCallbackPayload,
 	type TelegramFileDescriptor,

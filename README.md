@@ -353,7 +353,7 @@ Useful options:
 Already implemented:
 - standalone finance tracking
 - PARA Core domain integration
-- Telegram v1/v2 compatibility
+- Telegram integration
 - monthly Telegram reports with navigation and PNG charts
 - automatic report sync
 - cumulative balances

@@ -20,9 +20,9 @@ import {
 	FinanceIntakeService,
 } from '../../services/finance-intake-service';
 import {
-	getTelegramBotApiV2,
+	getTelegramBotApi,
 	InputFocusState,
-	TelegramBotApiV2,
+	TelegramBotApi,
 	TelegramCallbackContext,
 	TelegramCallbackPayload,
 	TelegramFileDescriptor,
@@ -86,8 +86,8 @@ interface PendingFinanceProposal {
 	updatedAt: number;
 }
 
-export class FinanceTelegramBridgeV2 {
-	private readonly api: TelegramBotApiV2 | null;
+export class FinanceTelegramBridge {
+	private readonly api: TelegramBotApi | null;
 	private readonly callbackTokenTtlMs = 1000 * 60 * 30;
 	private callbackTokenCounter = 0;
 	private readonly callbackTokens = new Map<string, CallbackTokenState>();
@@ -102,7 +102,7 @@ export class FinanceTelegramBridgeV2 {
 		private readonly financeIntakeService: FinanceIntakeService,
 		private readonly settings: ExpenseManagerSettings,
 	) {
-		this.api = getTelegramBotApiV2(app);
+		this.api = getTelegramBotApi(app);
 	}
 
 	register(): boolean {
@@ -280,7 +280,7 @@ export class FinanceTelegramBridgeV2 {
 				answer: null,
 			};
 		} catch (error) {
-			console.error('FinanceTelegramBridgeV2.handleMessage: failed to prepare transaction', error);
+			console.error('FinanceTelegramBridge.handleMessage: failed to prepare transaction', error);
 			if (typeof processingMessageId === 'number' && this.api?.editMessage) {
 				await this.api.editMessage(
 					processingMessageId,
@@ -553,7 +553,7 @@ export class FinanceTelegramBridgeV2 {
 				answer: null,
 			};
 		} catch (error) {
-			console.error('FinanceTelegramBridgeV2.handleFocusedInput: failed to prepare transaction', error);
+			console.error('FinanceTelegramBridge.handleFocusedInput: failed to prepare transaction', error);
 			if (typeof processingMessageId === 'number' && this.api?.editMessage) {
 				await this.api.editMessage(
 					processingMessageId,
@@ -576,7 +576,7 @@ export class FinanceTelegramBridgeV2 {
 		focus: InputFocusState,
 	): Promise<TelegramHandlerResult> {
 		if (!this.api) {
-			return { processed: true, answer: 'Telegram API v2 is not available.' };
+			return { processed: true, answer: 'Telegram API is not available.' };
 		}
 
 		const file = message.files[0];
@@ -992,7 +992,7 @@ export class FinanceTelegramBridgeV2 {
 			return undefined;
 		}
 
-		console.info('FinanceTelegramBridgeV2: starting AI processing feedback', decision);
+		console.info('FinanceTelegramBridge: starting AI processing feedback', decision);
 		const sent = await this.api.sendMessage(mode === 'file'
 			? [
 				'Processing finance file...',

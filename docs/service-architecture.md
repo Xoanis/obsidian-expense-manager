@@ -11,7 +11,7 @@ The main architectural rule for the current iteration is:
 ```mermaid
 flowchart TD
     U["User"] --> TG["Telegram Bot Plugin"]
-    TG --> BR["FinanceTelegramBridgeV2<br/>commands, callbacks, focused input"]
+TG --> BR["FinanceTelegramBridge<br/>commands, callbacks, focused input"]
     BR --> FI["FinanceIntakeService<br/>routing + proposal creation"]
     FI --> RP["RuleBasedFinanceIntakeProvider<br/>structured text + QR-first receipts"]
     FI --> AP["AiFinanceIntakeProvider<br/>free-form text + image + text-based PDF normalization"]
@@ -30,7 +30,7 @@ flowchart TD
 
 ```mermaid
 classDiagram
-    class FinanceTelegramBridgeV2 {
+class FinanceTelegramBridge {
       +handle commands
       +collect focused input
       +render confirmation UI
@@ -88,8 +88,8 @@ classDiagram
       +attach artifact
     }
 
-    FinanceTelegramBridgeV2 --> FinanceIntakeService
-    FinanceTelegramBridgeV2 --> ExpenseService
+FinanceTelegramBridge --> FinanceIntakeService
+FinanceTelegramBridge --> ExpenseService
     FinanceIntakeService --> RuleBasedFinanceIntakeProvider
     FinanceIntakeService --> AiFinanceIntakeProvider
     FinanceIntakeService --> FinanceIntakeTypes
@@ -147,7 +147,7 @@ Important current limitation:
 sequenceDiagram
     participant User
     participant Telegram as Telegram Bot Plugin
-    participant Bridge as FinanceTelegramBridgeV2
+participant Bridge as FinanceTelegramBridge
     participant Intake as FinanceIntakeService
     participant Provider as Selected Provider
     participant Expense as ExpenseService

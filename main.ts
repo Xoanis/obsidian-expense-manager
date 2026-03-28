@@ -4,7 +4,6 @@ import { ExpenseService } from './src/services/expense-service';
 import { AnalyticsService } from './src/services/analytics-service';
 import { ManualHandler } from './src/handlers/manual-handler';
 import { QrHandler } from './src/handlers/qr-handler';
-import { TelegramHandler } from './src/handlers/telegram-handler';
 import { TransactionData } from './src/types';
 import { registerAddExpenseCommand } from './src/commands/add-expense';
 import { registerAddIncomeCommand } from './src/commands/add-income';
@@ -19,8 +18,8 @@ import { registerFinanceMetadataContributions } from './src/integrations/para-co
 import { registerFinanceTemplateContributions } from './src/integrations/para-core/register-template-contributions';
 import { registerFinanceTelegramHelpContributions } from './src/integrations/para-core/register-telegram-help-contributions';
 import { IParaCoreApi, RegisteredParaDomain } from './src/integrations/para-core/types';
-import { FinanceTelegramBridgeV2 } from './src/integrations/telegram-v2/finance-telegram-bridge';
-import { getTelegramBotApiV2, TelegramBotApiV2 } from './src/integrations/telegram-v2/client';
+import { FinanceTelegramBridge } from './src/integrations/telegram/finance-telegram-bridge';
+import { getTelegramBotApi, TelegramBotApi } from './src/integrations/telegram/client';
 import { ReportSyncService } from './src/services/report-sync-service';
 import { TelegramChartService } from './src/services/telegram-chart-service';
 import { TelegramBudgetAlertService } from './src/services/telegram-budget-alert-service';
@@ -28,27 +27,16 @@ import { MigrationService } from './src/services/migration-service';
 import { FinanceIntakeService } from './src/services/finance-intake-service';
 import { ReportPeriodModal } from './src/ui/report-period-modal';
 import { ReportsModal } from './src/ui/reports-modal';
-import { ITelegramBotPluginAPIv1 } from './telegram_plugin_api';
 import { PLUGIN_UNIT_NAME } from './src/utils/constants';
 import { VaultDebugFileLogger } from './src/utils/plugin-debug-log';
-
-// Try to import Telegram API (may not be available)
-let TelegramApiClass: any = null;
-try {
-	TelegramApiClass = require('./telegram_plugin_api');
-} catch (e) {
-	console.log('Telegram plugin API not available');
-}
 
 export default class ExpenseManagerPlugin extends Plugin {
 	settings: ExpenseManagerSettings;
 	
 	private expenseService!: ExpenseService;
 	private analyticsService!: AnalyticsService;
-	private telegramHandler!: TelegramHandler;
-	private telegramApi: ITelegramBotPluginAPIv1 | null = null;
-	private telegramApiV2: TelegramBotApiV2 | null = null;
-	private financeTelegramBridgeV2: FinanceTelegramBridgeV2 | null = null;
+	private telegramApi: TelegramBotApi | null = null;
+	private financeTelegramBridge: FinanceTelegramBridge | null = null;
 	private paraCoreApi: IParaCoreApi | null = null;
 	private financeDomain: RegisteredParaDomain | null = null;
 	private reportSyncService!: ReportSyncService;
@@ -117,7 +105,6 @@ export default class ExpenseManagerPlugin extends Plugin {
 		console.log('Unloading plugin Expense Manager')
 		this.reportSyncService?.destroy();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
-		this.telegramApiV2?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 	}
 
 	async loadSettings() {
@@ -148,7 +135,6 @@ export default class ExpenseManagerPlugin extends Plugin {
 		});
 		this.registerParaCoreTelegramCardContributions();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
-		this.telegramApiV2?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 		await this.initializeTelegramIntegration();
 		await this.reportSyncService.initialize();
 	}
@@ -191,18 +177,18 @@ export default class ExpenseManagerPlugin extends Plugin {
 		}
 
 		registerFinanceMetadataContributions(this.paraCoreApi, this.app, {
-			buildProjectBudgetKeyboard: this.financeTelegramBridgeV2
-				? (path, page) => this.financeTelegramBridgeV2?.buildProjectBudgetMetadataKeyboard(path, page) ?? null
+			buildProjectBudgetKeyboard: this.financeTelegramBridge
+				? (path, page) => this.financeTelegramBridge?.buildProjectBudgetMetadataKeyboard(path, page) ?? null
 				: undefined,
 		});
 	}
 
 	private registerParaCoreTelegramCardContributions() {
-		if (!this.paraCoreApi || !this.financeTelegramBridgeV2) {
+		if (!this.paraCoreApi || !this.financeTelegramBridge) {
 			return;
 		}
 
-		this.financeTelegramBridgeV2.registerParaCoreCardContributions(this.paraCoreApi);
+		this.financeTelegramBridge.registerParaCoreCardContributions(this.paraCoreApi);
 	}
 
 	private registerParaCoreTelegramHelpContributions() {
@@ -335,53 +321,32 @@ export default class ExpenseManagerPlugin extends Plugin {
 		}
 
 		this.telegramApi = null;
-		this.telegramApiV2 = null;
-		this.financeTelegramBridgeV2 = null;
+		this.financeTelegramBridge = null;
 
 		try {
-			this.telegramApiV2 = getTelegramBotApiV2(this.app);
-			if (this.telegramApiV2) {
-				this.financeTelegramBridgeV2 = new FinanceTelegramBridgeV2(
-					this.app,
-					this.expenseService,
-					this.reportSyncService,
-					this.telegramChartService,
-					this.financeIntakeService,
-					this.settings,
-				);
-				if (this.financeTelegramBridgeV2.register()) {
-					this.registerParaCoreMetadataContributions();
-					this.registerParaCoreTelegramCardContributions();
-					this.registerParaCoreTelegramHelpContributions();
-					console.log('Telegram v2 integration initialized');
-					return;
-				}
-			}
-
-			// @ts-ignore - Telegram plugin may not exist
-			const telegramPlugin = this.app.plugins?.plugins?.['obsidian-telegram-bot-plugin'];
-			if (!telegramPlugin || !telegramPlugin.getAPIv1) {
-				console.log('Telegram integration failed: v2 and v1 APIs are unavailable');
-				return;
-			}
-
-			this.telegramApi = telegramPlugin.getAPIv1();
+			this.telegramApi = getTelegramBotApi(this.app);
 			if (!this.telegramApi) {
-				console.log('Telegram integration failed: v1 API is null');
+				console.log('Telegram integration failed: API is unavailable');
 				return;
 			}
 
-			this.telegramHandler = new TelegramHandler(
+			this.financeTelegramBridge = new FinanceTelegramBridge(
 				this.app,
 				this.expenseService,
 				this.reportSyncService,
 				this.telegramChartService,
+				this.financeIntakeService,
 				this.settings,
-				this.telegramApi
 			);
-			await this.telegramHandler.initialize();
+			if (!this.financeTelegramBridge.register()) {
+				console.log('Telegram integration failed: unable to register Telegram bridge');
+				return;
+			}
+
+			this.registerParaCoreMetadataContributions();
+			this.registerParaCoreTelegramCardContributions();
 			this.registerParaCoreTelegramHelpContributions();
-			console.log('Telegram v1 fallback integration initialized');
+			console.log('Telegram integration initialized');
 		} catch (error) {
 			console.log('Telegram integration not available:', error);
 		}
