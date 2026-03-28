@@ -224,6 +224,7 @@ For finance transaction notes and attachments, folder placement and timestamp pr
 
 Report notes are generated from transactions and updated by upsert, not recreated blindly.
 Their frontmatter remains the source for integrations and budget state, while the note body stays compact and renders live tables through `DataviewJS`.
+The `DataviewJS` blocks are intentionally thin: they only resolve the plugin instance and call public rendering methods, while filtering, aggregation, tables, and charts live in the plugin code.
 
 Important frontmatter fields:
 
@@ -258,6 +259,16 @@ budget_alert_level: "warning"
 
 The report note is not treated as source of truth for calculations. Reports are rebuilt from transaction notes.
 To create an arbitrary custom report, duplicate a generated report note, change `reportOwner` to `"user"`, assign a new `reportId`, and edit the period or filter properties.
+
+### Dashboard rendering
+
+PARA dashboard contributions now follow the same pattern as report notes:
+
+- the markdown contribution contains a minimal `DataviewJS` host block
+- the block calls the public plugin API
+- month/year finance widgets, summaries, and charts are rendered by the plugin itself
+
+This keeps dashboard templates compact and avoids large inline rendering scripts in contribution markdown.
 
 ## Budgets and budget alerts
 

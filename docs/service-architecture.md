@@ -18,12 +18,14 @@ TG --> BR["FinanceTelegramBridge<br/>commands, callbacks, focused input"]
     AP --> DX["DocumentExtractionService<br/>pdf.js text extraction only"]
     AP --> AI["AI chat/completions endpoint"]
     RP --> QR["ProverkaChekaClient"]
-    BR --> ES["ExpenseService<br/>validation + persistence"]
+    BR --> ES["ExpenseService<br/>validation + persistence + finance rendering"]
     ES --> VA["Obsidian Vault"]
     ES --> RS["ReportSyncService"]
+    ES --> DV["DataviewJS host blocks<br/>reports + dashboard"]
     RS --> VA
     RS --> TB["TelegramBudgetAlertService"]
     RS --> TC["TelegramChartService"]
+    DV --> ES
 ```
 
 ## Current Responsibilities
@@ -86,6 +88,8 @@ class FinanceTelegramBridge {
       +createTransaction()
       +validate linked context
       +attach artifact
+      +renderReportSection()
+      +renderFinanceDashboard()
     }
 
 FinanceTelegramBridge --> FinanceIntakeService
@@ -178,6 +182,23 @@ Artifact storage convention:
 - the stored file name receives a timestamp prefix derived from the same placement date
 - for finance flows, transaction note placement and artifact timestamping both use the transaction date
 
+## Report And Dashboard Rendering
+
+Finance report notes and PARA dashboard widgets now use the same rendering model:
+
+- markdown stays lightweight
+- `DataviewJS` is used only as a host layer
+- heavy filtering, aggregation, table building, and chart rendering live in `ExpenseService`
+- report note frontmatter remains the integration and budget source of truth
+
+In practice this means:
+
+- generated report notes store compact frontmatter plus thin `DataviewJS` sections
+- each section calls the public plugin API instead of defining large inline scripts
+- PARA dashboard contributions also call the same plugin API, so dashboard markdown stays minimal
+
+This removes the old dependency on monolithic inline rendering code and keeps report and dashboard visuals consistent.
+
 ## Why The Current Shape Is Simpler
 
 The previous iteration experimented with:
@@ -204,6 +225,10 @@ The current design prefers:
   - deterministic text and QR-first logic
 - [ai-finance-intake-provider.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/ai-finance-intake-provider.ts)
   - AI-backed extraction flow
+- [expense-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/expense-service.ts)
+  - transaction persistence, report calculations, compact report-note rendering, and dashboard rendering API
+- [register-template-contributions.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/integrations/para-core/register-template-contributions.ts)
+  - thin PARA template and dashboard host blocks
 
 ## Near-Term Direction
 
