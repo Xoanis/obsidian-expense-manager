@@ -95,9 +95,27 @@ export class ExpenseService {
 			return data;
 		}
 
-		const folderPath = await this.ensureFolderPath(this.getArtifactsFolderPath());
+		if (this.paraCoreApi && this.financeDomain) {
+			const savedAttachment = await this.paraCoreApi.saveAttachment({
+				source: data.artifactBytes,
+				fileName: data.artifactFileName,
+				scope: this.financeDomain.id,
+				placementDate: data.dateTime,
+			});
+
+			return {
+				...data,
+				artifact: `[[${savedAttachment.path}]]`,
+				artifactBytes: undefined,
+				artifactFileName: undefined,
+				artifactMimeType: undefined,
+			};
+		}
+
+		const folderPath = await this.ensureFolderPath(this.getArtifactsFolderPath(data.dateTime));
 		const sanitizedName = data.artifactFileName.replace(/[\\/:*?"<>|]/g, '-');
-		const artifactPath = await this.getAvailableArtifactPath(folderPath, sanitizedName);
+		const storedName = this.buildArtifactFileName(data.dateTime, sanitizedName);
+		const artifactPath = await this.getAvailableArtifactPath(folderPath, storedName);
 		await this.app.vault.createBinary(artifactPath, data.artifactBytes);
 
 		return {
@@ -1025,11 +1043,33 @@ export class ExpenseService {
 		return [this.getReportsFolderPath()];
 	}
 
-	private getArtifactsFolderPath(): string {
-		if (this.financeDomain) {
-			return `${this.financeDomain.recordsPath}/Artifacts`;
-		}
-		return `${this.settings.expenseFolder}/Artifacts`;
+	private getArtifactsFolderPath(date?: string): string {
+		const root = this.financeDomain
+			? this.financeDomain.attachmentsPath ?? this.financeDomain.recordsPath
+			: `${this.settings.expenseFolder}/Artifacts`;
+		const { year, month } = this.resolveArtifactDateParts(date);
+		return `${root}/${year}/${month}`;
+	}
+
+	private resolveArtifactDateParts(date?: string): { year: string; month: string } {
+		const parsed = date ? new Date(date) : new Date();
+		const resolved = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+		return {
+			year: String(resolved.getFullYear()),
+			month: String(resolved.getMonth() + 1).padStart(2, '0'),
+		};
+	}
+
+	private buildArtifactFileName(date: string | undefined, fileName: string): string {
+		const parsed = date ? new Date(date) : new Date();
+		const resolved = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+		const year = String(resolved.getFullYear());
+		const month = String(resolved.getMonth() + 1).padStart(2, '0');
+		const day = String(resolved.getDate()).padStart(2, '0');
+		const hours = String(resolved.getHours()).padStart(2, '0');
+		const minutes = String(resolved.getMinutes()).padStart(2, '0');
+		const seconds = String(resolved.getSeconds()).padStart(2, '0');
+		return `${year}-${month}-${day}-${hours}-${minutes}-${seconds}-${fileName}`;
 	}
 
 	private getReportsFolderPath(): string {

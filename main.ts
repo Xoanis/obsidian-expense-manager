@@ -165,6 +165,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerFinanceTemplateContributions(
 			this.paraCoreApi,
 			`${this.financeDomain.recordsPath}/Transactions`,
+			this.financeDomain.attachmentsPath ?? 'Attachments/Finance',
 			this.settings.dashboardContributionMode,
 		);
 		this.registerParaCoreMetadataContributions();

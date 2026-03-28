@@ -5,10 +5,12 @@ import { IParaCoreApi } from './types';
 export function registerFinanceTemplateContributions(
 	api: IParaCoreApi,
 	transactionsPath: string,
+	attachmentsPath: string,
 	dashboardMode: DashboardContributionMode = 'interactive',
 ): void {
 	const transactionsFolder = normalizePath(transactionsPath);
 	const reportsFolder = normalizePath(transactionsPath.replace(/\/Transactions$/i, '/Reports'));
+	const attachmentsFolder = normalizePath(attachmentsPath);
 	const projectSummaryBlock = [
 		'### Project Summary',
 		'```dataviewjs',
@@ -144,7 +146,10 @@ export function registerFinanceTemplateContributions(
 			'### Storage',
 			`- Transactions root: \`${transactionsPath.replace(/\\/g, '/')}\`.`,
 			`- Reports root: \`${reportsFolder.replace(/\\/g, '/')}\`.`,
-			'- Supporting documents can stay in `Resources/` when they are reference material rather than records.',
+			`- Receipt attachments root: \`${attachmentsFolder.replace(/\\/g, '/')}/YYYY/MM/\`.`,
+			'- Uploaded receipts, screenshots, and finance PDFs are operational artifacts and should stay under `Attachments/Finance/YYYY/MM/`, not in `Records/`.',
+			'- Receipt placement uses the transaction date for both the `YYYY/MM` folder and the `YYYY-MM-DD-HH-mm-ss-...` filename prefix.',
+			'- Reference material can still live in `Resources/` when it is not an operational finance artifact.',
 			'',
 			'### Note Types',
 			'- `finance-expense` - expense transaction record.',

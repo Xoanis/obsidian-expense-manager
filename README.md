@@ -194,7 +194,7 @@ category: "Food"
 source: "telegram"
 project: "[[Projects/Trip]]"
 area: "[[Areas/Life]]"
-artifact: "[[Finance/Artifacts/receipt-1.jpg]]"
+artifact: "[[Attachments/Finance/2026/03/2026-03-25-21-30-00-receipt-1.jpg]]"
 tags: ["finance","expense","telegram"]
 ---
 ```
@@ -202,6 +202,13 @@ tags: ["finance","expense","telegram"]
 The body is intentionally small. It keeps only useful structured additions such as:
 - `Items`
 - `Artifact`
+
+When `para_core_plugin` is enabled, receipt artifacts are stored under
+`Attachments/Finance/YYYY/MM/` and linked back from the transaction note.
+In standalone mode they remain under `<Expense folder>/Artifacts/YYYY/MM/`.
+Attachment file names also receive a timestamp prefix like
+`2026-03-25-21-30-00-receipt-1.jpg`.
+For finance attachments, folder placement and timestamp prefix both use the transaction date.
 
 ### Report note
 
@@ -281,6 +288,7 @@ Two QR modes are supported:
 - API-assisted decoding through `proverkacheka.com`
 
 Receipt artifacts can be stored alongside transactions and linked back from the note.
+With `PARA Core`, those artifacts live under `Attachments/Finance/YYYY/MM/` instead of `Records/`.
 
 ## PARA Core integration
 

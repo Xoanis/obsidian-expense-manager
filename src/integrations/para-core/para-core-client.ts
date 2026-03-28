@@ -22,7 +22,8 @@ export function getParaCoreApi(app: App): IParaCoreApi | null {
 			typeof api.registerTemplateContribution !== 'function' ||
 			typeof api.registerMetadataContribution !== 'function' ||
 			typeof api.createNote !== 'function' ||
-			typeof api.getDomainRecordsPath !== 'function'
+			typeof api.getDomainRecordsPath !== 'function' ||
+			typeof api.saveAttachment !== 'function'
 		) {
 			return null;
 		}

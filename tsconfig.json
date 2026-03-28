@@ -6,10 +6,10 @@
         "node_modules/obsidian"
       ],
       "obsidian-para-suite-contracts": [
-        "node_modules/obsidian-para-suite-contracts/src/index.ts"
+        "node_modules/obsidian-para-suite-contracts/dist/index.d.ts"
       ],
       "obsidian-para-suite-contracts/*": [
-        "node_modules/obsidian-para-suite-contracts/src/*"
+        "node_modules/obsidian-para-suite-contracts/dist/*"
       ]
     },
     "inlineSourceMap": true,

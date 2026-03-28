@@ -6,6 +6,7 @@ export function registerFinanceDomain(api: IParaCoreApi): RegisteredParaDomain {
 		id: 'finance',
 		displayName: 'Finance',
 		recordsPath: 'Finance',
+		attachmentsPath: 'Finance',
 		noteTypes: getFinanceNoteTypes(),
 	});
 }
