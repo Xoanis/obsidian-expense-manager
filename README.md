@@ -4,7 +4,7 @@
 
 It can work in three modes:
 - standalone markdown finance tracker
-- finance domain plugin on top of `para_core_plugin`
+- finance domain plugin on top of `obsidian-para-core`
 - finance layer with Telegram input and reporting when `obsidian-telegram-bot` is installed
 
 The plugin stores every transaction as a note, builds period reports from transactions, keeps balances cumulative across periods, and exposes the same finance context in notes, dashboard widgets, and Telegram.
@@ -25,7 +25,7 @@ The plugin stores every transaction as a note, builds period reports from transa
 
 ### Optional but recommended
 
-- `para_core_plugin`
+- `obsidian-para-core`
   - enables finance as a domain plugin
   - stores finance records inside PARA records structure
   - adds dashboard and template contributions
@@ -213,7 +213,7 @@ The body is intentionally small. It keeps only useful structured additions such 
 - `Items`
 - `Artifact`
 
-When `para_core_plugin` is enabled, receipt artifacts are stored under
+When `obsidian-para-core` is enabled, receipt artifacts are stored under
 `Attachments/Finance/YYYY/MM/` and linked back from the transaction note.
 In standalone mode they remain under `<Expense folder>/Artifacts/YYYY/MM/`.
 Attachment file names also receive a timestamp prefix like
@@ -325,7 +325,7 @@ Transaction notes themselves follow the same date-based layout under
 
 ## PARA Core integration
 
-When `para_core_plugin` is installed, `Expense Manager` acts as a finance domain plugin.
+When `obsidian-para-core` is installed, `Expense Manager` acts as a finance domain plugin.
 
 It registers:
 - finance domain
