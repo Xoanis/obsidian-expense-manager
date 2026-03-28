@@ -94,6 +94,7 @@ If you already used an older version of the plugin, run:
 - `Migrate legacy finance notes`
 
 This updates old finance notes to the current schema.
+It also moves legacy flat transaction notes into the dated `YYYY/MM` layout.
 
 ## Commands
 
@@ -105,7 +106,7 @@ This updates old finance notes to the current schema.
 | `Open current month finance report` | Open the current month report in a modal |
 | `Save current month finance report` | Save the current month report note to the vault |
 | `Generate finance report for custom period` | Build a report for any date range |
-| `Migrate legacy finance notes` | Upgrade old finance notes to the current schema |
+| `Migrate legacy finance notes` | Upgrade old finance notes to the current schema and dated folder layout |
 
 ## Telegram workflow
 
@@ -181,6 +182,10 @@ Current PNG charts:
 
 Every transaction is stored as a markdown note with frontmatter.
 
+Transaction note placement follows the transaction date:
+- standalone mode stores notes under `<Expense folder>/YYYY/MM/`
+- `PARA Core` mode stores notes under `Records/Finance/Transactions/YYYY/MM/`
+
 Typical fields:
 
 ```yaml
@@ -208,7 +213,7 @@ When `para_core_plugin` is enabled, receipt artifacts are stored under
 In standalone mode they remain under `<Expense folder>/Artifacts/YYYY/MM/`.
 Attachment file names also receive a timestamp prefix like
 `2026-03-25-21-30-00-receipt-1.jpg`.
-For finance attachments, folder placement and timestamp prefix both use the transaction date.
+For finance transaction notes and attachments, folder placement and timestamp prefix both use the transaction date.
 
 ### Report note
 
@@ -289,6 +294,8 @@ Two QR modes are supported:
 
 Receipt artifacts can be stored alongside transactions and linked back from the note.
 With `PARA Core`, those artifacts live under `Attachments/Finance/YYYY/MM/` instead of `Records/`.
+Transaction notes themselves follow the same date-based layout under
+`Records/Finance/Transactions/YYYY/MM/` in PARA mode and `<Expense folder>/YYYY/MM/` in standalone mode.
 
 ## PARA Core integration
 

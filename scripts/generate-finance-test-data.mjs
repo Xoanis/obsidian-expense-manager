@@ -103,7 +103,13 @@ async function main() {
 	});
 
 	for (const note of generated) {
-		const filePath = path.join(transactionsDir, note.fileName);
+		const filePath = path.join(
+			transactionsDir,
+			String(note.date.getFullYear()),
+			String(note.date.getMonth() + 1).padStart(2, '0'),
+			note.fileName,
+		);
+		await fs.mkdir(path.dirname(filePath), { recursive: true });
 		await fs.writeFile(filePath, note.content, 'utf8');
 	}
 
@@ -192,18 +198,26 @@ function printHelp() {
 }
 
 async function deleteExistingGeneratedNotes(transactionsDir) {
+	await deleteGeneratedNotesRecursive(transactionsDir);
+}
+
+async function deleteGeneratedNotesRecursive(directoryPath) {
 	let entries = [];
 	try {
-		entries = await fs.readdir(transactionsDir, { withFileTypes: true });
+		entries = await fs.readdir(directoryPath, { withFileTypes: true });
 	} catch {
 		return;
 	}
 
 	for (const entry of entries) {
+		const filePath = path.join(directoryPath, entry.name);
+		if (entry.isDirectory()) {
+			await deleteGeneratedNotesRecursive(filePath);
+			continue;
+		}
 		if (!entry.isFile() || !entry.name.endsWith('.md')) {
 			continue;
 		}
-		const filePath = path.join(transactionsDir, entry.name);
 		const content = await fs.readFile(filePath, 'utf8');
 		if (content.includes(`"${GENERATED_TAG}"`) || content.includes(GENERATED_TAG)) {
 			await fs.unlink(filePath);
@@ -224,6 +238,7 @@ function buildTransactions({ count, months, seed }) {
 		const transaction = createTransaction(index, startMonth, months, random);
 		const fileName = createUniqueFileName(transaction, index, usedNames);
 		notes.push({
+			date: new Date(transaction.dateTime),
 			fileName,
 			content: renderTransactionNote(transaction),
 		});

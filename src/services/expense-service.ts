@@ -1,4 +1,4 @@
-import { App, TFile, TFolder } from 'obsidian';
+import { App, TFile, TFolder, normalizePath } from 'obsidian';
 import {
 	TransactionData,
 	PeriodReport,
@@ -78,7 +78,8 @@ export class ExpenseService {
 		// Generate filename and content
         console.log('Creating transaction file with data:', dataWithArtifact);
 		const filename = generateFilename(dataWithArtifact);
-		const filepath = `${this.settings.expenseFolder}/${filename}`;
+		const folderPath = await this.ensureFolderPath(this.getTransactionFolderPath(dataWithArtifact.dateTime));
+		const filepath = `${folderPath}/${filename}`;
 		
 		const frontmatter = generateFrontmatter(dataWithArtifact);
 		const contentBody = generateContentBody(dataWithArtifact);
@@ -302,11 +303,7 @@ export class ExpenseService {
 	 * Ensure expense folder exists
 	 */
 	private async ensureExpenseFolder(): Promise<void> {
-		const folder = this.app.vault.getAbstractFileByPath(this.settings.expenseFolder);
-		
-		if (!folder) {
-			await this.app.vault.createFolder(this.settings.expenseFolder);
-		}
+		await this.ensureFolderPath(this.settings.expenseFolder);
 	}
 
 	/**
@@ -479,6 +476,7 @@ export class ExpenseService {
 		return this.paraCoreApi.createNote({
 			type,
 			title: data.description || filename,
+			folderOverride: this.getTransactionFolderPath(data.dateTime),
 			fileNameOverride: filename,
 			openAfterCreate: false,
 			frontmatterOverrides: {
@@ -693,7 +691,7 @@ export class ExpenseService {
 	}
 
 	isTransactionFile(file: TFile): boolean {
-		return this.getTransactionFolderPaths().some((folderPath) => file.parent?.path === folderPath);
+		return this.isTransactionFilePath(file.path);
 	}
 
 	isReportFile(file: TFile): boolean {
@@ -706,6 +704,26 @@ export class ExpenseService {
 
 	listReportFiles(): TFile[] {
 		return this.getReportFiles();
+	}
+
+	async relocateTransactionFile(file: TFile, dateTime: string | undefined): Promise<TFile> {
+		if (!this.isTransactionFile(file)) {
+			return file;
+		}
+
+		const targetFolder = await this.ensureFolderPath(this.getTransactionFolderPath(dateTime));
+		const desiredPath = normalizePath(`${targetFolder}/${file.name}`);
+		if (normalizePath(file.path) === desiredPath) {
+			return file;
+		}
+
+		const availablePath = this.getAvailablePath(targetFolder, file.name);
+		if (normalizePath(file.path) === availablePath) {
+			return file;
+		}
+
+		await this.app.fileManager.renameFile(file, availablePath);
+		return file;
 	}
 
 	private calculateOpeningBalance(transactions: TransactionData[], startDate: Date): number {
@@ -1039,6 +1057,14 @@ export class ExpenseService {
 		return folders;
 	}
 
+	private getTransactionFolderPath(date?: string): string {
+		const root = this.financeDomain
+			? `${this.financeDomain.recordsPath}/Transactions`
+			: this.settings.expenseFolder;
+		const { year, month } = this.resolveStorageDateParts(date);
+		return `${root}/${year}/${month}`;
+	}
+
 	private getReportFolderPaths(): string[] {
 		return [this.getReportsFolderPath()];
 	}
@@ -1047,11 +1073,11 @@ export class ExpenseService {
 		const root = this.financeDomain
 			? this.financeDomain.attachmentsPath ?? this.financeDomain.recordsPath
 			: `${this.settings.expenseFolder}/Artifacts`;
-		const { year, month } = this.resolveArtifactDateParts(date);
+		const { year, month } = this.resolveStorageDateParts(date);
 		return `${root}/${year}/${month}`;
 	}
 
-	private resolveArtifactDateParts(date?: string): { year: string; month: string } {
+	private resolveStorageDateParts(date?: string): { year: string; month: string } {
 		const parsed = date ? new Date(date) : new Date();
 		const resolved = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 		return {
@@ -1111,6 +1137,10 @@ export class ExpenseService {
 	}
 
 	private async getAvailableArtifactPath(folderPath: string, fileName: string): Promise<string> {
+		return this.getAvailablePath(folderPath, fileName);
+	}
+
+	private getAvailablePath(folderPath: string, fileName: string): string {
 		const lastDot = fileName.lastIndexOf('.');
 		const baseName = lastDot > 0 ? fileName.slice(0, lastDot) : fileName;
 		const extension = lastDot > 0 ? fileName.slice(lastDot) : '';
@@ -1118,7 +1148,7 @@ export class ExpenseService {
 
 		while (true) {
 			const candidateName = attempt === 0 ? `${baseName}${extension}` : `${baseName}-${attempt}${extension}`;
-			const candidatePath = `${folderPath}/${candidateName}`;
+			const candidatePath = normalizePath(`${folderPath}/${candidateName}`);
 			if (!this.app.vault.getAbstractFileByPath(candidatePath)) {
 				return candidatePath;
 			}
@@ -1135,14 +1165,50 @@ export class ExpenseService {
 				continue;
 			}
 
-			for (const child of folder.children) {
-				if (child instanceof TFile && child.extension === 'md') {
-					filesByPath.set(child.path, child);
-				}
+			this.collectMarkdownFiles(folder, filesByPath);
+		}
+
+		return [...filesByPath.values()].filter((file) => this.isTransactionFile(file));
+	}
+
+	private collectMarkdownFiles(folder: TFolder, filesByPath: Map<string, TFile>): void {
+		for (const child of folder.children) {
+			if (child instanceof TFile && child.extension === 'md') {
+				filesByPath.set(child.path, child);
+				continue;
+			}
+
+			if (child instanceof TFolder) {
+				this.collectMarkdownFiles(child, filesByPath);
+			}
+		}
+	}
+
+	private isTransactionFilePath(filePath: string): boolean {
+		const normalizedFilePath = normalizePath(filePath);
+		for (const rootPath of this.getTransactionFolderPaths()) {
+			const normalizedRootPath = normalizePath(rootPath);
+			const prefix = `${normalizedRootPath}/`;
+			if (!normalizedFilePath.startsWith(prefix)) {
+				continue;
+			}
+
+			const relativePath = normalizedFilePath.slice(prefix.length);
+			const segments = relativePath.split('/').filter(Boolean);
+			if (segments.length === 1) {
+				return true;
+			}
+
+			if (segments.length === 3 && this.isYearMonthPath(segments[0], segments[1])) {
+				return true;
 			}
 		}
 
-		return [...filesByPath.values()];
+		return false;
+	}
+
+	private isYearMonthPath(year: string, month: string): boolean {
+		return /^\d{4}$/.test(year) && /^(0[1-9]|1[0-2])$/.test(month);
 	}
 
 	private normalizeTransactionType(type: string): 'expense' | 'income' {

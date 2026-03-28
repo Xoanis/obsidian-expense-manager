@@ -64,12 +64,17 @@ export class MigrationService {
 		};
 		const nextContent = generateFrontmatter(normalized) + generateContentBody(normalized);
 		const currentContent = await this.app.vault.cachedRead(file);
+		let changed = false;
 		if (currentContent === nextContent) {
-			return false;
+			// Keep going so legacy flat notes can still be relocated into YYYY/MM folders.
+		} else {
+			await this.app.vault.modify(file, nextContent);
+			changed = true;
 		}
 
-		await this.app.vault.modify(file, nextContent);
-		return true;
+		const originalPath = file.path;
+		const relocatedFile = await this.expenseService.relocateTransactionFile(file, normalized.dateTime);
+		return changed || relocatedFile.path !== originalPath;
 	}
 
 	private async migrateReportFile(

@@ -171,10 +171,12 @@ participant Bridge as FinanceTelegramBridge
 
 Artifact storage convention:
 
+- standalone mode stores transaction notes under `<Expense folder>/YYYY/MM/`
+- PARA Core mode stores transaction notes under `Records/Finance/Transactions/YYYY/MM/`
 - standalone mode stores artifacts under `<Expense folder>/Artifacts/YYYY/MM/`
 - PARA Core mode stores artifacts under `Attachments/Finance/YYYY/MM/`
 - the stored file name receives a timestamp prefix derived from the same placement date
-- for finance flows, that placement date is the transaction date
+- for finance flows, transaction note placement and artifact timestamping both use the transaction date
 
 ## Why The Current Shape Is Simpler
 
