@@ -228,3 +228,12 @@ export interface ReportBudgetAlertState {
 	sentCritical: boolean;
 	lastAlertAt: string | null;
 }
+
+export type FinanceReportSection =
+	| 'summary'
+	| 'expense-categories'
+	| 'income-categories'
+	| 'expense-chart'
+	| 'income-chart'
+	| 'trend'
+	| 'transactions';

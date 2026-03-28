@@ -36,6 +36,11 @@ The plugin stores every transaction as a note, builds period reports from transa
   - enables `/expense`, `/income`, `/finance_record`, `/finance_summary`, and `/finance_report`
   - enables inline keyboard navigation and PNG charts in Telegram
 
+- `Dataview`
+  - renders compact finance report notes from report frontmatter and transaction notes
+  - makes transaction rows clickable through `file.link`
+  - lets you duplicate a generated report note and turn it into a custom report by editing properties
+
 ### Optional for QR enrichment
 
 - [proverkacheka.com](https://proverkacheka.com)
@@ -218,17 +223,26 @@ For finance transaction notes and attachments, folder placement and timestamp pr
 ### Report note
 
 Report notes are generated from transactions and updated by upsert, not recreated blindly.
+Their frontmatter remains the source for integrations and budget state, while the note body stays compact and renders live tables through `DataviewJS`.
 
 Important frontmatter fields:
 
 ```yaml
 ---
 type: "finance-report"
+reportOwner: "expense-manager"
+reportEngine: "dataviewjs"
+reportId: "month-2026-Mar"
+reportTemplate: "default"
 periodKind: "month"
 periodKey: "2026-Mar"
 periodLabel: "March 2026"
 periodStart: 2026-03-01
 periodEnd: 2026-03-31
+transactionsRoot: "Records/Finance/Transactions"
+filterProject: ""
+filterArea: ""
+filterTypes: ["expense", "income"]
 openingBalance: 18500.00
 totalExpenses: 42300.00
 totalIncome: 95000.00
@@ -243,6 +257,7 @@ budget_alert_level: "warning"
 ```
 
 The report note is not treated as source of truth for calculations. Reports are rebuilt from transaction notes.
+To create an arbitrary custom report, duplicate a generated report note, change `reportOwner` to `"user"`, assign a new `reportId`, and edit the period or filter properties.
 
 ## Budgets and budget alerts
 

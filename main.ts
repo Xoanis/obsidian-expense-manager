@@ -1,10 +1,11 @@
 import { App, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 import { ExpenseManagerSettings, DEFAULT_SETTINGS } from './src/settings';
+import { DashboardContributionMode } from './src/settings';
 import { ExpenseService } from './src/services/expense-service';
 import { AnalyticsService } from './src/services/analytics-service';
 import { ManualHandler } from './src/handlers/manual-handler';
 import { QrHandler } from './src/handlers/qr-handler';
-import { TransactionData } from './src/types';
+import { FinanceReportSection, TransactionData } from './src/types';
 import { registerAddExpenseCommand } from './src/commands/add-expense';
 import { registerAddIncomeCommand } from './src/commands/add-income';
 import { registerAddQrExpenseCommand } from './src/commands/add-qr-expense';
@@ -147,6 +148,25 @@ export default class ExpenseManagerPlugin extends Plugin {
 		}
 
 		await this.app.workspace.getLeaf(true).openFile(file);
+	}
+
+	async renderReportSection(
+		section: FinanceReportSection,
+		container: HTMLElement,
+		reportFilePath: string,
+	): Promise<void> {
+		await this.expenseService.renderReportSection(section, container, reportFilePath);
+	}
+
+	async renderFinanceDashboard(
+		container: HTMLElement,
+		options: {
+			mode: DashboardContributionMode;
+			transactionsRoot: string;
+			reportsRoot: string;
+		},
+	): Promise<void> {
+		await this.expenseService.renderFinanceDashboard(container, options);
 	}
 
 	/**
@@ -301,6 +321,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			}
 			
 			const file = await this.expenseService.createTransaction(data);
+			this.expenseService.clearReportRenderCache();
 			this.reportSyncService.scheduleAutoSync(`transaction-saved:${file.path}`);
 			
 			if (this.settings.showConfirmationNotice) {
@@ -356,24 +377,28 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private registerReportSyncListeners() {
 		this.registerEvent(this.app.vault.on('create', (file) => {
 			if (this.reportSyncService.shouldSyncForFile(file)) {
+				this.expenseService.clearReportRenderCache();
 				this.reportSyncService.scheduleAutoSync(`create:${file.path}`);
 			}
 		}));
 
 		this.registerEvent(this.app.vault.on('modify', (file) => {
 			if (this.reportSyncService.shouldSyncForFile(file)) {
+				this.expenseService.clearReportRenderCache(file.path);
 				this.reportSyncService.scheduleAutoSync(`modify:${file.path}`);
 			}
 		}));
 
 		this.registerEvent(this.app.vault.on('delete', (file) => {
 			if (this.reportSyncService.shouldSyncForFile(file)) {
+				this.expenseService.clearReportRenderCache();
 				this.reportSyncService.scheduleAutoSync(`delete:${file.path}`);
 			}
 		}));
 
 		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
 			if (this.reportSyncService.shouldSyncForFile(file) || oldPath.startsWith(`${this.settings.expenseFolder}/`)) {
+				this.expenseService.clearReportRenderCache();
 				this.reportSyncService.scheduleAutoSync(`rename:${oldPath}`);
 			}
 		}));

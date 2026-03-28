@@ -81,11 +81,7 @@ export class ReportSyncService {
 			for (const kind of enabledKinds) {
 				const descriptors = enumeratePeriodsInRange(kind, earliestDate, now, true);
 				for (const descriptor of descriptors) {
-					const existingFile = await this.expenseService.findReportFile(
-						descriptor.kind,
-						descriptor.startDate,
-						descriptor.endDate,
-					);
+					const existingFile = await this.expenseService.findManagedReportFile(descriptor);
 					const budget = await this.expenseService.getExistingBudgetForDescriptor(descriptor);
 					const existingState = existingFile
 						? await this.expenseService.getReportBudgetAlertState(existingFile)

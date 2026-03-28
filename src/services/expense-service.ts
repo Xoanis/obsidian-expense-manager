@@ -4,6 +4,7 @@ import {
 	PeriodReport,
 	CategorySummary,
 	FinanceContextSummary,
+	FinanceReportSection,
 	ReportPeriodDescriptor,
 	ReportPeriodKind,
 	ReportBudgetSummary,
@@ -11,6 +12,7 @@ import {
 	ReportBudgetAlertState,
 } from '../types';
 import { ExpenseManagerSettings } from '../settings';
+import { DashboardContributionMode } from '../settings';
 import { IParaCoreApi, RegisteredParaDomain } from '../integrations/para-core/types';
 import { 
 	generateFrontmatter, 
@@ -33,11 +35,61 @@ export class DuplicateTransactionError extends Error {
 	}
 }
 
+const MANAGED_REPORT_OWNER = 'expense-manager';
+const REPORT_ENGINE_DATAVIEWJS = 'dataviewjs';
+const DEFAULT_REPORT_TEMPLATE = 'default';
+const REPORT_CHART_COLORS = ['#c2410c', '#0f766e', '#7c3aed', '#be123c', '#15803d', '#1d4ed8', '#9333ea', '#ca8a04'];
+
+type ReportTableCell = string | HTMLElement;
+
+interface ReportRenderConfig {
+	file: TFile;
+	descriptor: ReportPeriodDescriptor;
+	currency: string;
+	transactionsRoot: string;
+	filterProject: string;
+	filterArea: string;
+	filterTypes: TransactionData['type'][];
+	budgetLimit: number | null;
+}
+
+interface ReportRenderState {
+	config: ReportRenderConfig;
+	report: PeriodReport;
+	filterSummary: string[];
+}
+
+interface DashboardRenderOptions {
+	mode: DashboardContributionMode;
+	transactionsRoot: string;
+	reportsRoot: string;
+}
+
+interface DashboardMonthlyState {
+	monthDate: Date;
+	report: Record<string, unknown> | null;
+	expenseCategories: CategorySummary[];
+	totalExpenses: number;
+	totalIncome: number;
+	openingBalance: number;
+	closingBalance: number;
+}
+
+interface DashboardYearlyState {
+	year: number;
+	expenses: number[];
+	incomes: number[];
+	warningMonths: number;
+	forecastMonths: number;
+	criticalMonths: number;
+}
+
 export class ExpenseService {
 	private app: App;
 	private settings: ExpenseManagerSettings;
 	private paraCoreApi: IParaCoreApi | null;
 	private financeDomain: RegisteredParaDomain | null;
+	private reportRenderStateCache = new Map<string, Promise<ReportRenderState>>();
 
 	constructor(
 		app: App,
@@ -383,10 +435,21 @@ export class ExpenseService {
 	generateReportMarkdown(report: PeriodReport, generatedAt = new Date().toISOString()): string {
 		const formatDate = (date: Date): string => formatDateKey(date);
 		const currency = this.settings.defaultCurrency;
+		const reportId = this.buildManagedReportId({
+			kind: report.periodKind,
+			key: report.periodKey,
+			startDate: report.startDate,
+			endDate: report.endDate,
+		});
+		const transactionsRoot = this.getTransactionsRootPath();
 
 		const frontmatterLines = [
 			'---',
 			'type: "finance-report"',
+			`reportOwner: "${MANAGED_REPORT_OWNER}"`,
+			`reportEngine: "${REPORT_ENGINE_DATAVIEWJS}"`,
+			`reportId: "${reportId}"`,
+			`reportTemplate: "${DEFAULT_REPORT_TEMPLATE}"`,
 			`periodKind: "${report.periodKind}"`,
 			`periodKey: "${report.periodKey}"`,
 			`periodLabel: "${report.periodLabel.replace(/"/g, '\\"')}"`,
@@ -394,6 +457,11 @@ export class ExpenseService {
 			`periodEnd: ${formatDate(report.endDate)}`,
 			`generatedAt: ${generatedAt}`,
 			`currency: "${currency}"`,
+			`transactionsRoot: "${transactionsRoot.replace(/"/g, '\\"')}"`,
+			'filterProject: ""',
+			'filterArea: ""',
+			'tags: ["finance","report"]',
+			'filterTypes: ["expense","income"]',
 			`openingBalance: ${report.openingBalance.toFixed(2)}`,
 			`totalExpenses: ${report.totalExpenses.toFixed(2)}`,
 			`totalIncome: ${report.totalIncome.toFixed(2)}`,
@@ -414,47 +482,35 @@ export class ExpenseService {
 			...(report.budget ? [`budget_alert_state_forecast_sent: ${report.budget.alertState.sentForecast}`] : []),
 			...(report.budget ? [`budget_alert_state_critical_sent: ${report.budget.alertState.sentCritical}`] : []),
 			...(report.budget?.alertState.lastAlertAt ? [`budget_alert_state_last_alert_at: ${report.budget.alertState.lastAlertAt}`] : []),
-			'tags: ["finance","report"]',
 			'---',
 			'',
 		];
-		let content = `${frontmatterLines.join('\n')}`;
+		const bodyLines = [
+			'> This finance report stays compact and renders live tables through DataviewJS.',
+			'> Duplicate the note, set `reportOwner: "user"`, assign a unique `reportId`, and adjust `periodStart`, `periodEnd`, `filterProject`, or `filterArea` to create a custom report.',
+			'',
+			'## Snapshot',
+			'',
+			`- Period: ${report.periodLabel}`,
+			`- Opening balance: ${report.openingBalance.toFixed(2)} ${currency}`,
+			`- Income: ${report.totalIncome.toFixed(2)} ${currency}`,
+			`- Expenses: ${report.totalExpenses.toFixed(2)} ${currency}`,
+			`- Closing balance: ${report.closingBalance.toFixed(2)} ${currency}`,
+			...(report.budget
+				? [
+					`- Budget: ${report.budget.limit.toFixed(2)} ${currency}`,
+					`- Budget remaining: ${report.budget.remaining.toFixed(2)} ${currency}`,
+					`- Budget alert: ${report.budget.alertLevel}`,
+				]
+				: []),
+			'',
+			'> Enable the Dataview plugin to render the live report block below.',
+			'',
+			...this.buildReportDataviewTemplate(),
+			'',
+		];
 
-		content += this.renderCategorySection('💸 Expense categories', report.expenseByCategory);
-		content += this.renderCategorySection('💰 Income categories', report.incomeByCategory);
-		content += this.renderMermaidPieSection('💸 Expense pie chart', report.expenseByCategory);
-		content += this.renderMermaidPieSection('💰 Income pie chart', report.incomeByCategory);
-		content += this.renderMonthlyTrendSection(report);
-
-		// Transactions by type
-		content += `## 💰 Income\n\n`;
-		const incomes = report.transactions.filter(t => t.type === 'income');
-		if (incomes.length > 0) {
-			content += `| Date | Amount | Description | Category |\n`;
-			content += `|------|--------|---------|----------|\n`;
-			for (const t of incomes) {
-				const dateStr = new Date(t.dateTime).toLocaleDateString();
-				content += `| ${dateStr} | ${t.amount.toFixed(2)} ${t.currency} | ${t.description} | ${t.category} |\n`;
-			}
-		} else {
-			content += `_No income in this period._\n\n`;
-		}
-		content += '\n';
-
-		content += `## 💸 Expenses\n\n`;
-		const expenses = report.transactions.filter(t => t.type === 'expense');
-		if (expenses.length > 0) {
-			content += `| Date | Amount | Description | Category |\n`;
-			content += `|------|--------|---------|----------|\n`;
-			for (const t of expenses) {
-				const dateStr = new Date(t.dateTime).toLocaleDateString();
-				content += `| ${dateStr} | ${t.amount.toFixed(2)} ${t.currency} | ${t.description} | ${t.category} |\n`;
-			}
-		} else {
-			content += `_No expenses in this period._\n\n`;
-		}
-
-		return content;
+		return `${frontmatterLines.join('\n')}${bodyLines.join('\n')}`;
 	}
 
 	/**
@@ -462,6 +518,909 @@ export class ExpenseService {
 	 */
 	async saveReportAsFile(report: PeriodReport): Promise<TFile> {
 		return this.upsertReportFile(report);
+	}
+
+	clearReportRenderCache(filePath?: string): void {
+		if (filePath) {
+			this.reportRenderStateCache.delete(normalizePath(filePath));
+			return;
+		}
+
+		this.reportRenderStateCache.clear();
+	}
+
+	async renderReportSection(
+		section: FinanceReportSection,
+		container: HTMLElement,
+		reportFilePath: string,
+	): Promise<void> {
+		container.replaceChildren();
+
+		try {
+			const state = await this.getReportRenderState(reportFilePath);
+			if (section === 'summary') {
+				this.renderReportSummarySection(container, state);
+				return;
+			}
+			if (section === 'expense-categories') {
+				this.renderCategoryTableSection(container, state.report.expenseByCategory, state.config.currency, 'No expenses in this period.');
+				return;
+			}
+			if (section === 'income-categories') {
+				this.renderCategoryTableSection(container, state.report.incomeByCategory, state.config.currency, 'No income in this period.');
+				return;
+			}
+			if (section === 'expense-chart') {
+				this.renderPieChartSection(container, state.report.expenseByCategory, state.config.currency, 'Expense breakdown', 'No expenses in this period.');
+				return;
+			}
+			if (section === 'income-chart') {
+				this.renderPieChartSection(container, state.report.incomeByCategory, state.config.currency, 'Income breakdown', 'No income in this period.');
+				return;
+			}
+			if (section === 'trend') {
+				this.renderTrendSection(container, state);
+				return;
+			}
+			this.renderTransactionsSection(container, state);
+		} catch (error) {
+			container.createEl('div', {
+				text: `Unable to render report section: ${(error as Error).message}`,
+			});
+			console.error('Expense Manager report render error:', error);
+		}
+	}
+
+	async renderFinanceDashboard(
+		container: HTMLElement,
+		options: DashboardRenderOptions,
+	): Promise<void> {
+		const state = {
+			monthDate: this.getMonthStart(new Date()),
+			year: new Date().getFullYear(),
+		};
+
+		const render = async (): Promise<void> => {
+			container.replaceChildren();
+
+			try {
+				const [monthlyState, yearlyState] = await Promise.all([
+					this.buildDashboardMonthlyState(options, state.monthDate),
+					this.buildDashboardYearlyState(options, state.year),
+				]);
+
+				if (options.mode === 'interactive') {
+					this.renderDashboardMonthSection(container, monthlyState, options.mode, state, render);
+					this.renderDashboardYearSection(container, yearlyState, options.mode, state, render);
+					return;
+				}
+
+				this.renderDashboardMonthSection(container, monthlyState, options.mode, state, render);
+				this.renderDashboardYearSection(container, yearlyState, options.mode, state, render);
+			} catch (error) {
+				container.createEl('div', {
+					text: `Unable to render finance dashboard: ${(error as Error).message}`,
+				});
+				console.error('Expense Manager dashboard render error:', error);
+			}
+		};
+
+		await render();
+	}
+
+	private async getReportRenderState(reportFilePath: string): Promise<ReportRenderState> {
+		const normalizedPath = normalizePath(reportFilePath);
+		const cached = this.reportRenderStateCache.get(normalizedPath);
+		if (cached) {
+			return cached;
+		}
+
+		const pending = this.buildReportRenderState(normalizedPath).catch((error) => {
+			this.reportRenderStateCache.delete(normalizedPath);
+			throw error;
+		});
+		this.reportRenderStateCache.set(normalizedPath, pending);
+		return pending;
+	}
+
+	private async buildReportRenderState(reportFilePath: string): Promise<ReportRenderState> {
+		const abstractFile = this.app.vault.getAbstractFileByPath(reportFilePath);
+		if (!(abstractFile instanceof TFile)) {
+			throw new Error(`Report file not found: ${reportFilePath}`);
+		}
+
+		const content = await this.app.vault.cachedRead(abstractFile);
+		const frontmatter = parseYamlFrontmatter(content);
+		if (!frontmatter) {
+			throw new Error('Report note is missing frontmatter');
+		}
+
+		const descriptor = this.readReportDescriptor(frontmatter);
+		const config = this.readReportRenderConfig(abstractFile, frontmatter, descriptor);
+		const allTransactions = await this.getAllTransactions();
+		const scopedTransactions = allTransactions.filter((transaction) => this.matchesReportRenderConfig(transaction, config));
+		const report = this.hydrateReportWithBudgetState(
+			this.buildPeriodReportFromTransactions(scopedTransactions, descriptor, config.budgetLimit),
+			config.budgetLimit,
+			await this.readReportBudgetAlertState(abstractFile),
+		);
+
+		return {
+			config,
+			report,
+			filterSummary: [
+				...(config.filterProject ? [`Project: ${config.filterProject}`] : []),
+				...(config.filterArea ? [`Area: ${config.filterArea}`] : []),
+			],
+		};
+	}
+
+	private readReportDescriptor(
+		frontmatter: Record<string, unknown>,
+	): ReportPeriodDescriptor {
+		const rawStart = typeof frontmatter.periodStart === 'string'
+			? frontmatter.periodStart
+			: typeof frontmatter.period === 'string'
+				? String(frontmatter.period).split(' to ')[0]?.trim() ?? ''
+				: '';
+		const rawEnd = typeof frontmatter.periodEnd === 'string'
+			? frontmatter.periodEnd
+			: typeof frontmatter.period === 'string'
+				? String(frontmatter.period).split(' to ')[1]?.trim() ?? ''
+				: '';
+
+		if (!rawStart || !rawEnd) {
+			throw new Error('Report periodStart/periodEnd is missing');
+		}
+
+		const startDate = new Date(rawStart);
+		const endDate = new Date(rawEnd);
+		if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+			throw new Error('Report period dates are invalid');
+		}
+
+		const fallbackDescriptor = createCustomPeriodDescriptor(startDate, endDate);
+		const kind = typeof frontmatter.periodKind === 'string'
+			? frontmatter.periodKind as ReportPeriodKind
+			: fallbackDescriptor.kind;
+		return {
+			kind,
+			key: typeof frontmatter.periodKey === 'string' ? frontmatter.periodKey : fallbackDescriptor.key,
+			label: typeof frontmatter.periodLabel === 'string' ? frontmatter.periodLabel : fallbackDescriptor.label,
+			startDate: fallbackDescriptor.startDate,
+			endDate: fallbackDescriptor.endDate,
+		};
+	}
+
+	private readReportRenderConfig(
+		file: TFile,
+		frontmatter: Record<string, unknown>,
+		descriptor: ReportPeriodDescriptor,
+	): ReportRenderConfig {
+		const filterTypes = this.readReportFilterTypes(frontmatter.filterTypes);
+		return {
+			file,
+			descriptor,
+			currency: typeof frontmatter.currency === 'string' ? frontmatter.currency : this.settings.defaultCurrency,
+			transactionsRoot: typeof frontmatter.transactionsRoot === 'string'
+				? normalizePath(frontmatter.transactionsRoot)
+				: normalizePath(this.getTransactionsRootPath()),
+			filterProject: this.extractLinkPath(typeof frontmatter.filterProject === 'string' ? frontmatter.filterProject : '') ?? '',
+			filterArea: this.extractLinkPath(typeof frontmatter.filterArea === 'string' ? frontmatter.filterArea : '') ?? '',
+			filterTypes,
+			budgetLimit: this.readBudgetValue(frontmatter.budget),
+		};
+	}
+
+	private readReportFilterTypes(value: unknown): TransactionData['type'][] {
+		const rawValues = Array.isArray(value) ? value : ['expense', 'income'];
+		const normalized = rawValues
+			.map((entry) => this.normalizeReportFilterType(entry))
+			.filter((entry): entry is TransactionData['type'] => entry !== null);
+		return normalized.length > 0 ? normalized : ['expense', 'income'];
+	}
+
+	private normalizeReportFilterType(value: unknown): TransactionData['type'] | null {
+		const raw = String(value ?? '').trim();
+		if (raw === 'expense' || raw === 'finance-expense') {
+			return 'expense';
+		}
+		if (raw === 'income' || raw === 'finance-income') {
+			return 'income';
+		}
+		return null;
+	}
+
+	private readBudgetValue(value: unknown): number | null {
+		if (value === null || value === undefined || value === '') {
+			return null;
+		}
+
+		const parsed = Number(value);
+		return Number.isFinite(parsed) ? parsed : null;
+	}
+
+	private matchesReportRenderConfig(
+		transaction: TransactionData,
+		config: ReportRenderConfig,
+	): boolean {
+		if (!config.filterTypes.includes(transaction.type)) {
+			return false;
+		}
+
+		const filePath = transaction.file?.path ? normalizePath(transaction.file.path) : '';
+		const rootPrefix = `${config.transactionsRoot}/`;
+		if (filePath && filePath !== config.transactionsRoot && !filePath.startsWith(rootPrefix)) {
+			return false;
+		}
+
+		if (config.filterProject) {
+			const projectPath = this.extractLinkPath(transaction.project);
+			if (projectPath !== config.filterProject) {
+				return false;
+			}
+		}
+
+		if (config.filterArea) {
+			const areaPath = this.extractLinkPath(transaction.area);
+			if (areaPath !== config.filterArea) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	private renderReportSummarySection(container: HTMLElement, state: ReportRenderState): void {
+		if (state.filterSummary.length > 0) {
+			container.createEl('div', {
+				text: state.filterSummary.join(' | '),
+				attr: {
+					style: 'margin-bottom: 12px; color: var(--text-muted); font-size: 0.9em;',
+				},
+			});
+		}
+
+		const metricsGrid = container.createDiv();
+		metricsGrid.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:10px; margin-bottom:12px;';
+		this.appendMetricCard(metricsGrid, 'Opening', this.formatMoney(state.report.openingBalance, state.config.currency));
+		this.appendMetricCard(metricsGrid, 'Income', this.formatMoney(state.report.totalIncome, state.config.currency));
+		this.appendMetricCard(metricsGrid, 'Expenses', this.formatMoney(state.report.totalExpenses, state.config.currency));
+		this.appendMetricCard(metricsGrid, 'Closing', this.formatMoney(state.report.closingBalance, state.config.currency));
+		this.appendMetricCard(metricsGrid, 'Transactions', String(state.report.transactions.length));
+		this.appendMetricCard(metricsGrid, 'Net change', this.formatMoney(state.report.netChange, state.config.currency));
+
+		if (!state.report.budget) {
+			return;
+		}
+
+		const budgetGrid = container.createDiv();
+		budgetGrid.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:10px;';
+		this.appendMetricCard(budgetGrid, 'Budget', this.formatMoney(state.report.budget.limit, state.config.currency));
+		this.appendMetricCard(budgetGrid, 'Budget remaining', this.formatMoney(state.report.budget.remaining, state.config.currency));
+		this.appendMetricCard(
+			budgetGrid,
+			'Used',
+			state.report.budget.usagePercentage === null ? '-' : `${state.report.budget.usagePercentage.toFixed(1)}%`,
+		);
+		this.appendMetricCard(budgetGrid, 'Alert', state.report.budget.alertLevel);
+	}
+
+	private appendMetricCard(container: HTMLElement, label: string, value: string): void {
+		const card = container.createDiv();
+		card.style.cssText = 'padding:12px 14px; border:1px solid var(--background-modifier-border); border-radius:16px; background:var(--background-secondary);';
+		card.createEl('div', {
+			text: label,
+			attr: {
+				style: 'font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:6px;',
+			},
+		});
+		card.createEl('div', {
+			text: value,
+			attr: {
+				style: 'font-size:18px; font-weight:600; color:var(--text-normal);',
+			},
+		});
+	}
+
+	private renderCategoryTableSection(
+		container: HTMLElement,
+		categories: CategorySummary[],
+		currency: string,
+		emptyText: string,
+	): void {
+		if (categories.length === 0) {
+			container.createEl('div', { text: emptyText });
+			return;
+		}
+
+		this.renderTable(
+			container,
+			['Category', 'Amount', '%', 'Count'],
+			categories.map((category) => [
+				category.category,
+				this.formatMoney(category.total, currency),
+				`${category.percentage.toFixed(1)}%`,
+				String(category.count),
+			]),
+		);
+	}
+
+	private renderPieChartSection(
+		container: HTMLElement,
+		categories: CategorySummary[],
+		currency: string,
+		title: string,
+		emptyText: string,
+	): void {
+		if (categories.length === 0) {
+			container.createEl('div', { text: emptyText });
+			return;
+		}
+
+		const wrapper = container.createDiv();
+		wrapper.innerHTML = `<div style="padding:16px; border:1px solid var(--background-modifier-border); border-radius:20px; background:linear-gradient(180deg, color-mix(in srgb, var(--background-primary) 92%, white 8%), var(--background-primary));"><div style="font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:10px;">${title}</div><div style="display:grid; grid-template-columns:minmax(200px, 240px) 1fr; gap:18px; align-items:center;"><div style="display:flex; justify-content:center;">${this.buildPieChartSvg(categories, 'Total')}</div><div>${this.buildPieChartLegend(categories, currency)}</div></div></div>`;
+	}
+
+	private renderTrendSection(container: HTMLElement, state: ReportRenderState): void {
+		if (state.report.periodKind !== 'year') {
+			container.createEl('div', { text: 'Monthly trend is available for yearly reports.' });
+			return;
+		}
+
+		const labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+		const expenses = labels.map(() => 0);
+		const incomes = labels.map(() => 0);
+
+		for (const transaction of state.report.transactions) {
+			const monthIndex = new Date(transaction.dateTime).getMonth();
+			if (monthIndex < 0 || monthIndex > 11) {
+				continue;
+			}
+
+			if (transaction.type === 'income') {
+				incomes[monthIndex] += transaction.amount;
+			} else {
+				expenses[monthIndex] += transaction.amount;
+			}
+		}
+
+		const wrapper = container.createDiv();
+		const yearLabel = String(state.report.startDate.getFullYear());
+		wrapper.innerHTML = `<div style="padding:16px; border:1px solid var(--background-modifier-border); border-radius:20px; background:linear-gradient(180deg, color-mix(in srgb, var(--background-primary) 92%, white 8%), var(--background-primary));"><div style="font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:10px;">${yearLabel} monthly trend</div><div style="overflow-x:auto;">${this.buildBarTrendChartSvg(labels, expenses, incomes)}${this.buildBarTrendLegend()}</div></div>`;
+	}
+
+	private renderTransactionsSection(container: HTMLElement, state: ReportRenderState): void {
+		if (state.report.transactions.length === 0) {
+			container.createEl('div', { text: 'No transactions match the current report filters.' });
+			return;
+		}
+
+		this.renderTable(
+			container,
+			['File', 'Date', 'Type', 'Amount', 'Category', 'Project', 'Area', 'Description'],
+			state.report.transactions.map((transaction) => [
+				this.createFileLinkCell(transaction.file ?? null, transaction.file?.basename ?? transaction.description ?? 'Open'),
+				transaction.dateTime,
+				transaction.type,
+				this.formatMoney(transaction.amount, transaction.currency),
+				transaction.category || 'uncategorized',
+				this.createReferenceCell(transaction.project),
+				this.createReferenceCell(transaction.area),
+				transaction.description,
+			]),
+		);
+	}
+
+	private renderTable(container: HTMLElement, headers: string[], rows: ReportTableCell[][]): void {
+		const wrapper = container.createDiv();
+		wrapper.style.cssText = 'overflow-x:auto;';
+		const table = wrapper.createEl('table');
+		table.className = 'table-view-table';
+		table.style.width = '100%';
+
+		const thead = table.createEl('thead');
+		const headerRow = thead.createEl('tr');
+		for (const header of headers) {
+			headerRow.createEl('th', { text: header });
+		}
+
+		const tbody = table.createEl('tbody');
+		for (const row of rows) {
+			const tr = tbody.createEl('tr');
+			for (const value of row) {
+				const td = tr.createEl('td');
+				if (value instanceof HTMLElement) {
+					td.appendChild(value);
+				} else {
+					td.setText(value);
+				}
+			}
+		}
+	}
+
+	private createFileLinkCell(file: TFile | null, fallbackLabel: string): HTMLElement {
+		if (!file) {
+			const span = document.createElement('span');
+			span.textContent = fallbackLabel;
+			return span;
+		}
+
+		return this.createInternalLink(file, file.basename);
+	}
+
+	private createReferenceCell(reference: string | undefined): HTMLElement {
+		const linkPath = this.extractLinkPath(reference);
+		if (!linkPath) {
+			const span = document.createElement('span');
+			span.textContent = '';
+			return span;
+		}
+
+		const target = this.app.metadataCache.getFirstLinkpathDest(linkPath, '');
+		const label = target?.basename || linkPath.split('/').pop() || linkPath;
+		if (!target) {
+			const span = document.createElement('span');
+			span.textContent = label;
+			return span;
+		}
+
+		return this.createInternalLink(target, label);
+	}
+
+	private createInternalLink(file: TFile, label: string): HTMLElement {
+		const link = document.createElement('a');
+		link.textContent = label;
+		link.href = file.path;
+		link.className = 'internal-link';
+		link.addEventListener('click', (event) => {
+			event.preventDefault();
+			void this.app.workspace.getLeaf(false).openFile(file);
+		});
+		return link;
+	}
+
+	private formatMoney(value: number, currency: string): string {
+		return `${new Intl.NumberFormat('ru-RU', {
+			minimumFractionDigits: 0,
+			maximumFractionDigits: 2,
+		}).format(Number(value ?? 0))} ${currency}`;
+	}
+
+	private formatShortMoney(value: number): string {
+		const amount = Number(value ?? 0);
+		const abs = Math.abs(amount);
+		if (abs >= 1_000_000) {
+			return `${(amount / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+		}
+		if (abs >= 1_000) {
+			return `${(amount / 1_000).toFixed(1).replace(/\.0$/, '')}k`;
+		}
+		return new Intl.NumberFormat('ru-RU', {
+			maximumFractionDigits: 0,
+		}).format(amount);
+	}
+
+	private buildPieChartSvg(categories: CategorySummary[], centerLabel: string): string {
+		const total = categories.reduce((sum, category) => sum + category.total, 0);
+		const size = 180;
+		const center = size / 2;
+		const radius = 72;
+		const circumference = 2 * Math.PI * radius;
+		let offset = 0;
+
+		const segments = categories.map((category, index) => {
+			const share = total > 0 ? category.total / total : 0;
+			const length = share * circumference;
+			const segment = `<circle cx="${center}" cy="${center}" r="${radius}" fill="none" stroke="${REPORT_CHART_COLORS[index % REPORT_CHART_COLORS.length]}" stroke-width="24" stroke-linecap="butt" stroke-dasharray="${length} ${circumference - length}" stroke-dashoffset="${-offset}" transform="rotate(-90 ${center} ${center})"></circle>`;
+			offset += length;
+			return segment;
+		}).join('');
+
+		return `<svg viewBox="0 0 ${size} ${size}" width="180" height="180" aria-label="${this.escapeHtml(centerLabel)} chart"><circle cx="${center}" cy="${center}" r="${radius}" fill="none" stroke="var(--background-secondary)" stroke-width="24"></circle>${segments}<circle cx="${center}" cy="${center}" r="49" fill="var(--background-primary)"></circle><text x="${center}" y="${center - 6}" text-anchor="middle" font-size="12" fill="var(--text-muted)">${this.escapeHtml(centerLabel)}</text><text x="${center}" y="${center + 18}" text-anchor="middle" font-size="22" font-weight="700" fill="var(--text-normal)">${this.escapeHtml(this.formatShortMoney(total))}</text></svg>`;
+	}
+
+	private buildPieChartLegend(categories: CategorySummary[], currency: string): string {
+		return categories.map((category, index) => `
+			<div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 10px; border-radius:12px; background:var(--background-secondary); margin-bottom:8px;">
+				<div style="display:flex; align-items:center; gap:8px;">
+					<span style="display:inline-block; width:10px; height:10px; border-radius:999px; background:${REPORT_CHART_COLORS[index % REPORT_CHART_COLORS.length]};"></span>
+					<span>${this.escapeHtml(category.category)}</span>
+				</div>
+				<div style="text-align:right; color:var(--text-muted);">
+					<div>${this.escapeHtml(this.formatMoney(category.total, currency))}</div>
+					<span style="font-size:11px;">${this.escapeHtml(`${category.percentage.toFixed(1)}%`)}</span>
+				</div>
+			</div>
+		`).join('');
+	}
+
+	private buildBarTrendChartSvg(labels: string[], expenses: number[], incomes: number[]): string {
+		const maxValue = Math.max(1, ...expenses, ...incomes);
+		const chartHeight = 260;
+		const chartWidth = 820;
+		const paddingLeft = 52;
+		const paddingBottom = 34;
+		const chartTop = 18;
+		const innerHeight = chartHeight - chartTop - paddingBottom;
+		const groupWidth = (chartWidth - paddingLeft - 16) / labels.length;
+		const barWidth = Math.max(10, Math.floor(groupWidth / 3));
+		const scale = (value: number): number => (value / maxValue) * innerHeight;
+		const gridLines = Array.from({ length: 5 }, (_, step) => {
+			const y = chartTop + innerHeight - (innerHeight / 4) * step;
+			const value = (maxValue / 4) * step;
+			return `<line x1="${paddingLeft}" y1="${y}" x2="${chartWidth - 12}" y2="${y}" stroke="var(--background-modifier-border)" stroke-width="1"></line><text x="${paddingLeft - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="var(--text-muted)">${this.escapeHtml(this.formatShortMoney(value))}</text>`;
+		}).join('');
+		const bars = labels.map((label, index) => {
+			const baseX = paddingLeft + index * groupWidth + groupWidth / 2;
+			const expenseHeight = scale(expenses[index] ?? 0);
+			const incomeHeight = scale(incomes[index] ?? 0);
+			const baseY = chartTop + innerHeight;
+			return `<rect x="${baseX - barWidth - 4}" y="${baseY - expenseHeight}" width="${barWidth}" height="${expenseHeight}" rx="8" ry="8" fill="#d9485f"></rect><rect x="${baseX + 4}" y="${baseY - incomeHeight}" width="${barWidth}" height="${incomeHeight}" rx="8" ry="8" fill="#22a06b"></rect><text x="${baseX}" y="${chartHeight - 8}" text-anchor="middle" font-size="11" fill="var(--text-muted)">${this.escapeHtml(label)}</text>`;
+		}).join('');
+		return `<svg viewBox="0 0 ${chartWidth} ${chartHeight}" width="100%" height="${chartHeight}">${gridLines}${bars}</svg>`;
+	}
+
+	private buildBarTrendLegend(): string {
+		return '<div style="display:flex; gap:16px; margin-top:8px; color:var(--text-muted);"><span><span style="display:inline-block; width:12px; height:12px; border-radius:4px; background:#d9485f; margin-right:6px;"></span>Expenses</span><span><span style="display:inline-block; width:12px; height:12px; border-radius:4px; background:#22a06b; margin-right:6px;"></span>Income</span></div>';
+	}
+
+	private escapeHtml(value: string): string {
+		return value
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;')
+			.replace(/"/g, '&quot;')
+			.replace(/'/g, '&#39;');
+	}
+
+	private async buildDashboardMonthlyState(
+		options: DashboardRenderOptions,
+		monthDate: Date,
+	): Promise<DashboardMonthlyState> {
+		const transactions = await this.getAllTransactions();
+		const scopedTransactions = transactions.filter((transaction) =>
+			this.matchesDashboardTransactionsRoot(transaction, options.transactionsRoot),
+		);
+		const descriptor = {
+			kind: 'month' as const,
+			key: this.getMonthPeriodKey(monthDate),
+			label: monthDate.toLocaleString('en-US', { month: 'long', year: 'numeric' }),
+			startDate: this.getMonthStart(monthDate),
+			endDate: this.getMonthEnd(monthDate),
+		};
+		const monthReport = this.buildPeriodReportFromTransactions(scopedTransactions, descriptor, null);
+		const reportFrontmatter = this.getDashboardReportFrontmatter(options.reportsRoot, descriptor.key);
+
+		return {
+			monthDate: descriptor.startDate,
+			report: reportFrontmatter,
+			expenseCategories: monthReport.expenseByCategory.slice(0, 8),
+			totalExpenses: monthReport.totalExpenses,
+			totalIncome: monthReport.totalIncome,
+			openingBalance: monthReport.openingBalance,
+			closingBalance: monthReport.closingBalance,
+		};
+	}
+
+	private async buildDashboardYearlyState(
+		options: DashboardRenderOptions,
+		year: number,
+	): Promise<DashboardYearlyState> {
+		const transactions = await this.getAllTransactions();
+		const scopedTransactions = transactions.filter((transaction) =>
+			this.matchesDashboardTransactionsRoot(transaction, options.transactionsRoot),
+		);
+		const expenses = Array.from({ length: 12 }, () => 0);
+		const incomes = Array.from({ length: 12 }, () => 0);
+
+		for (const transaction of scopedTransactions) {
+			const date = new Date(transaction.dateTime);
+			if (date.getFullYear() !== year) {
+				continue;
+			}
+
+			const monthIndex = date.getMonth();
+			if (transaction.type === 'income') {
+				incomes[monthIndex] += transaction.amount;
+			} else {
+				expenses[monthIndex] += transaction.amount;
+			}
+		}
+
+		const monthlyReports = this.getDashboardReportFrontmatters(options.reportsRoot).filter((frontmatter) => {
+			const kind = typeof frontmatter.periodKind === 'string' ? frontmatter.periodKind : '';
+			const periodStart = typeof frontmatter.periodStart === 'string' ? frontmatter.periodStart : '';
+			return kind === 'month' && periodStart.startsWith(`${year}-`);
+		});
+
+		return {
+			year,
+			expenses,
+			incomes,
+			warningMonths: monthlyReports.filter((report) => String(report.budget_alert_level ?? '') === 'warning').length,
+			forecastMonths: monthlyReports.filter((report) => String(report.budget_alert_level ?? '') === 'forecast').length,
+			criticalMonths: monthlyReports.filter((report) => String(report.budget_alert_level ?? '') === 'critical').length,
+		};
+	}
+
+	private renderDashboardMonthSection(
+		container: HTMLElement,
+		state: DashboardMonthlyState,
+		mode: DashboardContributionMode,
+		viewState: { monthDate: Date; year: number },
+		render: () => Promise<void>,
+	): void {
+		const section = container.createDiv();
+		section.style.cssText = 'padding:18px; border:1px solid var(--background-modifier-border); border-radius:24px; background:linear-gradient(180deg, color-mix(in srgb, var(--background-primary) 90%, white 10%), var(--background-primary)); margin-bottom:18px;';
+
+		const header = section.createDiv();
+		header.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:14px;';
+		const titleWrap = header.createDiv();
+		titleWrap.createEl('h3', { text: 'Finance by month', attr: { style: 'margin:0 0 4px 0;' } });
+		titleWrap.createEl('div', {
+			text: state.monthDate.toLocaleString('en-US', { month: 'long', year: 'numeric' }),
+			attr: { style: 'color:var(--text-muted);' },
+		});
+
+		if (mode === 'interactive') {
+			const controls = header.createDiv();
+			controls.style.cssText = 'display:flex; gap:8px; flex-wrap:wrap;';
+			this.appendActionButton(controls, 'Prev', async () => {
+				viewState.monthDate = this.addMonths(viewState.monthDate, -1);
+				await render();
+			});
+			this.appendActionButton(controls, 'Current', async () => {
+				viewState.monthDate = this.getMonthStart(new Date());
+				await render();
+			}, this.isSameMonth(state.monthDate, new Date()));
+			this.appendActionButton(controls, 'Next', async () => {
+				viewState.monthDate = this.addMonths(viewState.monthDate, 1);
+				await render();
+			});
+		}
+
+		const cardsGrid = section.createDiv();
+		cardsGrid.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:10px; margin-bottom:14px;';
+		const report = state.report;
+		if (report) {
+			this.appendMetricCard(cardsGrid, 'Expenses', this.formatMoney(Number(report.totalExpenses ?? 0), this.settings.defaultCurrency));
+			this.appendMetricCard(cardsGrid, 'Income', this.formatMoney(Number(report.totalIncome ?? 0), this.settings.defaultCurrency));
+			this.appendMetricCard(cardsGrid, 'Opening', this.formatMoney(Number(report.openingBalance ?? 0), this.settings.defaultCurrency));
+			this.appendMetricCard(cardsGrid, 'Closing', this.formatMoney(Number(report.closingBalance ?? 0), this.settings.defaultCurrency));
+			this.appendMetricCard(
+				cardsGrid,
+				'Budget',
+				report.budget !== null && report.budget !== undefined && report.budget !== ''
+					? this.formatMoney(Number(report.budget), this.settings.defaultCurrency)
+					: 'Not set',
+			);
+			this.appendMetricCard(cardsGrid, 'Status', this.getBudgetLevelLabel(String(report.budget_alert_level ?? 'none')));
+		} else {
+			section.createEl('div', {
+				text: 'No monthly report note for this period yet.',
+				attr: { style: 'color:var(--text-muted); margin-bottom:12px;' },
+			});
+		}
+
+		if (report) {
+			const alertBlock = this.buildDashboardAlertElement(report, this.settings.defaultCurrency);
+			if (alertBlock) {
+				section.appendChild(alertBlock);
+			}
+		}
+
+		if (state.expenseCategories.length === 0) {
+			section.createEl('div', {
+				text: 'No expenses in this period.',
+				attr: { style: 'color:var(--text-muted); margin-top:14px;' },
+			});
+			return;
+		}
+
+		const chartRow = section.createDiv();
+		chartRow.style.cssText = 'display:grid; grid-template-columns:minmax(200px, 240px) 1fr; gap:18px; align-items:center; margin-top:14px;';
+		const pieContainer = chartRow.createDiv();
+		pieContainer.style.cssText = 'display:flex; justify-content:center;';
+		pieContainer.innerHTML = this.buildPieChartSvg(state.expenseCategories, 'Expenses');
+
+		const legendContainer = chartRow.createDiv();
+		legendContainer.innerHTML = this.buildPieChartLegend(state.expenseCategories, this.settings.defaultCurrency);
+	}
+
+	private renderDashboardYearSection(
+		container: HTMLElement,
+		state: DashboardYearlyState,
+		mode: DashboardContributionMode,
+		viewState: { monthDate: Date; year: number },
+		render: () => Promise<void>,
+	): void {
+		const section = container.createDiv();
+		section.style.cssText = 'padding:18px; border:1px solid var(--background-modifier-border); border-radius:24px; background:linear-gradient(180deg, color-mix(in srgb, var(--background-primary) 90%, white 8%), var(--background-primary)); margin-bottom:18px;';
+
+		const header = section.createDiv();
+		header.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:14px;';
+		const titleWrap = header.createDiv();
+		titleWrap.createEl('h3', { text: 'Finance by year', attr: { style: 'margin:0 0 4px 0;' } });
+		titleWrap.createEl('div', {
+			text: String(state.year),
+			attr: { style: 'color:var(--text-muted);' },
+		});
+
+		if (mode === 'interactive') {
+			const controls = header.createDiv();
+			controls.style.cssText = 'display:flex; gap:8px; flex-wrap:wrap;';
+			this.appendActionButton(controls, 'Prev year', async () => {
+				viewState.year -= 1;
+				await render();
+			});
+			this.appendActionButton(controls, 'Current year', async () => {
+				viewState.year = new Date().getFullYear();
+				await render();
+			}, state.year === new Date().getFullYear());
+			this.appendActionButton(controls, 'Next year', async () => {
+				viewState.year += 1;
+				await render();
+			});
+		}
+
+		const totalsGrid = section.createDiv();
+		totalsGrid.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:10px; margin-bottom:14px;';
+		this.appendMetricCard(totalsGrid, 'Expenses', this.formatMoney(state.expenses.reduce((sum, value) => sum + value, 0), this.settings.defaultCurrency));
+		this.appendMetricCard(totalsGrid, 'Income', this.formatMoney(state.incomes.reduce((sum, value) => sum + value, 0), this.settings.defaultCurrency));
+		this.appendMetricCard(totalsGrid, 'Warning months', String(state.warningMonths));
+		this.appendMetricCard(totalsGrid, 'Critical months', String(state.criticalMonths));
+
+		if (state.warningMonths || state.forecastMonths || state.criticalMonths) {
+			const strip = section.createDiv();
+			strip.style.cssText = 'display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;';
+			this.appendAlertPill(strip, 'Warning', state.warningMonths, 'warning');
+			this.appendAlertPill(strip, 'Forecast', state.forecastMonths, 'forecast');
+			this.appendAlertPill(strip, 'Critical', state.criticalMonths, 'critical');
+		}
+
+		const chartContainer = section.createDiv();
+		chartContainer.style.cssText = 'margin-top:8px; overflow-x:auto;';
+		const labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+		chartContainer.innerHTML = `${this.buildBarTrendChartSvg(labels, state.expenses, state.incomes)}${this.buildBarTrendLegend()}`;
+	}
+
+	private appendActionButton(
+		container: HTMLElement,
+		label: string,
+		onClick: () => Promise<void>,
+		isActive = false,
+	): void {
+		const button = container.createEl('button', { text: label });
+		button.style.cssText = `border:1px solid ${isActive ? 'var(--interactive-accent)' : 'var(--background-modifier-border)'}; background:${isActive ? 'var(--interactive-accent-hover)' : 'var(--background-secondary)'}; color:var(--text-normal); border-radius:999px; padding:6px 12px; font-size:12px; cursor:pointer;`;
+		button.addEventListener('click', () => {
+			void onClick();
+		});
+	}
+
+	private appendAlertPill(
+		container: HTMLElement,
+		label: string,
+		count: number,
+		level: 'warning' | 'forecast' | 'critical',
+	): void {
+		const meta = this.getBudgetLevelMeta(level);
+		const pill = container.createSpan({
+			text: `${label}: ${count}`,
+		});
+		pill.style.cssText = `padding:6px 10px; border-radius:999px; background:${meta.bg}; color:${meta.tone};`;
+	}
+
+	private getDashboardReportFrontmatter(reportsRoot: string, periodKey: string): Record<string, unknown> | null {
+		return this.getDashboardReportFrontmatters(reportsRoot).find((frontmatter) =>
+			String(frontmatter.periodKind ?? '') === 'month' && String(frontmatter.periodKey ?? '') === periodKey,
+		) ?? null;
+	}
+
+	private getDashboardReportFrontmatters(reportsRoot: string): Record<string, unknown>[] {
+		const normalizedRoot = normalizePath(reportsRoot);
+		return this.getReportFiles()
+			.filter((file) => normalizePath(file.parent?.path ?? '') === normalizedRoot)
+			.map((file) => this.app.metadataCache.getFileCache(file)?.frontmatter ?? null)
+			.filter((frontmatter): frontmatter is Record<string, unknown> => Boolean(frontmatter))
+			.filter((frontmatter) => String(frontmatter.type ?? '') === 'finance-report');
+	}
+
+	private buildDashboardAlertElement(
+		report: Record<string, unknown>,
+		currency: string,
+	): HTMLElement | null {
+		if (
+			report.budget === null
+			|| report.budget === undefined
+			|| report.budget === ''
+			|| !report.budget_alert_level
+			|| String(report.budget_alert_level) === 'none'
+			|| String(report.budget_alert_level) === 'ok'
+		) {
+			return null;
+		}
+
+		const level = String(report.budget_alert_level);
+		const meta = this.getBudgetLevelMeta(level);
+		const usage = report.budget_usage_percentage == null ? '-' : `${Number(report.budget_usage_percentage).toFixed(1)}%`;
+		const wrapper = document.createElement('div');
+		wrapper.style.cssText = `padding:14px 16px; border-radius:18px; background:${meta.bg}; border:1px solid ${meta.tone}; color:${meta.tone}; margin-bottom:12px;`;
+		wrapper.createEl('div', {
+			text: `Budget alert: ${meta.label}`,
+			attr: { style: 'font-weight:700; margin-bottom:4px;' },
+		});
+		wrapper.createEl('div', {
+			text: `Used: ${usage} of ${this.formatMoney(Number(report.budget ?? 0), currency)}`,
+		});
+
+		if (level === 'critical') {
+			wrapper.createEl('div', {
+				text: `Over budget: ${this.formatMoney(Math.abs(Number(report.budget_remaining ?? 0)), currency)}`,
+			});
+			return wrapper;
+		}
+
+		if (level === 'forecast') {
+			wrapper.createEl('div', {
+				text: `Projected month end: ${this.formatMoney(Number(report.budget_projected_spent ?? 0), currency)}`,
+			});
+			wrapper.createEl('div', {
+				text: `Expected overrun: ${this.formatMoney(Math.max(0, Number(report.budget_projected_delta ?? 0)), currency)}`,
+			});
+			return wrapper;
+		}
+
+		wrapper.createEl('div', {
+			text: `Remaining: ${this.formatMoney(Number(report.budget_remaining ?? 0), currency)}`,
+		});
+		return wrapper;
+	}
+
+	private getBudgetLevelLabel(level: string): string {
+		return this.getBudgetLevelMeta(level).label;
+	}
+
+	private getBudgetLevelMeta(level: string): { label: string; tone: string; bg: string } {
+		if (level === 'critical') {
+			return { label: 'Critical', tone: '#be123c', bg: 'rgba(190, 18, 60, 0.10)' };
+		}
+		if (level === 'forecast') {
+			return { label: 'Forecast', tone: '#b45309', bg: 'rgba(180, 83, 9, 0.10)' };
+		}
+		if (level === 'warning') {
+			return { label: 'Warning', tone: '#c2410c', bg: 'rgba(194, 65, 12, 0.10)' };
+		}
+		if (level === 'ok') {
+			return { label: 'OK', tone: '#15803d', bg: 'rgba(21, 128, 61, 0.10)' };
+		}
+		return { label: 'No alerts', tone: '#6b7280', bg: 'rgba(107, 114, 128, 0.08)' };
+	}
+
+	private matchesDashboardTransactionsRoot(transaction: TransactionData, rootPath: string): boolean {
+		const filePath = normalizePath(transaction.file?.path ?? '');
+		const normalizedRoot = normalizePath(rootPath);
+		return filePath === normalizedRoot || filePath.startsWith(`${normalizedRoot}/`);
+	}
+
+	private getMonthStart(date: Date): Date {
+		return new Date(date.getFullYear(), date.getMonth(), 1);
+	}
+
+	private getMonthEnd(date: Date): Date {
+		return new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59, 999);
+	}
+
+	private addMonths(date: Date, delta: number): Date {
+		return new Date(date.getFullYear(), date.getMonth() + delta, 1);
+	}
+
+	private isSameMonth(left: Date, right: Date): boolean {
+		return left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth();
+	}
+
+	private getMonthPeriodKey(date: Date): string {
+		return `${date.getFullYear()}-${date.toLocaleString('en-US', { month: 'short' })}`;
 	}
 
 	private async createTransactionViaParaCore(data: TransactionData): Promise<TFile> {
@@ -505,6 +1464,12 @@ export class ExpenseService {
 
 		const startDate = formatDateKey(report.startDate);
 		const endDate = formatDateKey(report.endDate);
+		const reportId = this.buildManagedReportId({
+			kind: report.periodKind,
+			key: report.periodKey,
+			startDate: report.startDate,
+			endDate: report.endDate,
+		});
 		const title = report.periodKind === 'custom'
 			? `Financial Report ${startDate} to ${endDate}`
 			: `Financial Report ${report.periodLabel}`;
@@ -516,9 +1481,17 @@ export class ExpenseService {
 			fileNameOverride: filename,
 			openAfterCreate: false,
 			frontmatterOverrides: {
+				reportOwner: MANAGED_REPORT_OWNER,
+				reportEngine: REPORT_ENGINE_DATAVIEWJS,
+				reportId,
+				reportTemplate: DEFAULT_REPORT_TEMPLATE,
 				periodStart: startDate,
 				periodEnd: endDate,
 				currency: this.settings.defaultCurrency,
+				transactionsRoot: this.getTransactionsRootPath(),
+				filterProject: null,
+				filterArea: null,
+				filterTypes: ['expense', 'income'],
 				periodKind: report.periodKind,
 				periodKey: report.periodKey,
 				periodLabel: report.periodLabel,
@@ -540,7 +1513,14 @@ export class ExpenseService {
 			existingFile?: TFile | null;
 		},
 	): Promise<TFile> {
-		const existing = options?.existingFile ?? await this.findReportFile(report.periodKind, report.startDate, report.endDate);
+		const descriptor: ReportPeriodDescriptor = {
+			kind: report.periodKind,
+			key: report.periodKey,
+			label: report.periodLabel,
+			startDate: report.startDate,
+			endDate: report.endDate,
+		};
+		const existing = options?.existingFile ?? await this.findManagedReportFile(descriptor);
 		const existingBudget = existing ? await this.readReportBudget(existing) : report.budget?.limit ?? null;
 		const existingAlertState = existing ? await this.readReportBudgetAlertState(existing) : this.createEmptyBudgetAlertState();
 		const reportForSave = this.applyPersistedBudgetState(report, existingBudget, existingAlertState);
@@ -586,14 +1566,37 @@ export class ExpenseService {
 		return this.applyPersistedBudgetState(report, budgetLimit, alertState);
 	}
 
+	buildManagedReportId(
+		descriptor: Pick<ReportPeriodDescriptor, 'kind' | 'key' | 'startDate' | 'endDate'>,
+	): string {
+		const key = descriptor.kind === 'custom'
+			? `${formatDateKey(descriptor.startDate)}-to-${formatDateKey(descriptor.endDate)}`
+			: descriptor.key;
+		return `${descriptor.kind}-${key}`.replace(/[^a-zA-Z0-9_-]+/g, '-');
+	}
+
+	async findManagedReportFile(descriptor: ReportPeriodDescriptor): Promise<TFile | null> {
+		return this.findReportFile(descriptor.kind, descriptor.startDate, descriptor.endDate, {
+			reportId: this.buildManagedReportId(descriptor),
+			reportOwner: MANAGED_REPORT_OWNER,
+			includeLegacyManaged: true,
+		});
+	}
+
 	async findReportFile(
 		periodKind: ReportPeriodKind,
 		startDate: Date,
 		endDate: Date,
+		options?: {
+			reportId?: string;
+			reportOwner?: string;
+			includeLegacyManaged?: boolean;
+		},
 	): Promise<TFile | null> {
 		const reportFiles = this.getReportFiles();
 		const targetStart = formatDateKey(startDate);
 		const targetEnd = formatDateKey(endDate);
+		let legacyCandidate: TFile | null = null;
 
 		for (const file of reportFiles) {
 			const content = await this.app.vault.cachedRead(file);
@@ -617,23 +1620,43 @@ export class ExpenseService {
 				: typeof frontmatter.period === 'string'
 					? String(frontmatter.period).split(' to ')[1]?.trim()
 					: null;
+			const fileOwner = typeof frontmatter.reportOwner === 'string' ? frontmatter.reportOwner : null;
+			const fileReportId = typeof frontmatter.reportId === 'string' ? frontmatter.reportId : null;
 			const fileKind = typeof frontmatter.periodKind === 'string'
 				? frontmatter.periodKind
 				: (fileStart && fileEnd ? 'custom' : null);
+			const ownerMatches = this.matchesReportOwner(
+				fileOwner,
+				options?.reportOwner ?? null,
+				options?.includeLegacyManaged ?? true,
+			);
+			if (!ownerMatches) {
+				continue;
+			}
 
-			if (fileStart === targetStart && fileEnd === targetEnd && fileKind === periodKind) {
+			if (options?.reportId && fileReportId === options.reportId) {
 				return file;
 			}
+
+			if (fileStart === targetStart && fileEnd === targetEnd && fileKind === periodKind) {
+				if (!options?.reportId || !fileReportId) {
+					return file;
+				}
+				legacyCandidate = legacyCandidate ?? file;
+			}
 			if (fileStart === targetStart && fileEnd === targetEnd && periodKind === 'custom') {
-				return file;
+				if (!options?.reportId || !fileReportId) {
+					return file;
+				}
+				legacyCandidate = legacyCandidate ?? file;
 			}
 		}
 
-		return null;
+		return legacyCandidate;
 	}
 
 	async getExistingBudgetForDescriptor(descriptor: ReportPeriodDescriptor): Promise<number | null> {
-		const reportFile = await this.findReportFile(descriptor.kind, descriptor.startDate, descriptor.endDate);
+		const reportFile = await this.findManagedReportFile(descriptor);
 		if (!reportFile) {
 			return null;
 		}
@@ -803,6 +1826,103 @@ export class ExpenseService {
 			forecastEnabled,
 			alertState: this.createEmptyBudgetAlertState(),
 		};
+	}
+
+	private buildReportDataviewTemplate(): string[] {
+		return [
+			'## Live Report',
+			'',
+			'### Summary',
+			'```dataviewjs',
+			'const container = dv.el("div", "");',
+			'const plugin = app.plugins.plugins["expense-manager"];',
+			'(async () => {',
+			'  if (!plugin?.renderReportSection) {',
+			'    container.setText("Expense Manager plugin API is unavailable.");',
+			'    return;',
+			'  }',
+			'  await plugin.renderReportSection("summary", container, dv.current().file.path);',
+			'})();',
+			'```',
+			'',
+			'### Expense Categories',
+			'```dataviewjs',
+			'const container = dv.el("div", "");',
+			'const plugin = app.plugins.plugins["expense-manager"];',
+			'(async () => {',
+			'  if (!plugin?.renderReportSection) {',
+			'    container.setText("Expense Manager plugin API is unavailable.");',
+			'    return;',
+			'  }',
+			'  await plugin.renderReportSection("expense-categories", container, dv.current().file.path);',
+			'})();',
+			'```',
+			'',
+			'### Income Categories',
+			'```dataviewjs',
+			'const container = dv.el("div", "");',
+			'const plugin = app.plugins.plugins["expense-manager"];',
+			'(async () => {',
+			'  if (!plugin?.renderReportSection) {',
+			'    container.setText("Expense Manager plugin API is unavailable.");',
+			'    return;',
+			'  }',
+			'  await plugin.renderReportSection("income-categories", container, dv.current().file.path);',
+			'})();',
+			'```',
+			'',
+			'### Expense Chart',
+			'```dataviewjs',
+			'const container = dv.el("div", "");',
+			'const plugin = app.plugins.plugins["expense-manager"];',
+			'(async () => {',
+			'  if (!plugin?.renderReportSection) {',
+			'    container.setText("Expense Manager plugin API is unavailable.");',
+			'    return;',
+			'  }',
+			'  await plugin.renderReportSection("expense-chart", container, dv.current().file.path);',
+			'})();',
+			'```',
+			'',
+			'### Income Chart',
+			'```dataviewjs',
+			'const container = dv.el("div", "");',
+			'const plugin = app.plugins.plugins["expense-manager"];',
+			'(async () => {',
+			'  if (!plugin?.renderReportSection) {',
+			'    container.setText("Expense Manager plugin API is unavailable.");',
+			'    return;',
+			'  }',
+			'  await plugin.renderReportSection("income-chart", container, dv.current().file.path);',
+			'})();',
+			'```',
+			'',
+			'### Monthly Trend',
+			'```dataviewjs',
+			'const container = dv.el("div", "");',
+			'const plugin = app.plugins.plugins["expense-manager"];',
+			'(async () => {',
+			'  if (!plugin?.renderReportSection) {',
+			'    container.setText("Expense Manager plugin API is unavailable.");',
+			'    return;',
+			'  }',
+			'  await plugin.renderReportSection("trend", container, dv.current().file.path);',
+			'})();',
+			'```',
+			'',
+			'### Transactions',
+			'```dataviewjs',
+			'const container = dv.el("div", "");',
+			'const plugin = app.plugins.plugins["expense-manager"];',
+			'(async () => {',
+			'  if (!plugin?.renderReportSection) {',
+			'    container.setText("Expense Manager plugin API is unavailable.");',
+			'    return;',
+			'  }',
+			'  await plugin.renderReportSection("transactions", container, dv.current().file.path);',
+			'})();',
+			'```',
+		];
 	}
 
 	private renderCategorySection(title: string, categories: CategorySummary[]): string {
@@ -1047,6 +2167,26 @@ export class ExpenseService {
 			return `financial-report-${report.periodKey}.md`;
 		}
 		return `financial-report-${report.periodKey}.md`;
+	}
+
+	private matchesReportOwner(
+		fileOwner: string | null,
+		requestedOwner: string | null,
+		includeLegacyManaged: boolean,
+	): boolean {
+		if (!requestedOwner) {
+			return true;
+		}
+		if (fileOwner === requestedOwner) {
+			return true;
+		}
+		return includeLegacyManaged && requestedOwner === MANAGED_REPORT_OWNER && !fileOwner;
+	}
+
+	private getTransactionsRootPath(): string {
+		return this.financeDomain
+			? `${this.financeDomain.recordsPath}/Transactions`
+			: this.settings.expenseFolder;
 	}
 
 	private getTransactionFolderPaths(): string[] {
