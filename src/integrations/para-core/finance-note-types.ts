@@ -4,6 +4,8 @@ import { NoteTypeDefinition, TemplateContext } from './types';
 type FinanceTransactionNoteType = 'finance-expense' | 'finance-income';
 type FinanceTransactionStatus = 'recorded' | 'archived';
 type FinanceReportStatus = 'generated' | 'archived';
+const FINANCE_TRANSACTION_SOURCES = ['manual', 'qr', 'telegram', 'pdf', 'api'] as const;
+const FINANCE_REPORT_PERIOD_KINDS = ['custom', 'month', 'quarter', 'half-year', 'year'] as const;
 
 interface FinanceTransactionFrontmatter {
 	type: FinanceTransactionNoteType;
@@ -68,7 +70,7 @@ function createFinanceTransactionNoteType(
 		displayName,
 		folderKey: TRANSACTIONS_FOLDER_KEY,
 		fileNameStrategy: 'title',
-		requiredFields: ['type', 'status', 'domain', 'created', 'dateTime', 'amount', 'currency', 'source'],
+		requiredFields: ['type', 'status', 'domain', 'created', 'dateTime', 'amount', 'currency', 'description', 'source', 'tags'],
 		allowedStatuses: ['recorded', 'archived'] as const,
 		defaultFrontmatter: (date, timestamp) => ({
 			type,
@@ -88,6 +90,7 @@ function createFinanceTransactionNoteType(
 			details: [],
 		}),
 		template: (ctx) => renderFinanceTransactionTemplate(ctx, categoryTag),
+		validate: (frontmatter: Partial<FinanceTransactionFrontmatter>) => validateFinanceTransactionFrontmatter(frontmatter, categoryTag),
 	};
 }
 
@@ -97,7 +100,25 @@ function createFinanceReportNoteType(): NoteTypeDefinition<FinanceReportFrontmat
 		displayName: 'Finance Report',
 		folderKey: REPORTS_FOLDER_KEY,
 		fileNameStrategy: 'title',
-		requiredFields: ['type', 'status', 'domain', 'created', 'periodStart', 'periodEnd', 'currency'],
+		requiredFields: [
+			'type',
+			'status',
+			'domain',
+			'created',
+			'periodKind',
+			'periodKey',
+			'periodLabel',
+			'periodStart',
+			'periodEnd',
+			'currency',
+			'openingBalance',
+			'totalExpenses',
+			'totalIncome',
+			'netChange',
+			'closingBalance',
+			'balance',
+			'tags',
+		],
 		allowedStatuses: ['generated', 'archived'] as const,
 		defaultFrontmatter: (date) => ({
 			type: 'finance-report',
@@ -120,7 +141,318 @@ function createFinanceReportNoteType(): NoteTypeDefinition<FinanceReportFrontmat
 			tags: ['finance', 'report'],
 		}),
 		template: (ctx) => renderFinanceReportTemplate(ctx),
+		validate: validateFinanceReportFrontmatter,
 	};
+}
+
+function validateFinanceTransactionFrontmatter(
+	frontmatter: Partial<FinanceTransactionFrontmatter>,
+	categoryTag: 'expense' | 'income',
+) {
+	const issues = [];
+
+	if (frontmatter.domain !== 'finance') {
+		issues.push(createIssue('invalid-finance-domain', 'Finance transaction note must declare domain "finance".'));
+	}
+
+	if (!isValidDateString(frontmatter.created)) {
+		issues.push(createIssue('invalid-finance-created-date', 'Finance transaction "created" must be a valid date.'));
+	}
+
+	if (!isValidDateTimeString(frontmatter.dateTime)) {
+		issues.push(createIssue('invalid-finance-datetime', 'Finance transaction "dateTime" must be a valid ISO datetime.'));
+	}
+
+	if (!isPositiveNumber(frontmatter.amount)) {
+		issues.push(createIssue('invalid-finance-amount', 'Finance transaction "amount" must be a positive number.'));
+	}
+
+	if (!isCurrencyCode(frontmatter.currency)) {
+		issues.push(createIssue('invalid-finance-currency', 'Finance transaction "currency" must be a 3-letter uppercase code.'));
+	}
+
+	if (!isNonEmptyString(frontmatter.description)) {
+		issues.push(createIssue('missing-finance-description', 'Finance transaction must have a non-empty description.'));
+	}
+
+	if (!isAllowedValue(frontmatter.source, FINANCE_TRANSACTION_SOURCES)) {
+		issues.push(
+			createIssue(
+				'invalid-finance-source',
+				`Finance transaction "source" must be one of: ${FINANCE_TRANSACTION_SOURCES.join(', ')}.`,
+			),
+		);
+	}
+
+	if (frontmatter.category !== null && frontmatter.category !== undefined && !isNonEmptyString(frontmatter.category)) {
+		issues.push(createIssue('invalid-finance-category', 'Finance transaction "category" must be a non-empty string when present.'));
+	}
+
+	if (frontmatter.artifact !== null && frontmatter.artifact !== undefined && !isWikiLink(frontmatter.artifact)) {
+		issues.push(createIssue('invalid-finance-artifact-link', 'Finance transaction "artifact" should be a wiki-link like [[Receipt]].', 'warning'));
+	}
+
+	if (Array.isArray(frontmatter.tags)) {
+		if (!frontmatter.tags.includes('finance')) {
+			issues.push(createIssue('missing-finance-tag', 'Finance transaction tags should include "finance".', 'warning'));
+		}
+		if (!frontmatter.tags.includes(categoryTag)) {
+			issues.push(
+				createIssue(
+					'missing-finance-type-tag',
+					`Finance transaction tags should include "${categoryTag}" for this note type.`,
+					'warning',
+				),
+			);
+		}
+	}
+
+	if (frontmatter.details !== undefined) {
+		if (!Array.isArray(frontmatter.details)) {
+			issues.push(createIssue('invalid-finance-details', 'Finance transaction "details" must be an array when present.'));
+		} else {
+			for (const [index, detail] of frontmatter.details.entries()) {
+				issues.push(...validateFinanceTransactionDetail(detail, index));
+			}
+		}
+	}
+
+	for (const fiscalField of ['fn', 'fd', 'fp'] as const) {
+		const value = frontmatter[fiscalField];
+		if (value !== undefined && value !== null && !isNonEmptyString(value)) {
+			issues.push(
+				createIssue(
+					`invalid-finance-${fiscalField}`,
+					`Finance transaction "${fiscalField}" must be a non-empty string when present.`,
+				),
+			);
+		}
+	}
+
+	return issues;
+}
+
+function validateFinanceTransactionDetail(detail: unknown, index: number) {
+	const issues = [];
+	if (!detail || typeof detail !== 'object') {
+		return [createIssue('invalid-finance-detail-item', `Finance transaction detail #${index + 1} must be an object.`)];
+	}
+
+	const record = detail as Record<string, unknown>;
+	if (!isNonEmptyString(record.name)) {
+		issues.push(createIssue('invalid-finance-detail-name', `Finance transaction detail #${index + 1} must have a non-empty name.`));
+	}
+
+	if (!isPositiveNumber(record.quantity)) {
+		issues.push(createIssue('invalid-finance-detail-quantity', `Finance transaction detail #${index + 1} must have a positive quantity.`));
+	}
+
+	if (!isNonNegativeNumber(record.price)) {
+		issues.push(createIssue('invalid-finance-detail-price', `Finance transaction detail #${index + 1} must have a non-negative price.`));
+	}
+
+	if (!isNonNegativeNumber(record.total)) {
+		issues.push(createIssue('invalid-finance-detail-total', `Finance transaction detail #${index + 1} must have a non-negative total.`));
+	}
+
+	if (
+		isPositiveNumber(record.quantity)
+		&& isNonNegativeNumber(record.price)
+		&& isNonNegativeNumber(record.total)
+		&& !isApproximatelyEqual(Number(record.total), Number(record.price) * Number(record.quantity))
+	) {
+		issues.push(
+			createIssue(
+				'inconsistent-finance-detail-total',
+				`Finance transaction detail #${index + 1} total does not match price x quantity.`,
+				'warning',
+			),
+		);
+	}
+
+	return issues;
+}
+
+function validateFinanceReportFrontmatter(frontmatter: Partial<FinanceReportFrontmatter>) {
+	const issues = [];
+
+	if (frontmatter.domain !== 'finance') {
+		issues.push(createIssue('invalid-finance-report-domain', 'Finance report note must declare domain "finance".'));
+	}
+
+	if (!isValidDateString(frontmatter.created)) {
+		issues.push(createIssue('invalid-finance-report-created-date', 'Finance report "created" must be a valid date.'));
+	}
+
+	if (!isAllowedValue(frontmatter.periodKind, FINANCE_REPORT_PERIOD_KINDS)) {
+		issues.push(
+			createIssue(
+				'invalid-finance-report-period-kind',
+				`Finance report "periodKind" must be one of: ${FINANCE_REPORT_PERIOD_KINDS.join(', ')}.`,
+			),
+		);
+	}
+
+	if (!isNonEmptyString(frontmatter.periodKey)) {
+		issues.push(createIssue('missing-finance-report-period-key', 'Finance report must have a non-empty "periodKey".'));
+	}
+
+	if (!isNonEmptyString(frontmatter.periodLabel)) {
+		issues.push(createIssue('missing-finance-report-period-label', 'Finance report must have a non-empty "periodLabel".'));
+	}
+
+	const hasValidPeriodStart = isValidDateString(frontmatter.periodStart);
+	const hasValidPeriodEnd = isValidDateString(frontmatter.periodEnd);
+	if (!hasValidPeriodStart) {
+		issues.push(createIssue('invalid-finance-report-period-start', 'Finance report "periodStart" must be a valid date.'));
+	}
+	if (!hasValidPeriodEnd) {
+		issues.push(createIssue('invalid-finance-report-period-end', 'Finance report "periodEnd" must be a valid date.'));
+	}
+	if (
+		hasValidPeriodStart
+		&& hasValidPeriodEnd
+		&& new Date(String(frontmatter.periodStart)).getTime() > new Date(String(frontmatter.periodEnd)).getTime()
+	) {
+		issues.push(createIssue('invalid-finance-report-period-range', 'Finance report "periodStart" must not be after "periodEnd".'));
+	}
+
+	if (!isCurrencyCode(frontmatter.currency)) {
+		issues.push(createIssue('invalid-finance-report-currency', 'Finance report "currency" must be a 3-letter uppercase code.'));
+	}
+
+	const numericFields: Array<[keyof FinanceReportFrontmatter, string]> = [
+		['openingBalance', 'openingBalance'],
+		['totalExpenses', 'totalExpenses'],
+		['totalIncome', 'totalIncome'],
+		['netChange', 'netChange'],
+		['closingBalance', 'closingBalance'],
+		['balance', 'balance'],
+	];
+	for (const [field, label] of numericFields) {
+		if (!isFiniteNumber(frontmatter[field])) {
+			issues.push(createIssue(`invalid-finance-report-${label}`, `Finance report "${label}" must be a finite number.`));
+		}
+	}
+
+	if (isFiniteNumber(frontmatter.totalExpenses) && Number(frontmatter.totalExpenses) < 0) {
+		issues.push(createIssue('invalid-finance-report-total-expenses', 'Finance report "totalExpenses" must not be negative.'));
+	}
+
+	if (isFiniteNumber(frontmatter.totalIncome) && Number(frontmatter.totalIncome) < 0) {
+		issues.push(createIssue('invalid-finance-report-total-income', 'Finance report "totalIncome" must not be negative.'));
+	}
+
+	if (frontmatter.budget !== undefined && frontmatter.budget !== null) {
+		if (!isFiniteNumber(frontmatter.budget) || Number(frontmatter.budget) < 0) {
+			issues.push(createIssue('invalid-finance-report-budget', 'Finance report "budget" must be a non-negative number when present.'));
+		}
+	}
+
+	if (
+		isFiniteNumber(frontmatter.totalIncome)
+		&& isFiniteNumber(frontmatter.totalExpenses)
+		&& isFiniteNumber(frontmatter.netChange)
+		&& !isApproximatelyEqual(
+			Number(frontmatter.netChange),
+			Number(frontmatter.totalIncome) - Number(frontmatter.totalExpenses),
+		)
+	) {
+		issues.push(
+			createIssue(
+				'inconsistent-finance-report-net-change',
+				'Finance report "netChange" should equal totalIncome - totalExpenses.',
+				'warning',
+			),
+		);
+	}
+
+	if (
+		isFiniteNumber(frontmatter.openingBalance)
+		&& isFiniteNumber(frontmatter.netChange)
+		&& isFiniteNumber(frontmatter.closingBalance)
+		&& !isApproximatelyEqual(
+			Number(frontmatter.closingBalance),
+			Number(frontmatter.openingBalance) + Number(frontmatter.netChange),
+		)
+	) {
+		issues.push(
+			createIssue(
+				'inconsistent-finance-report-closing-balance',
+				'Finance report "closingBalance" should equal openingBalance + netChange.',
+				'warning',
+			),
+		);
+	}
+
+	if (
+		isFiniteNumber(frontmatter.closingBalance)
+		&& isFiniteNumber(frontmatter.balance)
+		&& !isApproximatelyEqual(Number(frontmatter.balance), Number(frontmatter.closingBalance))
+	) {
+		issues.push(
+			createIssue(
+				'inconsistent-finance-report-balance',
+				'Finance report "balance" should match "closingBalance".',
+				'warning',
+			),
+		);
+	}
+
+	if (Array.isArray(frontmatter.tags)) {
+		if (!frontmatter.tags.includes('finance')) {
+			issues.push(createIssue('missing-finance-report-tag', 'Finance report tags should include "finance".', 'warning'));
+		}
+		if (!frontmatter.tags.includes('report')) {
+			issues.push(createIssue('missing-finance-report-kind-tag', 'Finance report tags should include "report".', 'warning'));
+		}
+	}
+
+	return issues;
+}
+
+function createIssue(code: string, message: string, severity: 'error' | 'warning' = 'error') {
+	return { code, message, severity };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+	return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+	return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isPositiveNumber(value: unknown): value is number {
+	return isFiniteNumber(value) && value > 0;
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+	return isFiniteNumber(value) && value >= 0;
+}
+
+function isCurrencyCode(value: unknown): boolean {
+	return typeof value === 'string' && /^[A-Z]{3}$/.test(value.trim());
+}
+
+function isValidDateString(value: unknown): boolean {
+	return typeof value === 'string' && value.trim().length > 0 && !Number.isNaN(new Date(value).getTime());
+}
+
+function isValidDateTimeString(value: unknown): boolean {
+	return isValidDateString(value) && String(value).includes('T');
+}
+
+function isAllowedValue<T extends readonly string[]>(value: unknown, allowedValues: T): boolean {
+	return typeof value === 'string' && (allowedValues as readonly string[]).includes(value);
+}
+
+function isWikiLink(value: unknown): boolean {
+	return typeof value === 'string' && /^\[\[[^[\]]+\]\]$/.test(value.trim());
+}
+
+function isApproximatelyEqual(left: number, right: number, epsilon = 0.01): boolean {
+	return Math.abs(left - right) <= epsilon;
 }
 
 function renderFinanceTransactionTemplate(
