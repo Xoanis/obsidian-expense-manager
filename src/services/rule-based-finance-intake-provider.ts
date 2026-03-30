@@ -26,6 +26,11 @@ export class RuleBasedFinanceIntakeProvider implements FinanceIntakeProvider {
 	async createTextTransaction(
 		request: FinanceTextProposalRequest,
 	): Promise<TransactionData | null> {
+		const qrTextResult = await this.createReceiptTransactionFromQrText(request);
+		if (qrTextResult) {
+			return qrTextResult;
+		}
+
 		const parsed = this.parseArgsForIntent(request.text, request.intent);
 		if (!parsed || parsed.amount <= 0) {
 			return null;
@@ -59,7 +64,7 @@ export class RuleBasedFinanceIntakeProvider implements FinanceIntakeProvider {
 			source: request.source ?? 'telegram',
 			area: captionMetadata.area ?? request.area ?? undefined,
 			project: captionMetadata.project ?? request.project ?? undefined,
-			description: captionMetadata.comment || result.data.description,
+			description: result.data.description,
 			artifactBytes: request.bytes,
 			artifactFileName: request.fileName,
 			artifactMimeType: request.mimeType,
@@ -100,6 +105,33 @@ export class RuleBasedFinanceIntakeProvider implements FinanceIntakeProvider {
 
 		const metadataParts = parts.length > 1 ? parts.slice(1) : parts;
 		return this.parseMetadataParts(metadataParts);
+	}
+
+	private async createReceiptTransactionFromQrText(
+		request: FinanceTextProposalRequest,
+	): Promise<TransactionData | null> {
+		const { head, metadata } = this.splitHeadAndMetadata(request.text);
+		const normalizedHead = head.trim();
+		if (!normalizedHead.includes('=') || !normalizedHead.includes('&')) {
+			return null;
+		}
+
+		const client = new ProverkaChekaClient(
+			this.settings.proverkaChekaApiKey,
+			this.settings.localQrOnly,
+		);
+		const result = await client.processReceiptQrString(normalizedHead);
+		if (result.hasError || result.data.amount <= 0) {
+			return null;
+		}
+
+		return {
+			...result.data,
+			type: request.intent === 'neutral' ? result.data.type : request.intent,
+			source: request.source ?? 'telegram',
+			area: request.area ?? metadata.area,
+			project: request.project ?? metadata.project,
+		};
 	}
 
 	private parseArgsForIntent(
@@ -163,12 +195,7 @@ export class RuleBasedFinanceIntakeProvider implements FinanceIntakeProvider {
 	}
 
 	private parseArgs(args: string): ParsedTelegramTransactionInput | null {
-		const trimmed = args.trim();
-		if (!trimmed) {
-			return null;
-		}
-
-		const [head, ...metadataParts] = trimmed.split('|').map((part) => part.trim()).filter(Boolean);
+		const { head, metadata } = this.splitHeadAndMetadata(args);
 		if (!head) {
 			return null;
 		}
@@ -180,7 +207,6 @@ export class RuleBasedFinanceIntakeProvider implements FinanceIntakeProvider {
 			return null;
 		}
 
-		const metadata = this.parseMetadataParts(metadataParts);
 		return {
 			amount,
 			comment,
@@ -232,6 +258,22 @@ export class RuleBasedFinanceIntakeProvider implements FinanceIntakeProvider {
 			}
 		}
 		return result;
+	}
+
+	private splitHeadAndMetadata(value: string): { head: string; metadata: FinanceMetadataHints } {
+		const parts = value
+			.split('|')
+			.map((part) => part.trim())
+			.filter(Boolean);
+		if (parts.length === 0) {
+			return { head: '', metadata: {} };
+		}
+
+		const [head, ...metadataParts] = parts;
+		return {
+			head,
+			metadata: this.parseMetadataParts(metadataParts),
+		};
 	}
 
 	private normalizeWikiLink(value: string): string {

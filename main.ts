@@ -3,7 +3,6 @@ import { ExpenseManagerSettings, DEFAULT_SETTINGS } from './src/settings';
 import { DashboardContributionMode } from './src/settings';
 import { ExpenseService } from './src/services/expense-service';
 import { AnalyticsService } from './src/services/analytics-service';
-import { ManualHandler } from './src/handlers/manual-handler';
 import { QrHandler } from './src/handlers/qr-handler';
 import { FinanceReportSection, TransactionData } from './src/types';
 import { registerAddExpenseCommand } from './src/commands/add-expense';
@@ -28,6 +27,8 @@ import { MigrationService } from './src/services/migration-service';
 import { FinanceIntakeService } from './src/services/finance-intake-service';
 import { ReportPeriodModal } from './src/ui/report-period-modal';
 import { ReportsModal } from './src/ui/reports-modal';
+import { ExpenseModal } from './src/ui/expense-modal';
+import { FinanceRuleInputModal } from './src/ui/finance-rule-input-modal';
 import { PLUGIN_UNIT_NAME } from './src/utils/constants';
 import { VaultDebugFileLogger } from './src/utils/plugin-debug-log';
 
@@ -224,35 +225,11 @@ export default class ExpenseManagerPlugin extends Plugin {
 	 * Command handlers
 	 */
 	async handleAddExpense() {
-		const handler = new ManualHandler(
-			this.app,
-			this.settings,
-			'expense'
-		);
-
-		const result = await handler.handle();
-		
-		if (result.success && result.data) {
-			await this.saveTransaction(result.data);
-		} else if (result.error) {
-			new Notice(result.error);
-		}
+		await this.handleRuleBasedTextEntry('expense');
 	}
 
 	async handleAddIncome() {
-		const handler = new ManualHandler(
-			this.app,
-			this.settings,
-			'income'
-		);
-
-		const result = await handler.handle();
-		
-		if (result.success && result.data) {
-			await this.saveTransaction(result.data);
-		} else if (result.error) {
-			new Notice(result.error);
-		}
+		await this.handleRuleBasedTextEntry('income');
 	}
 
 	async handleAddQrExpense() {
@@ -372,6 +349,80 @@ export default class ExpenseManagerPlugin extends Plugin {
 		} catch (error) {
 			console.log('Telegram integration not available:', error);
 		}
+	}
+
+	private async handleRuleBasedTextEntry(intent: 'expense' | 'income') {
+		const input = await this.openFinanceRuleInputModal(intent);
+		if (!input) {
+			return;
+		}
+
+		const proposal = await this.financeIntakeService.createTextProposal({
+			text: input,
+			intent,
+			source: 'manual',
+		});
+		if (!proposal || proposal.amount <= 0) {
+			new Notice(
+				intent === 'expense'
+					? 'Could not parse expense input. Use `500 Lunch | area=Health` or raw receipt QR text.'
+					: 'Could not parse income input. Use `50000 Salary | area=Career` or raw receipt QR text.',
+			);
+			return;
+		}
+
+		await this.reviewFinanceProposal(proposal, intent);
+	}
+
+	private async openFinanceRuleInputModal(intent: 'expense' | 'income'): Promise<string | null> {
+		return new Promise((resolve) => {
+			const modal = new FinanceRuleInputModal(
+				this.app,
+				intent === 'expense' ? 'Add Expense' : 'Add Income',
+				intent === 'expense'
+					? 'Enter rule-based finance text or paste raw receipt QR text. You can add `| area=...` and `| project=...` metadata.'
+					: 'Enter rule-based finance text or paste raw receipt QR text. You can add `| area=...` and `| project=...` metadata.',
+				intent === 'expense'
+					? '500 Lunch | area=Health'
+					: '50000 Salary | area=Career',
+			);
+
+			modal.onSubmit = (value) => resolve(value);
+			modal.onCancel = () => resolve(null);
+			modal.open();
+		});
+	}
+
+	private async reviewFinanceProposal(
+		proposal: TransactionData,
+		intent: 'expense' | 'income',
+	): Promise<void> {
+		await new Promise<void>((resolve) => {
+			const modal = new ExpenseModal(
+				this.app,
+				intent,
+				proposal.currency || this.settings.defaultCurrency,
+				intent === 'expense' ? this.settings.expenseCategories : this.settings.incomeCategories,
+				proposal,
+			);
+
+			modal.onComplete = async (data: TransactionData) => {
+				data.details = proposal.details;
+				data.fn = proposal.fn;
+				data.fd = proposal.fd;
+				data.fp = proposal.fp;
+				data.artifact = proposal.artifact;
+				data.artifactBytes = proposal.artifactBytes;
+				data.artifactFileName = proposal.artifactFileName;
+				data.artifactMimeType = proposal.artifactMimeType;
+				data.source = proposal.source;
+				await this.saveTransaction(data);
+				resolve();
+			};
+
+			modal.onCancel = () => resolve();
+			modal.open();
+		});
 	}
 
 	private registerReportSyncListeners() {

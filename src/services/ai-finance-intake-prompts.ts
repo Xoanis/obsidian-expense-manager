@@ -45,7 +45,8 @@ export function buildAiFinanceReceiptSystemPrompt(): string {
 		buildAiFinanceSystemPrompt(),
 		'You may receive a receipt image or a banking operation screenshot.',
 		'Use the visual or document evidence as the primary source.',
-		'If a caption is present, use it as a hint but do not let it override clearly visible document data.',
+		'If a caption is present, use it as additional context and keep it when it adds purpose or intent that is not visible in the document.',
+		'Do not let the caption override clearly visible document data such as amount, date, or merchant.',
 		'For receipt or document inputs, prefer concise factual descriptions over generic phrases.',
 	].join('\n');
 }
@@ -55,6 +56,7 @@ export function buildAiFinancePdfSystemPrompt(): string {
 		buildAiFinanceSystemPrompt(),
 		'You receive text already extracted from a finance-related PDF document.',
 		'Rely on the extracted document text as the primary evidence.',
+		'If a caption is present, treat it as additional context and preserve it when it clarifies purpose.',
 		'If extraction warnings are present, be conservative and prefer ambiguous fields over fabricated certainty.',
 		'Do not assume the document is finance-related just because it came through a finance command.',
 	].join('\n');

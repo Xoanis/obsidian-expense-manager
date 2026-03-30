@@ -174,9 +174,9 @@ export function registerFinanceTemplateContributions(
 			'- Add `finance_budget` to project frontmatter when project-level budget tracking is needed.',
 			'',
 			'### Telegram',
-			'- `/expense` - capture an expense proposal from text, image, or PDF.',
-			'- `/income` - capture an income proposal from text, image, or PDF.',
-			'- `/finance_record` - parse generic signed or prefixed finance text.',
+			'- `/expense` - capture an expense proposal from rule-based text, raw receipt QR text, image, or PDF.',
+			'- `/income` - capture an income proposal from rule-based text, raw receipt QR text, image, or PDF.',
+			'- `/finance_record` - parse generic signed or prefixed rule-based finance text, or raw receipt QR text.',
 			'- `/finance_summary` - show monthly finance summary.',
 			'- `/finance_report` - open monthly finance report.',
 			'- Project and area Telegram cards can start focused finance capture with fixed context.',
@@ -185,6 +185,7 @@ export function registerFinanceTemplateContributions(
 			'- `/expense 500 Lunch | area=Health`',
 			'- `/income 50000 Salary | area=Career`',
 			'- `/finance_record +5000 Bonus`',
+			'- `/expense t=20260316T1007&s=1550.00&fn=9999078900012345&i=12345&fp=2890123456&n=1`',
 		].join('\n'),
 	});
 }

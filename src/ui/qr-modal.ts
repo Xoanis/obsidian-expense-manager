@@ -31,7 +31,7 @@ export class QrModal extends Modal {
 
 		// Instructions
 		contentEl.createEl('p', { 
-			text: 'Upload a photo of the receipt QR code. The image will be sent to proverkacheka.com API for processing.' 
+			text: 'Upload a photo of the receipt QR code. We decode the QR locally first, then request receipt details from proverkacheka.com when an API key is available.' 
 		});
 
 		// File upload area

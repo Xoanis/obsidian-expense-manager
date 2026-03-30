@@ -7,6 +7,7 @@ import {
 } from './document-extraction-service';
 import { AiFinanceIntakeProvider } from './ai-finance-intake-provider';
 import { RuleBasedFinanceIntakeProvider } from './rule-based-finance-intake-provider';
+import { parseQrReceiptString } from '../utils/qr-parser';
 import type {
 	FinanceCaptionMetadata,
 	FinanceIntakeProvider,
@@ -81,7 +82,10 @@ export class FinanceIntakeService {
 		this.logger.info('FinanceIntakeService.createReceiptProposal: route selected', decision);
 		if (!this.isPdfRequest(request) && this.isAiTextEnabled()) {
 			try {
-				const ruleResult = await this.ruleProvider.createReceiptTransaction(request);
+				const ruleResult = this.applyReceiptCaptionContext(
+					await this.ruleProvider.createReceiptTransaction(request),
+					request,
+				);
 				this.logger.info('FinanceIntakeService.createReceiptProposal: rule-based receipt extraction succeeded before AI fallback was needed.');
 				return ruleResult;
 			} catch (error) {
@@ -91,16 +95,25 @@ export class FinanceIntakeService {
 
 		if (decision.providerKind === 'ai') {
 			try {
-				return await this.aiProvider.createReceiptTransaction(request);
+				return this.applyReceiptCaptionContext(
+					await this.aiProvider.createReceiptTransaction(request),
+					request,
+				);
 			} catch (error) {
 				if (!this.isPdfRequest(request)) {
-					return this.ruleProvider.createReceiptTransaction(request);
+					return this.applyReceiptCaptionContext(
+						await this.ruleProvider.createReceiptTransaction(request),
+						request,
+					);
 				}
 				throw error;
 			}
 		}
 
-		return this.ruleProvider.createReceiptTransaction(request);
+		return this.applyReceiptCaptionContext(
+			await this.ruleProvider.createReceiptTransaction(request),
+			request,
+		);
 	}
 
 	parseCaption(caption: string): FinanceCaptionMetadata {
@@ -116,6 +129,14 @@ export class FinanceIntakeService {
 	}
 
 	routeTextRequest(request: FinanceTextProposalRequest): FinanceIntakeRoutingDecision {
+		if (this.looksLikeReceiptQrText(request.text)) {
+			return {
+				providerKind: 'rule-based',
+				route: 'rule-qr',
+				reason: 'Raw receipt QR text stays on the deterministic QR lookup path.',
+			};
+		}
+
 		if (this.isAiTextEnabled() && request.intent === 'neutral' && !this.looksSimpleStructuredText(request.text)) {
 			return {
 				providerKind: 'ai',
@@ -156,7 +177,7 @@ export class FinanceIntakeService {
 	}
 
 	private looksSimpleStructuredText(text: string): boolean {
-		const trimmed = text.trim();
+		const trimmed = this.getPrimaryTextPayload(text);
 		if (!trimmed) {
 			return false;
 		}
@@ -170,6 +191,10 @@ export class FinanceIntakeService {
 		}
 
 		return false;
+	}
+
+	private looksLikeReceiptQrText(text: string): boolean {
+		return Boolean(parseQrReceiptString(this.getPrimaryTextPayload(text)));
 	}
 
 	private isAiTextEnabled(): boolean {
@@ -186,5 +211,45 @@ export class FinanceIntakeService {
 			request.mimeType?.toLowerCase() === 'application/pdf'
 			|| request.fileName.toLowerCase().endsWith('.pdf'),
 		);
+	}
+
+	private getPrimaryTextPayload(text: string): string {
+		return text.split('|')[0]?.trim() ?? '';
+	}
+
+	private applyReceiptCaptionContext(
+		result: FinanceReceiptProposalResult,
+		request: FinanceReceiptProposalRequest,
+	): FinanceReceiptProposalResult {
+		const captionMetadata = this.parseCaption(request.caption || '');
+		result.data.area = captionMetadata.area ?? result.data.area ?? request.area ?? undefined;
+		result.data.project = captionMetadata.project ?? result.data.project ?? request.project ?? undefined;
+		result.data.description = this.mergeDescriptionWithCaption(
+			result.data.description,
+			captionMetadata,
+		) || result.data.description || 'Receipt';
+		return result;
+	}
+
+	private mergeDescriptionWithCaption(
+		description: string | undefined,
+		captionMetadata: FinanceCaptionMetadata,
+	): string | undefined {
+		const base = description?.trim() ?? '';
+		const comment = captionMetadata.comment?.trim() ?? '';
+		if (!comment) {
+			return base || undefined;
+		}
+		if (!base) {
+			return comment;
+		}
+
+		const normalizedBase = base.toLocaleLowerCase();
+		const normalizedComment = comment.toLocaleLowerCase();
+		if (normalizedBase.includes(normalizedComment) || normalizedComment.includes(normalizedBase)) {
+			return base;
+		}
+
+		return `${base} - ${comment}`;
 	}
 }

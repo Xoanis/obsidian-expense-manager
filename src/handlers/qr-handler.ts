@@ -23,13 +23,6 @@ export class QrHandler extends BaseHandler {
 	}
 
 	async handle(): Promise<HandlerResult> {
-		if (!ProverkaChekaClient.validateApiKey(this.settings.proverkaChekaApiKey)) {
-			return {
-				success: false,
-				error: 'ProverkaCheka API token is not configured. Please set it in plugin settings.'
-			};
-		}
-
 		const client = new ProverkaChekaClient(
 			this.settings.proverkaChekaApiKey, 
 			this.settings.localQrOnly

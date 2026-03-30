@@ -156,9 +156,7 @@ export class ProverkaChekaClient {
 		error?: string;
 	}> {
 		try {
-			// Step 1: Decode QR locally first
 			const qrString = await this.decodeQrLocally(imageBlob);
-			
 			if (!qrString) {
 				return {
 					data: this.createEmptyTransaction(),
@@ -167,10 +165,28 @@ export class ProverkaChekaClient {
 					error: 'No QR code found in image'
 				};
 			}
-			
-			// Parse QR string
-			const qrData = parseQrReceiptString(qrString);
-			
+
+			return this.processReceiptQrString(qrString);
+		} catch (error) {
+			return {
+				data: this.createEmptyTransaction(),
+				source: 'local',
+				hasError: true,
+				error: (error as Error).message
+			};
+		}
+	}
+
+	async processReceiptQrString(qrString: string): Promise<{
+		data: TransactionData;
+		source: 'api' | 'local';
+		hasError: boolean;
+		error?: string;
+	}> {
+		try {
+			const normalizedQrString = qrString.trim();
+			const qrData = parseQrReceiptString(normalizedQrString);
+
 			if (!qrData) {
 				return {
 					data: this.createEmptyTransaction(),
@@ -179,42 +195,43 @@ export class ProverkaChekaClient {
 					error: 'Invalid QR code format - not a receipt'
 				};
 			}
-			
-			// Step 2: Check if we should skip API and use local only
+
 			if (this.localOnly) {
-                console.log('Local-only mode enabled, will use local QR data');
-				// Local-only mode - skip API call
 				const localData = this.createFromLocalQr(qrData);
 				return {
 					data: localData,
 					source: 'local',
 					hasError: false
 				};
-			} else {
-                console.log('Local-only mode disabled, will use API to process receipt');
-            }
-			
-			// Step 3: Try to get detailed data from API
+			}
+
 			try {
-                console.log('Trying to process receipt using API');
-				const apiData = await this.processReceiptImage(imageBlob);
-                console.log('API data:', apiData);
+				const apiData = await this.processReceiptRawQr(normalizedQrString);
 				return {
 					data: apiData,
 					source: 'api',
 					hasError: false
 				};
-			} catch (apiError) {
-				// Step 4: API failed, use local QR data as fallback
-				console.warn('ProverkaCheka API failed, using local QR data:', apiError);
-				
-				const localData = this.createFromLocalQr(qrData);
-				return {
-					data: localData,
-					source: 'local',
-					hasError: false,
-					error: `API error: ${(apiError as Error).message}. Using local QR data.`
-				};
+			} catch (rawQrError) {
+				try {
+					const apiData = await this.processReceiptByReceiptFields(normalizedQrString);
+					return {
+						data: apiData,
+						source: 'api',
+						hasError: false,
+						error: `Raw QR lookup failed: ${(rawQrError as Error).message}. Used field-based receipt lookup instead.`
+					};
+				} catch (apiError) {
+					console.warn('ProverkaCheka API failed, using local QR data:', apiError);
+
+					const localData = this.createFromLocalQr(qrData);
+					return {
+						data: localData,
+						source: 'local',
+						hasError: false,
+						error: `API error: ${(apiError as Error).message}. Using local QR data.`
+					};
+				}
 			}
 		} catch (error) {
 			return {
@@ -250,12 +267,54 @@ export class ProverkaChekaClient {
 			throw new Error('ProverkaCheka API token is not configured');
 		}
 
-		// Prepare form data with correct parameter names
 		const formData = new FormData();
 		formData.append('qrfile', imageBlob);
 		formData.append('token', this.apiKey);
 
-		// Make API request
+		return this.requestReceiptLookup(formData);
+	}
+
+	async processReceiptRawQr(qrString: string): Promise<TransactionData> {
+		if (!this.apiKey) {
+			throw new Error('ProverkaCheka API token is not configured');
+		}
+
+		const formData = new FormData();
+		formData.append('qrraw', qrString);
+		formData.append('token', this.apiKey);
+		return this.requestReceiptLookup(formData);
+	}
+
+	private async processReceiptByReceiptFields(qrString: string): Promise<TransactionData> {
+		if (!this.apiKey) {
+			throw new Error('ProverkaCheka API token is not configured');
+		}
+
+		const formData = new FormData();
+		const pairs = qrString.split('&');
+		for (const pair of pairs) {
+			const [rawKey, ...rawValueParts] = pair.split('=');
+			if (!rawKey || rawValueParts.length === 0) {
+				continue;
+			}
+
+			const key = rawKey.trim();
+			if (!['t', 's', 'fn', 'i', 'fp', 'n'].includes(key)) {
+				continue;
+			}
+
+			const value = rawValueParts.join('=').trim();
+			if (value) {
+				formData.append(key, value);
+			}
+		}
+
+		formData.append('qr', '0');
+		formData.append('token', this.apiKey);
+		return this.requestReceiptLookup(formData);
+	}
+
+	private async requestReceiptLookup(formData: FormData): Promise<TransactionData> {
 		const response = await fetch(this.baseUrl, {
 			method: 'POST',
 			body: formData
@@ -267,7 +326,6 @@ export class ProverkaChekaClient {
 
 		const data: CheckResponse = await response.json();
 
-		// Handle response codes
 		if (data.code === 0) {
 			throw new Error('QR code is invalid or corrupted');
 		} else if (data.code === 2) {
@@ -282,7 +340,6 @@ export class ProverkaChekaClient {
 			throw new Error(`Unknown API response code: ${data.code}`);
 		}
 
-		// Success (code === 1)
 		if (!data.data?.json) {
 			throw new Error('No receipt data received');
 		}

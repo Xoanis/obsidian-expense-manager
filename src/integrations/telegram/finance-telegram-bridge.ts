@@ -1608,16 +1608,16 @@ export class FinanceTelegramBridge {
 
 	private buildCapturePrompt(intent: FinanceIntakeIntent): string {
 		if (intent === 'neutral') {
-			return 'For text, send `expense 500 Lunch` or `income 500 Salary`, or use signed amounts like `-500 Lunch` / `+500 Salary`. Image receipts, screenshots, and PDF finance documents are also supported.';
+			return 'For text, send `expense 500 Lunch` or `income 500 Salary`, use signed amounts like `-500 Lunch` / `+500 Salary`, or send raw receipt QR text like `t=20260316T1007&s=1550.00&fn=...`. Image receipts, screenshots, and PDF finance documents are also supported.';
 		}
-		return `Send plain text like \`500 Lunch\`, an image receipt or screenshot, or a PDF finance document. Every input becomes a proposal first, then you confirm it.`;
+		return 'Send plain text like `500 Lunch`, raw receipt QR text like `t=20260316T1007&s=1550.00&fn=...`, an image receipt or screenshot, or a PDF finance document. Every input becomes a proposal first, then you confirm it.';
 	}
 
 	private buildInvalidArgsPrompt(intent: FinanceIntakeIntent): string {
 		if (intent === 'neutral') {
-			return 'Could not parse transaction text. Use `/finance_record expense 500 Lunch | area=Health | project=Trip` or `/finance_record +5000 Bonus`.';
+			return 'Could not parse transaction text. Use `/finance_record expense 500 Lunch | area=Health | project=Trip`, `/finance_record +5000 Bonus`, or send raw receipt QR text like `t=20260316T1007&s=1550.00&fn=...`.';
 		}
-		return `Invalid amount. Use \`/${intent} 500 Lunch | area=Health | project=Trip\` or call \`/${intent}\` and send the next message separately.`;
+		return `Invalid amount. Use \`/${intent} 500 Lunch | area=Health | project=Trip\`, send raw receipt QR text like \`t=20260316T1007&s=1550.00&fn=...\`, or call \`/${intent}\` and send the next message separately.`;
 	}
 
 	private encodeCallbackPayload(payload: TelegramCallbackPayload): string {
