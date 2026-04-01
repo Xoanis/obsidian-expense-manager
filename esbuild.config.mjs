@@ -1,5 +1,8 @@
 import esbuild from "esbuild";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import process from "process";
+import { fileURLToPath } from "node:url";
 import builtins from "builtin-modules";
 
 const banner =
@@ -10,10 +13,15 @@ if you want to view the source, please visit the github repository of this plugi
 `;
 
 const prod = (process.argv[2] === "production");
+const pluginRoot = path.dirname(fileURLToPath(import.meta.url));
+const buildInfo = createBuildInfo(pluginRoot);
 
 const context = await esbuild.context({
 	banner: {
 		js: banner,
+	},
+	define: {
+		__PARA_PLUGIN_BUILD_INFO__: JSON.stringify(buildInfo),
 	},
 	entryPoints: ["main.ts"],
 	bundle: true,
@@ -46,4 +54,37 @@ if (prod) {
 	process.exit(0);
 } else {
 	await context.watch();
+}
+
+function createBuildInfo(rootDir) {
+	const manifest = JSON.parse(readFileSync(path.join(rootDir, "manifest.json"), "utf8"));
+	const buildMetaPath = path.join(rootDir, ".build", "build-meta.json");
+	const previous = existsSync(buildMetaPath)
+		? JSON.parse(readFileSync(buildMetaPath, "utf8"))
+		: {};
+	const buildNumber = previous.pluginVersion === manifest.version
+		? Number(previous.buildNumber ?? 0) + 1
+		: 1;
+	const builtAt = new Date().toISOString();
+
+	mkdirSync(path.dirname(buildMetaPath), { recursive: true });
+	writeFileSync(
+		buildMetaPath,
+		`${JSON.stringify({
+			pluginId: manifest.id,
+			pluginName: manifest.name,
+			pluginVersion: manifest.version,
+			buildNumber,
+			builtAt,
+		}, null, 2)}\n`,
+		"utf8",
+	);
+
+	return {
+		pluginId: manifest.id,
+		pluginName: manifest.name,
+		pluginVersion: manifest.version,
+		buildNumber,
+		builtAt,
+	};
 }

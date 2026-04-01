@@ -1,5 +1,5 @@
-import { App, normalizePath, TFile } from 'obsidian';
-import type { ExpenseManagerSettings } from '../settings';
+import { App, TFile } from 'obsidian';
+import type { IParaCoreApi, ParaLogger } from '../integrations/para-core/types';
 
 export interface PluginLogger {
 	info(message: string, ...args: unknown[]): void;
@@ -9,150 +9,73 @@ export interface PluginLogger {
 }
 
 export class ConsolePluginLogger implements PluginLogger {
+	constructor(private readonly scope = 'Expense Manager') {}
+
 	info(message: string, ...args: unknown[]): void {
-		console.info(message, ...args);
+		console.info(this.format(message), ...args);
 	}
 
 	warn(message: string, ...args: unknown[]): void {
-		console.warn(message, ...args);
+		console.warn(this.format(message), ...args);
 	}
 
 	error(message: string, ...args: unknown[]): void {
-		console.error(message, ...args);
+		console.error(this.format(message), ...args);
 	}
 
 	debug(message: string, ...args: unknown[]): void {
-		console.debug(message, ...args);
+		console.debug(this.format(message), ...args);
+	}
+
+	private format(message: string): string {
+		return `${this.scope}: ${message}`;
 	}
 }
 
-export class VaultDebugFileLogger implements PluginLogger {
-	private writeQueue: Promise<void> = Promise.resolve();
-	private readonly fallbackLogger: PluginLogger;
-	private readonly maxCharacters = 200_000;
-
-	constructor(
-		private readonly app: App,
-		private readonly getSettings: () => ExpenseManagerSettings,
-		fallbackLogger?: PluginLogger,
-	) {
-		this.fallbackLogger = fallbackLogger ?? new ConsolePluginLogger();
-	}
+export class ParaCorePluginLogger implements PluginLogger {
+	constructor(private readonly logger: ParaLogger) {}
 
 	info(message: string, ...args: unknown[]): void {
-		this.fallbackLogger.info(message, ...args);
-		this.enqueueWrite('INFO', message, args);
+		this.logger.info(message, ...args);
 	}
 
 	warn(message: string, ...args: unknown[]): void {
-		this.fallbackLogger.warn(message, ...args);
-		this.enqueueWrite('WARN', message, args);
+		this.logger.warn(message, ...args);
 	}
 
 	error(message: string, ...args: unknown[]): void {
-		this.fallbackLogger.error(message, ...args);
-		this.enqueueWrite('ERROR', message, args);
+		this.logger.error(message, ...args);
 	}
 
 	debug(message: string, ...args: unknown[]): void {
-		this.fallbackLogger.debug(message, ...args);
-		this.enqueueWrite('DEBUG', message, args);
+		this.logger.debug(message, ...args);
+	}
+}
+
+let activePluginLogger: PluginLogger = new ConsolePluginLogger();
+
+export function createPluginLogger(scope: string, paraCoreApi?: IParaCoreApi | null): PluginLogger {
+	if (paraCoreApi && typeof paraCoreApi.createLogger === 'function') {
+		return new ParaCorePluginLogger(paraCoreApi.createLogger(scope));
 	}
 
-	getLogPath(): string {
-		return normalizePath(this.getSettings().debugLogFilePath || 'ExpenseManager/debug-log.md');
+	return new ConsolePluginLogger(scope);
+}
+
+export function setActivePluginLogger(logger: PluginLogger): void {
+	activePluginLogger = logger;
+}
+
+export function getPluginLogger(): PluginLogger {
+	return activePluginLogger;
+}
+
+export async function openSharedRuntimeLog(app: App, paraCoreApi?: IParaCoreApi | null): Promise<TFile | null> {
+	if (!paraCoreApi || typeof paraCoreApi.getRuntimeLogPath !== 'function') {
+		return null;
 	}
 
-	async ensureLogFileExists(): Promise<TFile | null> {
-		const path = this.getLogPath();
-		const existing = this.app.vault.getAbstractFileByPath(path);
-		if (existing instanceof TFile) {
-			return existing;
-		}
-
-		await this.ensureParentDirectory(path);
-		await this.app.vault.adapter.write(path, '# Expense Manager Debug Log\n\n');
-		const created = this.app.vault.getAbstractFileByPath(path);
-		return created instanceof TFile ? created : null;
-	}
-
-	private enqueueWrite(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, args: unknown[]): void {
-		if (!this.getSettings().enableDebugFileLogging) {
-			return;
-		}
-
-		this.writeQueue = this.writeQueue
-			.then(() => this.appendLine(level, message, args))
-			.catch((error) => {
-				this.fallbackLogger.error('VaultDebugFileLogger: failed to write debug log entry', error);
-			});
-	}
-
-	private async appendLine(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string, args: unknown[]): Promise<void> {
-		const path = this.getLogPath();
-		await this.ensureParentDirectory(path);
-
-		const exists = await this.app.vault.adapter.exists(path);
-		if (!exists) {
-			await this.app.vault.adapter.write(path, '# Expense Manager Debug Log\n\n');
-		}
-
-		const timestamp = new Date().toISOString();
-		const serializedArgs = args.length > 0
-			? ` ${args.map((value) => this.serializeValue(value)).join(' ')}`
-			: '';
-		const line = `- ${timestamp} [${level}] ${message}${serializedArgs}\n`;
-		await this.app.vault.adapter.append(path, line);
-		await this.trimIfNeeded(path);
-	}
-
-	private async trimIfNeeded(path: string): Promise<void> {
-		const content = await this.app.vault.adapter.read(path);
-		if (content.length <= this.maxCharacters) {
-			return;
-		}
-
-		const header = '# Expense Manager Debug Log\n\n';
-		const tail = content.slice(-this.maxCharacters);
-		const firstEntryIndex = tail.indexOf('\n- ');
-		const trimmedBody = firstEntryIndex >= 0 ? tail.slice(firstEntryIndex + 1) : tail;
-		await this.app.vault.adapter.write(path, `${header}${trimmedBody.trimStart()}\n`);
-	}
-
-	private async ensureParentDirectory(path: string): Promise<void> {
-		const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-		if (!parent) {
-			return;
-		}
-
-		const segments = parent.split('/').filter(Boolean);
-		let current = '';
-		for (const segment of segments) {
-			current = current ? `${current}/${segment}` : segment;
-			const exists = await this.app.vault.adapter.exists(current);
-			if (!exists) {
-				await this.app.vault.adapter.mkdir(current);
-			}
-		}
-	}
-
-	private serializeValue(value: unknown): string {
-		if (value instanceof Error) {
-			return JSON.stringify({
-				name: value.name,
-				message: value.message,
-				stack: value.stack,
-			});
-		}
-
-		if (typeof value === 'string') {
-			return value;
-		}
-
-		try {
-			return JSON.stringify(value);
-		} catch (_error) {
-			return String(value);
-		}
-	}
+	const path = paraCoreApi.getRuntimeLogPath();
+	const existing = app.vault.getAbstractFileByPath(path);
+	return existing instanceof TFile ? existing : null;
 }

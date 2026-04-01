@@ -31,6 +31,7 @@ import {
 	TelegramMessageContext,
 } from './client';
 import { IParaCoreApi } from '../para-core/types';
+import { getPluginLogger } from '../../utils/plugin-debug-log';
 
 const CALLBACK_ACTIONS = {
 	startCapture: 'sc',
@@ -280,7 +281,7 @@ export class FinanceTelegramBridge {
 				answer: null,
 			};
 		} catch (error) {
-			console.error('FinanceTelegramBridge.handleMessage: failed to prepare transaction', error);
+			getPluginLogger().error('FinanceTelegramBridge.handleMessage: failed to prepare transaction', error);
 			if (typeof processingMessageId === 'number' && this.api?.editMessage) {
 				await this.api.editMessage(
 					processingMessageId,
@@ -553,7 +554,7 @@ export class FinanceTelegramBridge {
 				answer: null,
 			};
 		} catch (error) {
-			console.error('FinanceTelegramBridge.handleFocusedInput: failed to prepare transaction', error);
+			getPluginLogger().error('FinanceTelegramBridge.handleFocusedInput: failed to prepare transaction', error);
 			if (typeof processingMessageId === 'number' && this.api?.editMessage) {
 				await this.api.editMessage(
 					processingMessageId,
@@ -992,7 +993,7 @@ export class FinanceTelegramBridge {
 			return undefined;
 		}
 
-		console.info('FinanceTelegramBridge: starting AI processing feedback', decision);
+		getPluginLogger().info('FinanceTelegramBridge: starting AI processing feedback', decision);
 		const sent = await this.api.sendMessage(mode === 'file'
 			? [
 				'Processing finance file...',

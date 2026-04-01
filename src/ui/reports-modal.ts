@@ -2,6 +2,7 @@ import { App, Modal, Setting, Notice } from 'obsidian';
 import { PeriodReport, CategorySummary } from '../types';
 import { formatDateTime } from '../utils/frontmatter';
 import { ExpenseService } from '../services/expense-service';
+import { getPluginLogger } from '../utils/plugin-debug-log';
 
 export class ReportsModal extends Modal {
 	private report: PeriodReport | null = null;
@@ -181,7 +182,7 @@ export class ReportsModal extends Modal {
 							await leaf.openFile(file);
 						} catch (error) {
 							new Notice(`Error saving report: ${(error as Error).message}`);
-							console.error('Save error:', error);
+							getPluginLogger().error('Report save from modal failed', error);
 						}
 					});
 			})

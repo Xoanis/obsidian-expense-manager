@@ -20,6 +20,7 @@ import { registerFinanceTelegramHelpContributions } from './src/integrations/par
 import { IParaCoreApi, RegisteredParaDomain } from './src/integrations/para-core/types';
 import { FinanceTelegramBridge } from './src/integrations/telegram/finance-telegram-bridge';
 import { getTelegramBotApi, TelegramBotApi } from './src/integrations/telegram/client';
+import { formatPluginBuildInfo } from './src/build-info';
 import { ReportSyncService } from './src/services/report-sync-service';
 import { TelegramChartService } from './src/services/telegram-chart-service';
 import { TelegramBudgetAlertService } from './src/services/telegram-budget-alert-service';
@@ -30,7 +31,13 @@ import { ReportsModal } from './src/ui/reports-modal';
 import { ExpenseModal } from './src/ui/expense-modal';
 import { FinanceRuleInputModal } from './src/ui/finance-rule-input-modal';
 import { PLUGIN_UNIT_NAME } from './src/utils/constants';
-import { VaultDebugFileLogger } from './src/utils/plugin-debug-log';
+import {
+	ConsolePluginLogger,
+	createPluginLogger,
+	openSharedRuntimeLog,
+	setActivePluginLogger,
+	type PluginLogger,
+} from './src/utils/plugin-debug-log';
 
 export default class ExpenseManagerPlugin extends Plugin {
 	settings: ExpenseManagerSettings;
@@ -45,14 +52,16 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private telegramChartService!: TelegramChartService;
 	private telegramBudgetAlertService!: TelegramBudgetAlertService;
 	private financeIntakeService!: FinanceIntakeService;
-	private debugLogger!: VaultDebugFileLogger;
+	private logger: PluginLogger = new ConsolePluginLogger('Expense Manager');
 
 	async onload() {
 		await this.loadSettings();
-		this.debugLogger = new VaultDebugFileLogger(this.app, () => this.settings);
 
 		// Initialize PARA Core integration if available
 		this.initializeParaCoreIntegration();
+		this.logger = createPluginLogger('Expense Manager', this.paraCoreApi);
+		setActivePluginLogger(this.logger);
+		this.logger.info(`Loading plugin (${formatPluginBuildInfo()})`);
 
 		// Initialize services
 		this.expenseService = new ExpenseService(this.app, this.settings, this.paraCoreApi, this.financeDomain);
@@ -66,7 +75,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		);
 		this.telegramChartService = new TelegramChartService(this.reportSyncService);
 		this.financeIntakeService = new FinanceIntakeService(this.settings, {
-			logger: this.debugLogger,
+			logger: this.logger,
 		});
 		this.registerParaCoreTelegramCardContributions();
 
@@ -83,7 +92,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerMigrateLegacyNotesCommand(this);
 		this.addCommand({
 			id: 'open-debug-log',
-			name: 'Open debug log',
+			name: 'Open shared runtime log',
 			callback: async () => {
 				await this.openDebugLog();
 			},
@@ -104,7 +113,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	}
 
 	onunload() {
-		console.log('Unloading plugin Expense Manager')
+		this.logger.info('Plugin unloaded');
 		this.reportSyncService?.destroy();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 	}
@@ -116,6 +125,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 		this.initializeParaCoreIntegration();
+		this.logger = createPluginLogger('Expense Manager', this.paraCoreApi);
+		setActivePluginLogger(this.logger);
 		this.expenseService = new ExpenseService(
 			this.app,
 			this.settings,
@@ -133,7 +144,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		);
 		this.telegramChartService = new TelegramChartService(this.reportSyncService);
 		this.financeIntakeService = new FinanceIntakeService(this.settings, {
-			logger: this.debugLogger,
+			logger: this.logger,
 		});
 		this.registerParaCoreTelegramCardContributions();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
@@ -142,9 +153,9 @@ export default class ExpenseManagerPlugin extends Plugin {
 	}
 
 	async openDebugLog() {
-		const file = await this.debugLogger.ensureLogFileExists();
+		const file = await openSharedRuntimeLog(this.app, this.paraCoreApi);
 		if (!file) {
-			new Notice('Unable to create debug log file.');
+			new Notice('Shared runtime log does not exist yet.');
 			return;
 		}
 
@@ -178,7 +189,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		this.paraCoreApi = getParaCoreApi(this.app);
 		this.financeDomain = null;
 		if (!this.paraCoreApi) {
-			console.log('Expense Manager: PARA Core integration not available');
+			this.logger.info('PARA Core integration not available');
 			return;
 		}
 
@@ -190,7 +201,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			this.settings.dashboardContributionMode,
 		);
 		this.registerParaCoreMetadataContributions();
-		console.log('Expense Manager: registered PARA Core template contributions');
+		this.logger.info('Registered PARA Core template contributions');
 	}
 
 	private registerParaCoreMetadataContributions() {
@@ -274,7 +285,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			await leaf.openFile(file);
 		} catch (error) {
 			new Notice(`Error generating report: ${(error as Error).message}`);
-			console.error('Save error:', error);
+			this.logger.error('Failed to save generated report file', error);
 		}
 	}
 
@@ -293,7 +304,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			);
 			if (isDuplicate) {
 				new Notice(`⚠️ Duplicate transaction detected! Skipping.`);
-				console.log('Duplicate transaction prevented:', data.description);
+				this.logger.info('Duplicate transaction prevented', data.description);
 				return;
 			}
 			
@@ -307,7 +318,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			}
 		} catch (error) {
 			new Notice(`Error saving transaction: ${(error as Error).message}`);
-			console.error('Save error:', error);
+			this.logger.error('Failed to save transaction', error);
 		}
 	}
 
@@ -325,7 +336,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		try {
 			this.telegramApi = getTelegramBotApi(this.app);
 			if (!this.telegramApi) {
-				console.log('Telegram integration failed: API is unavailable');
+				this.logger.info('Telegram integration skipped: API is unavailable');
 				return;
 			}
 
@@ -338,16 +349,16 @@ export default class ExpenseManagerPlugin extends Plugin {
 				this.settings,
 			);
 			if (!this.financeTelegramBridge.register()) {
-				console.log('Telegram integration failed: unable to register Telegram bridge');
+				this.logger.warn('Telegram integration failed: unable to register Telegram bridge');
 				return;
 			}
 
 			this.registerParaCoreMetadataContributions();
 			this.registerParaCoreTelegramCardContributions();
 			this.registerParaCoreTelegramHelpContributions();
-			console.log('Telegram integration initialized');
+			this.logger.info('Telegram integration initialized');
 		} catch (error) {
-			console.log('Telegram integration not available:', error);
+			this.logger.warn('Telegram integration not available', error);
 		}
 	}
 
@@ -488,7 +499,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			);
 		} catch (error) {
 			new Notice(`Error during migration: ${(error as Error).message}`);
-			console.error('Migration error:', error);
+			this.logger.error('Migration failed', error);
 		}
 	}
 }
@@ -628,25 +639,8 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Write debug log to file')
-			.setDesc('Mirror AI finance intake logs into a markdown file inside the vault for easier debugging')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableDebugFileLogging)
-				.onChange(async (value) => {
-					this.plugin.settings.enableDebugFileLogging = value;
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('Debug log path')
-			.setDesc('Vault-relative markdown file used for expense-manager debug logs')
-			.addText(text => text
-				.setPlaceholder('ExpenseManager/debug-log.md')
-				.setValue(this.plugin.settings.debugLogFilePath)
-				.onChange(async (value) => {
-					this.plugin.settings.debugLogFilePath = value.trim() || 'ExpenseManager/debug-log.md';
-					await this.plugin.saveSettings();
-				}))
+			.setName('Shared runtime log')
+			.setDesc('Uses the PARA Core shared runtime log. The file is created only after the first warning or error and can be configured in PARA Core settings.')
 			.addButton(button => button
 				.setButtonText('Open')
 				.onClick(async () => {

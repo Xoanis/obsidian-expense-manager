@@ -1,5 +1,6 @@
 import { App } from 'obsidian';
 import { IParaCoreApi } from './types';
+import { getPluginLogger } from '../../utils/plugin-debug-log';
 
 interface ParaCorePluginLike {
 	getApi?: () => IParaCoreApi;
@@ -30,7 +31,7 @@ export function getParaCoreApi(app: App): IParaCoreApi | null {
 
 		return api;
 	} catch (error) {
-		console.log('PARA Core API not available:', error);
+		getPluginLogger().info('PARA Core API not available', error);
 		return null;
 	}
 }

@@ -4,6 +4,7 @@ import { ExpenseService } from './expense-service';
 import { PeriodReport, ReportPeriodDescriptor, ReportBudgetAlertLevel, ReportBudgetAlertState } from '../types';
 import { TelegramBudgetAlertService } from './telegram-budget-alert-service';
 import { StartupSyncGate } from './startup-sync-gate';
+import { getPluginLogger } from '../utils/plugin-debug-log';
 import {
 	createCustomPeriodDescriptor,
 	enumeratePeriodsInRange,
@@ -111,7 +112,7 @@ export class ReportSyncService {
 						await this.maybeSendBudgetAlert(file, hydratedReport, existingState, now);
 						savedFiles.push(file);
 					} catch (error) {
-						console.error(
+						getPluginLogger().error(
 							`Expense Manager failed to sync ${descriptor.kind} report ${descriptor.key}`,
 							error,
 						);
@@ -209,7 +210,7 @@ export class ReportSyncService {
 		try {
 			return await this.syncAutoReports();
 		} catch (error) {
-			console.error(`Expense Manager auto report sync failed (${reason})`, error);
+			getPluginLogger().error(`Expense Manager auto report sync failed (${reason})`, error);
 			return [];
 		}
 	}

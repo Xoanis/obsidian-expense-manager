@@ -14,6 +14,7 @@ import {
 import { ExpenseManagerSettings } from '../settings';
 import { DashboardContributionMode } from '../settings';
 import { IParaCoreApi, RegisteredParaDomain } from '../integrations/para-core/types';
+import { getPluginLogger } from '../utils/plugin-debug-log';
 import { 
 	generateFrontmatter, 
 	generateContentBody, 
@@ -195,7 +196,7 @@ export class ExpenseService {
 					transactions.push(transaction);
 				}
 			} catch (error) {
-				console.error(`Error parsing file ${file.path}:`, error);
+				getPluginLogger().error(`Error parsing file ${file.path}`, error);
 			}
 		}
 
@@ -253,7 +254,7 @@ export class ExpenseService {
 				file: file
 			};
 		} catch (error) {
-			console.error(`Error parsing transaction file ${file.path}:`, error);
+			getPluginLogger().error(`Error parsing transaction file ${file.path}`, error);
 			return null;
 		}
 	}
@@ -566,7 +567,7 @@ export class ExpenseService {
 			container.createEl('div', {
 				text: `Unable to render report section: ${(error as Error).message}`,
 			});
-			console.error('Expense Manager report render error:', error);
+			getPluginLogger().error('Expense Manager report render error', error);
 		}
 	}
 
@@ -600,7 +601,7 @@ export class ExpenseService {
 				container.createEl('div', {
 					text: `Unable to render finance dashboard: ${(error as Error).message}`,
 				});
-				console.error('Expense Manager dashboard render error:', error);
+				getPluginLogger().error('Expense Manager dashboard render error', error);
 			}
 		};
 

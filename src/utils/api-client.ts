@@ -1,5 +1,6 @@
 import { TransactionData, TransactionDetail } from '../types';
 import { parseQrReceiptString, QrReceiptData, operationTypeToTransactionType } from './qr-parser';
+import { getPluginLogger } from './plugin-debug-log';
 import jsQR from 'jsqr';
 
 /**
@@ -222,7 +223,7 @@ export class ProverkaChekaClient {
 						error: `Raw QR lookup failed: ${(rawQrError as Error).message}. Used field-based receipt lookup instead.`
 					};
 				} catch (apiError) {
-					console.warn('ProverkaCheka API failed, using local QR data:', apiError);
+					getPluginLogger().warn('ProverkaCheka API failed, using local QR data', apiError);
 
 					const localData = this.createFromLocalQr(qrData);
 					return {
@@ -365,10 +366,10 @@ export class ProverkaChekaClient {
 				if (!isNaN(apiDateTime.getTime())) {
 					dateTime = apiDateTime.toISOString();
 				} else {
-					console.warn('Invalid dateTime format, will try ticketDate:', json.dateTime);
+					getPluginLogger().warn('Invalid dateTime format, will try ticketDate', json.dateTime);
 				}
 			} catch (e) {
-				console.warn('Could not parse dateTime, will try ticketDate:', json.dateTime);
+				getPluginLogger().warn('Could not parse dateTime, will try ticketDate', json.dateTime);
 			}
 		}
 		
@@ -380,7 +381,7 @@ export class ProverkaChekaClient {
 					dateTime = receiptDate.toISOString();
 				}
 			} catch (e) {
-				console.warn('Could not parse ticketDate, using current time:', json.ticketDate);
+				getPluginLogger().warn('Could not parse ticketDate, using current time', json.ticketDate);
 			}
 		}
 		

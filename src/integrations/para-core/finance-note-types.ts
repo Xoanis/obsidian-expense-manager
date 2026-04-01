@@ -77,7 +77,7 @@ function createFinanceTransactionNoteType(
 			status: 'recorded',
 			domain: 'finance',
 			created: date,
-			dateTime: new Date(`${date}T00:00:00`).toISOString(),
+			dateTime: resolveTemplateFriendlyDateTime(date, timestamp),
 			amount: 0,
 			currency: 'RUB',
 			description: '',
@@ -92,6 +92,23 @@ function createFinanceTransactionNoteType(
 		template: (ctx) => renderFinanceTransactionTemplate(ctx, categoryTag),
 		validate: (frontmatter: Partial<FinanceTransactionFrontmatter>) => validateFinanceTransactionFrontmatter(frontmatter, categoryTag),
 	};
+}
+
+function resolveTemplateFriendlyDateTime(date: string, timestamp: string): string {
+	if (isTemplatePlaceholder(timestamp)) {
+		return timestamp;
+	}
+
+	const parsed = new Date(`${date}T00:00:00`);
+	if (Number.isNaN(parsed.getTime())) {
+		return timestamp || date;
+	}
+
+	return parsed.toISOString();
+}
+
+function isTemplatePlaceholder(value: string): boolean {
+	return typeof value === 'string' && value.includes('{{') && value.includes('}}');
 }
 
 function createFinanceReportNoteType(): NoteTypeDefinition<FinanceReportFrontmatter> {

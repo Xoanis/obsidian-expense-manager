@@ -1,6 +1,7 @@
 import { App, Modal, Setting, Notice } from 'obsidian';
 import { TransactionData } from '../types';
 import { ProverkaChekaClient } from '../utils/api-client';
+import { getPluginLogger } from '../utils/plugin-debug-log';
 import { ExpenseModal } from './expense-modal';
 
 export class QrModal extends Modal {
@@ -195,7 +196,7 @@ export class QrModal extends Modal {
 			
 			if (result.hasError) {
 				new Notice(`Error: ${result.error || 'Failed to process receipt'}`);
-				console.error('QR processing error:', result.error);
+				getPluginLogger().error('QR processing error', result.error);
 				// Show process button again on error so user can retry
 				(this as any).processButtonContainer.style.display = 'block';
 				return;
@@ -221,7 +222,7 @@ export class QrModal extends Modal {
 			}
 		} catch (error) {
 			new Notice(`Error: ${(error as Error).message}`);
-			console.error('QR processing error:', error);
+			getPluginLogger().error('QR processing error', error);
 			// Show process button again on error so user can retry
 			(this as any).processButtonContainer.style.display = 'block';
 		} finally {

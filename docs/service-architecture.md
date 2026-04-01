@@ -182,6 +182,22 @@ Artifact storage convention:
 - the stored file name receives a timestamp prefix derived from the same placement date
 - for finance flows, transaction note placement and artifact timestamping both use the transaction date
 
+## Shared Runtime Logging
+
+`Expense Manager` no longer owns a separate vault debug-log file.
+
+Instead it joins the shared `PARA Core` runtime log:
+
+- main plugin startup uses a scoped shared logger
+- finance intake services use the same shared logger
+- runtime warnings and errors from report sync, Telegram finance flows, and parsing paths now land in the common ecosystem log
+
+This keeps investigation simpler:
+
+- one logging policy
+- one shared file path owned by `PARA Core`
+- one place to look when a cross-plugin issue shows up during normal vault usage
+
 ## Report And Dashboard Rendering
 
 Finance report notes and PARA dashboard widgets now use the same rendering model:

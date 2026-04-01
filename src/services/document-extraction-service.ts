@@ -1,3 +1,5 @@
+import { getPluginLogger } from '../utils/plugin-debug-log';
+
 export interface DocumentExtractionRequest {
 	bytes: ArrayBuffer;
 	fileName: string;
@@ -241,7 +243,7 @@ export class PdfJsDocumentExtractionService implements DocumentExtractionService
 			try {
 				await loadingTask?.destroy?.();
 			} catch (error) {
-				console.debug('PdfJsDocumentExtractionService: failed to destroy loading task', error);
+				getPluginLogger().debug('PdfJsDocumentExtractionService: failed to destroy loading task', error);
 			}
 		}
 	}
