@@ -199,6 +199,29 @@ In practice this means:
 
 This removes the old dependency on monolithic inline rendering code and keeps report and dashboard visuals consistent.
 
+## Startup Report Sync
+
+Automatic report sync has one startup-specific rule:
+
+- do not run the first background sync directly inside plugin `onload`
+
+Instead, `ReportSyncService` opens a dedicated startup gate:
+
+- primary signal: `app.metadataCache.on('resolved')`
+- fallback signal: `app.workspace.onLayoutReady(...)` plus a short timeout
+- execution rule: open only once, then run the startup sync
+
+Why this exists:
+
+- managed report files may already be present on disk
+- during cold startup, Obsidian can still be warming up the Vault and metadata indexes
+- if sync runs too early, an upsert can miss the existing indexed `TFile` and hit a false `File already exists` conflict
+
+This policy is centralized in:
+
+- [startup-sync-gate.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/startup-sync-gate.ts)
+- [report-sync-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/report-sync-service.ts)
+
 ## Why The Current Shape Is Simpler
 
 The previous iteration experimented with:

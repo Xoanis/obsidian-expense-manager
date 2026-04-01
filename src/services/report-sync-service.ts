@@ -3,6 +3,7 @@ import { ExpenseManagerSettings } from '../settings';
 import { ExpenseService } from './expense-service';
 import { PeriodReport, ReportPeriodDescriptor, ReportBudgetAlertLevel, ReportBudgetAlertState } from '../types';
 import { TelegramBudgetAlertService } from './telegram-budget-alert-service';
+import { StartupSyncGate } from './startup-sync-gate';
 import {
 	createCustomPeriodDescriptor,
 	enumeratePeriodsInRange,
@@ -13,16 +14,19 @@ import {
 export class ReportSyncService {
 	private syncTimer: number | null = null;
 	private syncInProgress = false;
+	private readonly startupSyncGate: StartupSyncGate;
 
 	constructor(
 		private readonly app: App,
 		private readonly expenseService: ExpenseService,
 		private readonly settings: ExpenseManagerSettings,
 		private readonly telegramBudgetAlertService?: TelegramBudgetAlertService,
-	) {}
+	) {
+		this.startupSyncGate = new StartupSyncGate(app);
+	}
 
 	async initialize(): Promise<void> {
-		await this.syncAutoReports();
+		this.scheduleStartupSync();
 	}
 
 	destroy(): void {
@@ -30,6 +34,7 @@ export class ReportSyncService {
 			window.clearTimeout(this.syncTimer);
 			this.syncTimer = null;
 		}
+		this.startupSyncGate.dispose();
 	}
 
 	scheduleAutoSync(_reason: string): void {
@@ -43,7 +48,7 @@ export class ReportSyncService {
 
 		this.syncTimer = window.setTimeout(() => {
 			this.syncTimer = null;
-			void this.syncAutoReports();
+			void this.runSyncSafely(`scheduled:${_reason}`);
 		}, 750);
 	}
 
@@ -81,29 +86,36 @@ export class ReportSyncService {
 			for (const kind of enabledKinds) {
 				const descriptors = enumeratePeriodsInRange(kind, earliestDate, now, true);
 				for (const descriptor of descriptors) {
-					const existingFile = await this.expenseService.findManagedReportFile(descriptor);
-					const budget = await this.expenseService.getExistingBudgetForDescriptor(descriptor);
-					const existingState = existingFile
-						? await this.expenseService.getReportBudgetAlertState(existingFile)
-						: {
-							sentWarning: false,
-							sentForecast: false,
-							sentCritical: false,
-							lastAlertAt: null,
-						};
-					const report = this.expenseService.buildPeriodReportFromTransactions(
-						allTransactions,
-						descriptor,
-						budget,
-					);
-					const hydratedReport = this.expenseService.hydrateReportWithBudgetState(
-						report,
-						budget,
-						existingState,
-					);
-					const file = await this.expenseService.upsertReportFile(hydratedReport, { existingFile });
-					await this.maybeSendBudgetAlert(file, hydratedReport, existingState, now);
-					savedFiles.push(file);
+					try {
+						const existingFile = await this.expenseService.findManagedReportFile(descriptor);
+						const budget = await this.expenseService.getExistingBudgetForDescriptor(descriptor);
+						const existingState = existingFile
+							? await this.expenseService.getReportBudgetAlertState(existingFile)
+							: {
+								sentWarning: false,
+								sentForecast: false,
+								sentCritical: false,
+								lastAlertAt: null,
+							};
+						const report = this.expenseService.buildPeriodReportFromTransactions(
+							allTransactions,
+							descriptor,
+							budget,
+						);
+						const hydratedReport = this.expenseService.hydrateReportWithBudgetState(
+							report,
+							budget,
+							existingState,
+						);
+						const file = await this.expenseService.upsertReportFile(hydratedReport, { existingFile });
+						await this.maybeSendBudgetAlert(file, hydratedReport, existingState, now);
+						savedFiles.push(file);
+					} catch (error) {
+						console.error(
+							`Expense Manager failed to sync ${descriptor.kind} report ${descriptor.key}`,
+							error,
+						);
+					}
 				}
 			}
 
@@ -185,5 +197,20 @@ export class ReportSyncService {
 			return !state.sentWarning;
 		}
 		return false;
+	}
+
+	private scheduleStartupSync(): void {
+		this.startupSyncGate.arm(() => {
+			void this.runSyncSafely('startup');
+		});
+	}
+
+	private async runSyncSafely(reason: string): Promise<TFile[]> {
+		try {
+			return await this.syncAutoReports();
+		} catch (error) {
+			console.error(`Expense Manager auto report sync failed (${reason})`, error);
+			return [];
+		}
 	}
 }

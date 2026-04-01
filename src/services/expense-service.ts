@@ -128,7 +128,6 @@ export class ExpenseService {
 		await this.ensureExpenseFolder();
 
 		// Generate filename and content
-        console.log('Creating transaction file with data:', dataWithArtifact);
 		const filename = generateFilename(dataWithArtifact);
 		const folderPath = await this.ensureFolderPath(this.getTransactionFolderPath(dataWithArtifact.dateTime));
 		const filepath = `${folderPath}/${filename}`;
@@ -1457,56 +1456,6 @@ export class ExpenseService {
 		});
 	}
 
-	private async saveReportViaParaCore(report: PeriodReport): Promise<TFile> {
-		if (!this.paraCoreApi) {
-			throw new Error('PARA Core API is not available');
-		}
-
-		const startDate = formatDateKey(report.startDate);
-		const endDate = formatDateKey(report.endDate);
-		const reportId = this.buildManagedReportId({
-			kind: report.periodKind,
-			key: report.periodKey,
-			startDate: report.startDate,
-			endDate: report.endDate,
-		});
-		const title = report.periodKind === 'custom'
-			? `Financial Report ${startDate} to ${endDate}`
-			: `Financial Report ${report.periodLabel}`;
-		const filename = this.getReportFileName(report).replace(/\.md$/i, '');
-
-		return this.paraCoreApi.createNote({
-			type: 'finance-report',
-			title,
-			fileNameOverride: filename,
-			openAfterCreate: false,
-			frontmatterOverrides: {
-				reportOwner: MANAGED_REPORT_OWNER,
-				reportEngine: REPORT_ENGINE_DATAVIEWJS,
-				reportId,
-				reportTemplate: DEFAULT_REPORT_TEMPLATE,
-				periodStart: startDate,
-				periodEnd: endDate,
-				currency: this.settings.defaultCurrency,
-				transactionsRoot: this.getTransactionsRootPath(),
-				filterProject: null,
-				filterArea: null,
-				filterTypes: ['expense', 'income'],
-				periodKind: report.periodKind,
-				periodKey: report.periodKey,
-				periodLabel: report.periodLabel,
-				openingBalance: report.openingBalance,
-				totalExpenses: report.totalExpenses,
-				totalIncome: report.totalIncome,
-				netChange: report.netChange,
-				closingBalance: report.closingBalance,
-				balance: report.balance,
-				budget: report.budget?.limit ?? null,
-				tags: ['finance', 'report'],
-			},
-		});
-	}
-
 	async upsertReportFile(
 		report: PeriodReport,
 		options?: {
@@ -1520,42 +1469,46 @@ export class ExpenseService {
 			startDate: report.startDate,
 			endDate: report.endDate,
 		};
-		const existing = options?.existingFile ?? await this.findManagedReportFile(descriptor);
+		const expectedReportPath = normalizePath(
+			`${this.getReportsFolderPath()}/${this.getReportFileName(report)}`,
+		);
+		const existingByPath = this.app.vault.getAbstractFileByPath(expectedReportPath);
+		const existing =
+			options?.existingFile ??
+			(existingByPath instanceof TFile ? existingByPath : null) ??
+			await this.findManagedReportFile(descriptor);
 		const existingBudget = existing ? await this.readReportBudget(existing) : report.budget?.limit ?? null;
 		const existingAlertState = existing ? await this.readReportBudgetAlertState(existing) : this.createEmptyBudgetAlertState();
 		const reportForSave = this.applyPersistedBudgetState(report, existingBudget, existingAlertState);
 
 		if (existing) {
-			const desiredPath = `${existing.parent?.path ?? ''}/${this.getReportFileName(reportForSave)}`.replace(/^\/+/, '');
-			if (existing.path !== desiredPath && !this.app.vault.getAbstractFileByPath(desiredPath)) {
-				await this.app.fileManager.renameFile(existing, desiredPath);
-			}
-
-			const currentContent = await this.app.vault.cachedRead(existing);
-			const existingGeneratedAt = this.readGeneratedAt(currentContent) ?? new Date().toISOString();
-			const stableContent = this.generateReportMarkdown(reportForSave, existingGeneratedAt);
-			if (currentContent !== stableContent) {
-				const updatedContent = this.generateReportMarkdown(reportForSave, new Date().toISOString());
-				await this.app.vault.modify(existing, updatedContent);
-			}
-			return existing;
-		}
-
-		const content = this.generateReportMarkdown(reportForSave);
-
-		if (this.canUseParaCoreRecords()) {
-			try {
-				const file = await this.saveReportViaParaCore(reportForSave);
-				await this.app.vault.modify(file, content);
-				return file;
-			} catch (error) {
-				console.warn('Falling back to direct report file creation:', error);
-			}
+			return this.syncExistingReportFile(existing, reportForSave);
 		}
 
 		const reportsFolder = await this.ensureFolderPath(this.getReportsFolderPath());
-		const filepath = `${reportsFolder}/${this.getReportFileName(reportForSave)}`;
-		return this.app.vault.create(filepath, content);
+		const filepath = normalizePath(`${reportsFolder}/${this.getReportFileName(reportForSave)}`);
+		const content = this.generateReportMarkdown(reportForSave);
+		const indexedDuringBootstrap = await this.resolveIndexedMarkdownFile(filepath);
+		if (indexedDuringBootstrap) {
+			return this.syncExistingReportFile(indexedDuringBootstrap, reportForSave);
+		}
+
+		try {
+			return await this.app.vault.create(filepath, content);
+		} catch (error) {
+			if (!this.isAlreadyExistsError(error)) {
+				throw error;
+			}
+
+			const indexedAfterConflict =
+				await this.waitForIndexedMarkdownFile(filepath) ??
+				await this.findManagedReportFile(descriptor);
+			if (indexedAfterConflict) {
+				return this.syncExistingReportFile(indexedAfterConflict, reportForSave);
+			}
+
+			throw error;
+		}
 	}
 
 	hydrateReportWithBudgetState(
@@ -1661,6 +1614,54 @@ export class ExpenseService {
 			return null;
 		}
 		return this.readReportBudget(reportFile);
+	}
+
+	private async syncExistingReportFile(existing: TFile, report: PeriodReport): Promise<TFile> {
+		const desiredPath = normalizePath(`${existing.parent?.path ?? ''}/${this.getReportFileName(report)}`.replace(/^\/+/, ''));
+		if (existing.path !== desiredPath && !this.app.vault.getAbstractFileByPath(desiredPath)) {
+			await this.app.fileManager.renameFile(existing, desiredPath);
+		}
+
+		const currentContent = await this.app.vault.cachedRead(existing);
+		const existingGeneratedAt = this.readGeneratedAt(currentContent) ?? new Date().toISOString();
+		const stableContent = this.generateReportMarkdown(report, existingGeneratedAt);
+		if (currentContent !== stableContent) {
+			const updatedContent = this.generateReportMarkdown(report, new Date().toISOString());
+			await this.app.vault.modify(existing, updatedContent);
+		}
+
+		return existing;
+	}
+
+	private async resolveIndexedMarkdownFile(path: string, attempts = 1, delayMs = 0): Promise<TFile | null> {
+		const normalizedPath = normalizePath(path);
+		for (let attempt = 0; attempt < attempts; attempt += 1) {
+			const directHit = this.app.vault.getAbstractFileByPath(normalizedPath);
+			if (directHit instanceof TFile) {
+				return directHit;
+			}
+
+			const listedHit = this.app.vault
+				.getMarkdownFiles()
+				.find((file) => normalizePath(file.path) === normalizedPath);
+			if (listedHit) {
+				return listedHit;
+			}
+
+			if (attempt < attempts - 1 && delayMs > 0) {
+				await this.delay(delayMs);
+			}
+		}
+
+		return null;
+	}
+
+	private waitForIndexedMarkdownFile(path: string): Promise<TFile | null> {
+		return this.resolveIndexedMarkdownFile(path, 8, 50);
+	}
+
+	private async delay(ms: number): Promise<void> {
+		await new Promise<void>((resolve) => setTimeout(resolve, ms));
 	}
 
 	async getReportBudgetAlertState(file: TFile): Promise<ReportBudgetAlertState> {
@@ -2270,10 +2271,22 @@ export class ExpenseService {
 			currentPath = currentPath ? `${currentPath}/${part}` : part;
 			const existing = this.app.vault.getAbstractFileByPath(currentPath);
 			if (!existing) {
-				await this.app.vault.createFolder(currentPath);
+				try {
+					await this.app.vault.createFolder(currentPath);
+				} catch (error) {
+					if (!this.isAlreadyExistsError(error)) {
+						throw error;
+					}
+				}
+			} else if (!(existing instanceof TFolder)) {
+				throw new Error(`Path exists but is not a folder: ${currentPath}`);
 			}
 		}
 		return folderPath;
+	}
+
+	private isAlreadyExistsError(error: unknown): boolean {
+		return error instanceof Error && error.message.includes('already exists');
 	}
 
 	private async getAvailableArtifactPath(folderPath: string, fileName: string): Promise<string> {

@@ -401,6 +401,24 @@ Already implemented:
 - budget alerts
 - legacy note migration
 
+## Startup Sync Policy
+
+`Expense Manager` keeps managed finance reports in sync automatically, but the first sync is intentionally delayed until Obsidian startup is ready for it.
+
+Why:
+- existing report files can already exist on disk while the early Vault and metadata indexes are still warming up
+- running report upserts too early can produce false `File already exists` conflicts during cold startup
+
+Current policy:
+- prefer `app.metadataCache.on('resolved')` as the primary startup signal
+- keep a small `onLayoutReady + timeout` fallback in case the initial `resolved` event fired before the plugin subscribed
+- run the startup sync only once
+- isolate per-report failures so one problematic report cannot fail the whole plugin load
+
+Implementation:
+- startup gate: [startup-sync-gate.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/startup-sync-gate.ts)
+- report orchestration: [report-sync-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/report-sync-service.ts)
+
 Not implemented yet:
 - proactive budget alert push messages in Telegram
 - dedicated budget management UX beyond frontmatter editing
