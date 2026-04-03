@@ -5,6 +5,7 @@ export class FinanceRuleInputModal extends Modal {
 	private settled = false;
 
 	onSubmit: ((value: string) => void) | null = null;
+	onSecondaryAction: (() => void) | null = null;
 	onCancel: (() => void) | null = null;
 
 	constructor(
@@ -12,6 +13,7 @@ export class FinanceRuleInputModal extends Modal {
 		private readonly title: string,
 		private readonly description: string,
 		private readonly placeholder: string,
+		private readonly secondaryActionLabel?: string,
 		initialValue = '',
 	) {
 		super(app);
@@ -26,8 +28,8 @@ export class FinanceRuleInputModal extends Modal {
 		contentEl.createEl('p', { text: this.description });
 
 		new Setting(contentEl)
-			.setName('Input')
-			.setDesc('Examples: `500 Lunch | area=Health`, `+5000 Bonus`, or `t=20260316T1007&s=1550.00&fn=...`')
+			.setName('Record')
+			.setDesc('Examples: `expense 500 Lunch | area=Health`, `+5000 Bonus`, or `t=20260316T1007&s=1550.00&fn=...`')
 			.addTextArea((text) => {
 				text
 					.setPlaceholder(this.placeholder)
@@ -41,10 +43,23 @@ export class FinanceRuleInputModal extends Modal {
 		new Setting(contentEl)
 			.addButton((button) => {
 				button
-					.setButtonText('Continue')
+					.setButtonText('Review')
 					.setCta()
 					.onClick(() => {
 						this.submit();
+					});
+			})
+			.addButton((button) => {
+				if (!this.secondaryActionLabel) {
+					return;
+				}
+
+				button
+					.setButtonText(this.secondaryActionLabel)
+					.onClick(() => {
+						this.settled = true;
+						this.close();
+						this.onSecondaryAction?.();
 					});
 			})
 			.addButton((button) => {

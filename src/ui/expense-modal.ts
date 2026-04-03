@@ -47,7 +47,8 @@ export class ExpenseModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 
-		contentEl.createEl('h2', { text: `${this.type === 'expense' ? 'Add Expense' : 'Add Income'}` });
+		contentEl.createEl('h2', { text: 'Review finance record' });
+		contentEl.createEl('p', { text: 'Check the extracted details before saving the record.' });
 
 		// Type selector
 		new Setting(contentEl)
@@ -59,10 +60,6 @@ export class ExpenseModal extends Modal {
 					.setValue(this.type)
 					.onChange(value => {
 						this.type = value as TransactionType;
-						// Update header
-						contentEl.querySelector('h2')?.setText(
-							this.type === 'expense' ? 'Add Expense' : 'Add Income'
-						);
 					});
 			});
 
@@ -165,7 +162,7 @@ export class ExpenseModal extends Modal {
 		new Setting(contentEl)
 			.addButton(button => {
 				button
-					.setButtonText('Save')
+					.setButtonText('Save record')
 					.setCta()
 					.onClick(() => {
 						this.save();

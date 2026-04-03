@@ -11,7 +11,7 @@ The plugin stores every transaction as a note, builds period reports from transa
 
 ## What it does
 
-- create expense and income notes
+- create finance records for expenses and income
 - save receipt images and QR-based transactions
 - build monthly, quarterly, half-year, yearly, and custom reports
 - keep report balances cumulative instead of `income - expense` for only one period
@@ -33,7 +33,7 @@ The plugin stores every transaction as a note, builds period reports from transa
 
 - `obsidian-telegram-bot`
   - enables Telegram input flows
-  - enables `/expense`, `/income`, `/finance_record`, `/finance_summary`, and `/finance_report`
+  - enables `/finance_record`, `/finance_summary`, and `/finance_report`
   - enables inline keyboard navigation and PNG charts in Telegram
 
 - `Dataview`
@@ -81,10 +81,10 @@ Open **Settings → Expense Manager** and set:
 
 ### 2. Add transactions
 
-Use one of these commands:
-- `Add expense`
-- `Add income`
-- `Add expense via QR code (receipt)`
+Use:
+- `Add finance record`
+
+The unified command accepts structured finance text, signed amounts, raw receipt QR text, and can switch to receipt image capture from the same flow.
 
 ### 3. Generate reports
 
@@ -105,9 +105,7 @@ It also moves legacy flat transaction notes into the dated `YYYY/MM` layout.
 
 | Command | What it does |
 |---|---|
-| `Add expense` | Create an expense note manually |
-| `Add income` | Create an income note manually |
-| `Add expense via QR code (receipt)` | Parse a receipt image or QR and create a transaction |
+| `Add finance record` | Create a finance record from text, signed input, QR text, or receipt image |
 | `Open current month finance report` | Open the current month report in a modal |
 | `Save current month finance report` | Save the current month report note to the vault |
 | `Generate finance report for custom period` | Build a report for any date range |
@@ -120,23 +118,20 @@ When `obsidian-telegram-bot` is installed and Telegram integration is enabled, t
 ### Transaction input
 
 ```text
-/expense 500 Lunch
-/income 50000 Salary
-/finance_record expense 750 Taxi
+/finance_record expense 500 Lunch
+/finance_record income 50000 Salary
 /finance_record +5000 Cashback
 ```
 
 You can also add scoped metadata:
 
 ```text
-/expense 1200 Taxi | area=Life | project=Trip
+/finance_record expense 1200 Taxi | area=Life | project=Trip
 ```
 
 You can also start an explicit finance capture without inline args:
 
 ```text
-/expense
-/income
 /finance_record
 ```
 
@@ -146,7 +141,7 @@ Current Telegram finance intake is `proposal-first`:
 - the bot shows `Confirm`, `Reject`, `Set project`, and `Set area`
 - the transaction is written to the vault only after `Confirm`
 
-`/finance_record` is the neutral mode:
+`/finance_record` is the single transaction intake mode:
 - for text, use `expense 500 Lunch`, `income 50000 Salary`, `-500 Lunch`, or `+5000 Bonus`
 - for QR receipts, the direction can come from the receipt data itself
 

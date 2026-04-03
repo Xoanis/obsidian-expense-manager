@@ -7,7 +7,7 @@ import {
 	TELEGRAM_CHART_DESCRIPTORS,
 } from '../../services/telegram-chart-service';
 import { ExpenseManagerSettings } from '../../settings';
-import { TransactionData, TransactionType } from '../../types';
+import { TransactionData } from '../../types';
 import {
 	formatMonthlyReportMessages,
 	formatMonthlySectionMessage,
@@ -228,15 +228,11 @@ export class FinanceTelegramBridge {
 				};
 			}
 		}
-		if (command !== 'expense' && command !== 'income' && command !== 'finance_record') {
+		if (command !== 'finance_record') {
 			return { processed: false, answer: null };
 		}
 
-		const intent: FinanceIntakeIntent = command === 'income'
-			? 'income'
-			: command === 'expense'
-				? 'expense'
-				: 'neutral';
+		const intent: FinanceIntakeIntent = 'neutral';
 		const args = message.command.args?.trim() ?? '';
 		if (!args) {
 			await this.beginCaptureFlow({
@@ -463,7 +459,7 @@ export class FinanceTelegramBridge {
 		}
 
 		await this.beginCaptureFlow({
-			intent: state.intent ?? 'expense',
+			intent: state.intent ?? 'neutral',
 			target: state.target ?? 'project',
 			path: state.path,
 			page: state.page,
@@ -474,7 +470,7 @@ export class FinanceTelegramBridge {
 
 		return {
 			processed: true,
-			answer: `Finance capture opened for ${file.basename}. ${this.buildCapturePrompt(state.intent ?? 'expense')}`,
+			answer: `Finance capture opened for ${file.basename}. ${this.buildCapturePrompt(state.intent ?? 'neutral')}`,
 		};
 	}
 
@@ -675,7 +671,7 @@ export class FinanceTelegramBridge {
 				: 'Optional metadata can still be added as `| area=Health | project=My Project`.';
 		await this.api.sendMessage(
 			[
-				`Send the next finance input in ${options.intent === 'neutral' ? 'neutral' : options.intent} mode.`,
+				'Send the next record.',
 				targetHint,
 				this.buildCapturePrompt(options.intent),
 				metadataHint,
@@ -812,7 +808,7 @@ export class FinanceTelegramBridge {
 		}
 
 		if (summary.recentTransactions.length > 0) {
-			lines.push('', 'Recent transactions:');
+			lines.push('', 'Recent records:');
 			for (const transaction of summary.recentTransactions.slice(0, 3)) {
 				const sign = transaction.type === 'expense' ? '-' : '+';
 			lines.push(
@@ -859,7 +855,7 @@ export class FinanceTelegramBridge {
 		];
 
 		if (summary.recentTransactions.length > 0) {
-			lines.push('', 'Recent transactions:');
+			lines.push('', 'Recent records:');
 			for (const transaction of summary.recentTransactions.slice(0, 3)) {
 				const sign = transaction.type === 'expense' ? '-' : '+';
 				lines.push(
@@ -877,25 +873,23 @@ export class FinanceTelegramBridge {
 		page: number,
 	): Promise<TelegramInlineKeyboard> {
 		return [[
-			this.buildCaptureButton('expense', target, path, page),
-			this.buildCaptureButton('income', target, path, page),
+			this.buildCaptureButton(target, path, page),
 		]];
 	}
 
 	private buildCaptureButton(
-		transactionType: TransactionType,
 		target: Exclude<CaptureTarget, 'generic'>,
 		path: string,
 		page: number,
 	) {
 		return {
-			text: transactionType === 'expense' ? 'Add Expense' : 'Add Income',
+			text: 'Add finance record',
 			callbackData: this.encodeCallbackPayload({
 				unit: PLUGIN_UNIT_NAME,
 				action: CALLBACK_ACTIONS.startCapture,
 				token: this.createCallbackToken({
 					kind: 'capture',
-					intent: transactionType,
+					intent: 'neutral',
 					target,
 					path,
 					page,
@@ -1100,7 +1094,7 @@ export class FinanceTelegramBridge {
 	private formatProposalMessage(proposal: PendingFinanceProposal, footer?: string): string {
 		const emoji = proposal.data.type === 'expense' ? '💸' : '💰';
 		const lines = [
-			`${emoji} Finance proposal`,
+			`${emoji} Finance record`,
 			`Type: ${proposal.data.type}`,
 			`Amount: ${proposal.data.amount.toFixed(2)} ${proposal.data.currency}`,
 			`Date: ${proposal.data.dateTime}`,
@@ -1113,7 +1107,7 @@ export class FinanceTelegramBridge {
 		if (proposal.data.artifactFileName) {
 			lines.push(`Artifact: ${proposal.data.artifactFileName}`);
 		}
-		lines.push('', footer ?? 'Confirm to write this transaction to the vault, or refine the context first.');
+		lines.push('', footer ?? 'Confirm to save this record to the vault, or refine the context first.');
 		return lines.join('\n');
 	}
 
@@ -1582,10 +1576,10 @@ export class FinanceTelegramBridge {
 
 	private getFocusIntent(focus: InputFocusState): FinanceIntakeIntent {
 		const intent = focus.context?.intent;
-		if (intent === 'income' || intent === 'neutral') {
+		if (intent === 'expense' || intent === 'income' || intent === 'neutral') {
 			return intent;
 		}
-		return 'expense';
+		return 'neutral';
 	}
 
 	private getFocusContextString(focus: InputFocusState, key: string): string | null {
@@ -1608,17 +1602,13 @@ export class FinanceTelegramBridge {
 	}
 
 	private buildCapturePrompt(intent: FinanceIntakeIntent): string {
-		if (intent === 'neutral') {
-			return 'For text, send `expense 500 Lunch` or `income 500 Salary`, use signed amounts like `-500 Lunch` / `+500 Salary`, or send raw receipt QR text like `t=20260316T1007&s=1550.00&fn=...`. Image receipts, screenshots, and PDF finance documents are also supported.';
-		}
-		return 'Send plain text like `500 Lunch`, raw receipt QR text like `t=20260316T1007&s=1550.00&fn=...`, an image receipt or screenshot, or a PDF finance document. Every input becomes a proposal first, then you confirm it.';
+		void intent;
+		return 'For text, send `expense 500 Lunch` or `income 500 Salary`, use signed amounts like `-500 Lunch` or `+500 Salary`, or send raw receipt QR text like `t=20260316T1007&s=1550.00&fn=...`. Receipt images, screenshots, and PDF finance documents are also supported.';
 	}
 
 	private buildInvalidArgsPrompt(intent: FinanceIntakeIntent): string {
-		if (intent === 'neutral') {
-			return 'Could not parse transaction text. Use `/finance_record expense 500 Lunch | area=Health | project=Trip`, `/finance_record +5000 Bonus`, or send raw receipt QR text like `t=20260316T1007&s=1550.00&fn=...`.';
-		}
-		return `Invalid amount. Use \`/${intent} 500 Lunch | area=Health | project=Trip\`, send raw receipt QR text like \`t=20260316T1007&s=1550.00&fn=...\`, or call \`/${intent}\` and send the next message separately.`;
+		void intent;
+		return 'Could not parse transaction text. Use `/finance_record expense 500 Lunch | area=Health | project=Trip`, `/finance_record +5000 Bonus`, or send raw receipt QR text like `t=20260316T1007&s=1550.00&fn=...`.';
 	}
 
 	private encodeCallbackPayload(payload: TelegramCallbackPayload): string {

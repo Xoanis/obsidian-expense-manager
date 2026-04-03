@@ -5,9 +5,7 @@ import { ExpenseService } from './src/services/expense-service';
 import { AnalyticsService } from './src/services/analytics-service';
 import { QrHandler } from './src/handlers/qr-handler';
 import { FinanceReportSection, TransactionData } from './src/types';
-import { registerAddExpenseCommand } from './src/commands/add-expense';
-import { registerAddIncomeCommand } from './src/commands/add-income';
-import { registerAddQrExpenseCommand } from './src/commands/add-qr-expense';
+import { registerAddFinanceRecordCommand } from './src/commands/add-finance-record';
 import { registerGenerateReportCommand } from './src/commands/generate-report';
 import { registerGenerateReportFileCommand } from './src/commands/generate-report-file';
 import { registerGenerateCustomReportCommand } from './src/commands/generate-custom-report';
@@ -38,6 +36,10 @@ import {
 	setActivePluginLogger,
 	type PluginLogger,
 } from './src/utils/plugin-debug-log';
+
+type FinanceRecordInputResult =
+	| { kind: 'text'; value: string }
+	| { kind: 'receipt-image' };
 
 export default class ExpenseManagerPlugin extends Plugin {
 	settings: ExpenseManagerSettings;
@@ -83,9 +85,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		await this.initializeTelegramIntegration();
 
 		// Register commands
-		registerAddExpenseCommand(this);
-		registerAddIncomeCommand(this);
-		registerAddQrExpenseCommand(this);
+		registerAddFinanceRecordCommand(this);
 		registerGenerateReportCommand(this);
 		registerGenerateReportFileCommand(this);
 		registerGenerateCustomReportCommand(this);
@@ -99,8 +99,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 		});
 
 		// Add ribbon icon
-		this.addRibbonIcon('wallet', 'Add Expense', () => {
-			this.handleAddExpense();
+		this.addRibbonIcon('wallet', 'Add finance record', () => {
+			this.handleAddFinanceRecord();
 		});
 
 		// Add settings tab
@@ -235,15 +235,33 @@ export default class ExpenseManagerPlugin extends Plugin {
 	/**
 	 * Command handlers
 	 */
-	async handleAddExpense() {
-		await this.handleRuleBasedTextEntry('expense');
+	async handleAddFinanceRecord() {
+		const input = await this.openFinanceRecordInputModal();
+		if (!input) {
+			return;
+		}
+
+		if (input.kind === 'receipt-image') {
+			await this.handleReceiptFinanceRecord();
+			return;
+		}
+
+		const proposal = await this.financeIntakeService.createTextProposal({
+			text: input.value,
+			intent: 'neutral',
+			source: 'manual',
+		});
+		if (!proposal || proposal.amount <= 0) {
+			new Notice(
+				'Could not parse the record. Use `expense 500 Lunch`, `income 50000 Salary`, `-500 Taxi`, `+5000 Bonus`, or raw receipt QR text.',
+			);
+			return;
+		}
+
+		await this.reviewFinanceProposal(proposal);
 	}
 
-	async handleAddIncome() {
-		await this.handleRuleBasedTextEntry('income');
-	}
-
-	async handleAddQrExpense() {
+	private async handleReceiptFinanceRecord() {
 		const handler = new QrHandler(
 			this.app,
 			this.settings
@@ -253,7 +271,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		
 		if (result.success && result.data) {
 			await this.saveTransaction(result.data);
-		} else if (result.error) {
+		} else if (result.error && result.error !== 'User cancelled') {
 			new Notice(result.error);
 		}
 	}
@@ -362,43 +380,18 @@ export default class ExpenseManagerPlugin extends Plugin {
 		}
 	}
 
-	private async handleRuleBasedTextEntry(intent: 'expense' | 'income') {
-		const input = await this.openFinanceRuleInputModal(intent);
-		if (!input) {
-			return;
-		}
-
-		const proposal = await this.financeIntakeService.createTextProposal({
-			text: input,
-			intent,
-			source: 'manual',
-		});
-		if (!proposal || proposal.amount <= 0) {
-			new Notice(
-				intent === 'expense'
-					? 'Could not parse expense input. Use `500 Lunch | area=Health` or raw receipt QR text.'
-					: 'Could not parse income input. Use `50000 Salary | area=Career` or raw receipt QR text.',
-			);
-			return;
-		}
-
-		await this.reviewFinanceProposal(proposal, intent);
-	}
-
-	private async openFinanceRuleInputModal(intent: 'expense' | 'income'): Promise<string | null> {
+	private async openFinanceRecordInputModal(): Promise<FinanceRecordInputResult | null> {
 		return new Promise((resolve) => {
 			const modal = new FinanceRuleInputModal(
 				this.app,
-				intent === 'expense' ? 'Add Expense' : 'Add Income',
-				intent === 'expense'
-					? 'Enter rule-based finance text or paste raw receipt QR text. You can add `| area=...` and `| project=...` metadata.'
-					: 'Enter rule-based finance text or paste raw receipt QR text. You can add `| area=...` and `| project=...` metadata.',
-				intent === 'expense'
-					? '500 Lunch | area=Health'
-					: '50000 Salary | area=Career',
+				'Add finance record',
+				'Enter finance text, paste raw receipt QR text, or switch to receipt image capture. You can add `| area=...` and `| project=...` metadata.',
+				'expense 500 Lunch | area=Health',
+				'Use receipt image',
 			);
 
-			modal.onSubmit = (value) => resolve(value);
+			modal.onSubmit = (value) => resolve({ kind: 'text', value });
+			modal.onSecondaryAction = () => resolve({ kind: 'receipt-image' });
 			modal.onCancel = () => resolve(null);
 			modal.open();
 		});
@@ -406,14 +399,13 @@ export default class ExpenseManagerPlugin extends Plugin {
 
 	private async reviewFinanceProposal(
 		proposal: TransactionData,
-		intent: 'expense' | 'income',
 	): Promise<void> {
 		await new Promise<void>((resolve) => {
 			const modal = new ExpenseModal(
 				this.app,
-				intent,
+				proposal.type,
 				proposal.currency || this.settings.defaultCurrency,
-				intent === 'expense' ? this.settings.expenseCategories : this.settings.incomeCategories,
+				proposal.type === 'expense' ? this.settings.expenseCategories : this.settings.incomeCategories,
 				proposal,
 			);
 
@@ -548,7 +540,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 		// ProverkaCheka API key
 		new Setting(containerEl)
 			.setName('ProverkaCheka API key')
-			.setDesc('API key for receipt QR code processing (https://proverkacheka.com)')
+			.setDesc('API key for receipt lookup via ProverkaCheka (https://proverkacheka.com)')
 			.addText(text => text
 				.setPlaceholder('Enter your API key')
 				.setValue(this.plugin.settings.proverkaChekaApiKey)
@@ -557,10 +549,10 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
-		// Auto-save QR expenses
+		// Auto-save receipt records
 		new Setting(containerEl)
-			.setName('Auto-save QR expenses')
-			.setDesc('Automatically save expenses after QR processing without review')
+			.setName('Auto-save receipt records')
+			.setDesc('Automatically save records created from receipt images without review')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.autoSaveQrExpenses)
 				.onChange(async (value) => {
@@ -568,10 +560,10 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
-		// Local-only QR recognition
+		// Local-only receipt recognition
 		new Setting(containerEl)
-			.setName('Local QR recognition only')
-			.setDesc('Use only local QR decoding without sending to ProverkaCheka API (no item details, but works offline)')
+			.setName('Local receipt recognition only')
+			.setDesc('Decode receipt QR data locally without sending requests to ProverkaCheka (works offline, but without item details)')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.localQrOnly)
 				.onChange(async (value) => {
@@ -776,7 +768,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 		// Telegram integration
 		new Setting(containerEl)
 			.setName('Enable Telegram integration')
-			.setDesc('Allow expense/income entry via Telegram bot (requires Telegram Bot plugin)')
+			.setDesc('Allow finance record entry via Telegram bot (requires Telegram Bot plugin)')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.enableTelegramIntegration)
 				.onChange(async (value) => {
