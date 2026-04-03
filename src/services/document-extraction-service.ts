@@ -92,7 +92,7 @@ function cloneArrayBuffer(buffer: ArrayBuffer): ArrayBuffer {
 }
 
 let pdfJsModulePromise: Promise<any> | null = null;
-let pdfJsWorkerModulePromise: Promise<unknown> | null = null;
+let pdfJsWorkerModulePromise: Promise<any> | null = null;
 
 async function withPdfJsBrowserLikeGlobals<T>(factory: () => Promise<T>): Promise<T> {
 	const globalObject = globalThis as typeof globalThis & { process?: unknown };
@@ -118,23 +118,54 @@ async function withPdfJsBrowserLikeGlobals<T>(factory: () => Promise<T>): Promis
 	}
 }
 
-async function ensurePdfJsWorkerModule(): Promise<void> {
-	if (!pdfJsWorkerModulePromise) {
-		pdfJsWorkerModulePromise = withPdfJsBrowserLikeGlobals(() => import('pdfjs-dist/legacy/build/pdf.worker.mjs'));
-	}
-
-	await pdfJsWorkerModulePromise;
-}
-
 async function loadPdfJsModule(): Promise<any> {
 	if (!pdfJsModulePromise) {
-		pdfJsModulePromise = withPdfJsBrowserLikeGlobals(async () => {
-			await ensurePdfJsWorkerModule();
-			return import('pdfjs-dist/legacy/build/pdf.mjs');
-		});
+		pdfJsModulePromise = withPdfJsBrowserLikeGlobals(() => import('pdfjs-dist/legacy/build/pdf.mjs'));
 	}
 
 	return pdfJsModulePromise;
+}
+
+async function loadPdfJsWorkerModule(): Promise<any> {
+	if (!pdfJsWorkerModulePromise) {
+		pdfJsWorkerModulePromise = withPdfJsBrowserLikeGlobals(async () => {
+			const globalObject = globalThis as typeof globalThis & { pdfjsWorker?: unknown };
+			const hadPdfJsWorker = Object.prototype.hasOwnProperty.call(globalObject, 'pdfjsWorker');
+			const previousPdfJsWorker = globalObject.pdfjsWorker;
+
+			try {
+				return await import('pdfjs-dist/legacy/build/pdf.worker.mjs');
+			} finally {
+				if (hadPdfJsWorker) {
+					globalObject.pdfjsWorker = previousPdfJsWorker;
+				} else {
+					delete (globalObject as any).pdfjsWorker;
+				}
+			}
+		});
+	}
+
+	return pdfJsWorkerModulePromise;
+}
+
+async function withTemporaryPdfJsWorkerGlobal<T>(factory: () => Promise<T>): Promise<T> {
+	const workerModule = await loadPdfJsWorkerModule();
+	const globalObject = globalThis as typeof globalThis & { pdfjsWorker?: unknown };
+	const hadPdfJsWorker = Object.prototype.hasOwnProperty.call(globalObject, 'pdfjsWorker');
+	const previousPdfJsWorker = globalObject.pdfjsWorker;
+
+	try {
+		globalObject.pdfjsWorker = {
+			WorkerMessageHandler: workerModule.WorkerMessageHandler,
+		};
+		return await factory();
+	} finally {
+		if (hadPdfJsWorker) {
+			globalObject.pdfjsWorker = previousPdfJsWorker;
+		} else {
+			delete (globalObject as any).pdfjsWorker;
+		}
+	}
 }
 
 export class PdfJsDocumentExtractionService implements DocumentExtractionService {
@@ -144,16 +175,15 @@ export class PdfJsDocumentExtractionService implements DocumentExtractionService
 		try {
 			const pdfjsLib = await loadPdfJsModule();
 			const stableBytes = cloneArrayBuffer(request.bytes);
-			const task = (pdfjsLib as any).getDocument({
+			const task = await withTemporaryPdfJsWorkerGlobal(async () => (pdfjsLib as any).getDocument({
 				data: new Uint8Array(stableBytes),
-				disableWorker: true,
 				disableStream: true,
 				disableAutoFetch: true,
 				stopAtErrors: false,
 				isEvalSupported: false,
 				useWorkerFetch: false,
 				useSystemFonts: true,
-			});
+			}));
 			loadingTask = task;
 
 			const document = await task.promise;
