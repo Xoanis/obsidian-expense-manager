@@ -147,6 +147,42 @@ export class ReportSyncService {
 		return this.expenseService.upsertReportFile(report);
 	}
 
+	async setStandardPeriodBudget(
+		kind: 'month' | 'quarter' | 'half-year' | 'year',
+		date: Date,
+		budgetLimit: number | null,
+	): Promise<{ file: TFile; report: PeriodReport }> {
+		const descriptor = getPeriodDescriptorForDate(kind, date);
+		const allTransactions = await this.expenseService.getAllTransactions();
+		const existingFile = await this.expenseService.findManagedReportFile(descriptor);
+		const existingBudget = await this.expenseService.getExistingBudgetForDescriptor(descriptor);
+		const alertState = existingBudget === budgetLimit && existingFile
+			? await this.expenseService.getReportBudgetAlertState(existingFile)
+			: {
+				sentWarning: false,
+				sentForecast: false,
+				sentCritical: false,
+				lastAlertAt: null,
+			};
+		const report = this.expenseService.buildPeriodReportFromTransactions(
+			allTransactions,
+			descriptor,
+			budgetLimit,
+		);
+		const hydratedReport = this.expenseService.hydrateReportWithBudgetState(
+			report,
+			budgetLimit,
+			alertState,
+		);
+		const file = await this.expenseService.upsertReportFile(hydratedReport, {
+			existingFile,
+			persistedBudgetLimit: budgetLimit,
+			persistedAlertState: alertState,
+		});
+
+		return { file, report: hydratedReport };
+	}
+
 	private async generateReportForDescriptor(descriptor: ReportPeriodDescriptor): Promise<PeriodReport> {
 		const allTransactions = await this.expenseService.getAllTransactions();
 		const budget = await this.expenseService.getExistingBudgetForDescriptor(descriptor);

@@ -15,6 +15,7 @@ import {
 	MonthlyReportSection,
 } from '../../utils/report-formatters';
 import { PLUGIN_UNIT_NAME } from '../../utils/constants';
+import { parseBudgetInput } from '../../utils/budget-input';
 import {
 	FinanceIntakeIntent,
 	FinanceIntakeService,
@@ -227,6 +228,18 @@ export class FinanceTelegramBridge {
 					answer: `Error generating finance report: ${(error as Error).message}`,
 				};
 			}
+		}
+		if (command === 'finance_budget') {
+			const args = message.command.args?.trim() ?? '';
+			if (!args) {
+				await this.beginCurrentMonthBudgetFlow();
+				return {
+					processed: true,
+					answer: 'Send the budget for the current month as a number like `50000` or `-` to clear it.',
+				};
+			}
+
+			return this.applyCurrentMonthBudgetInput(args);
 		}
 		if (command !== 'finance_record') {
 			return { processed: false, answer: null };
@@ -486,6 +499,9 @@ export class FinanceTelegramBridge {
 		if (action !== 'finance.capture') {
 			if (action === 'finance.project-budget') {
 				return this.handleProjectBudgetFocusedInput(message, focus);
+			}
+			if (action === 'finance.month-budget') {
+				return this.handleCurrentMonthBudgetFocusedInput(message);
 			}
 			if (action === 'finance.proposal.date') {
 				return this.handleProposalDateFocusedInput(message, focus);
@@ -1746,6 +1762,20 @@ export class FinanceTelegramBridge {
 		);
 	}
 
+	private async beginCurrentMonthBudgetFlow(): Promise<void> {
+		if (!this.api) {
+			return;
+		}
+
+		await this.api.setInputFocus(PLUGIN_UNIT_NAME, {
+			mode: 'next-text',
+			expiresInMs: 1000 * 60 * 10,
+			context: {
+				action: 'finance.month-budget',
+			},
+		});
+	}
+
 	private async handleProjectBudgetFocusedInput(
 		message: TelegramMessageContext,
 		focus: InputFocusState,
@@ -1764,7 +1794,7 @@ export class FinanceTelegramBridge {
 			};
 		}
 
-		const budget = this.parseBudgetInput(rawText);
+		const budget = parseBudgetInput(rawText);
 		if (budget === undefined) {
 			return {
 				processed: true,
@@ -1790,17 +1820,70 @@ export class FinanceTelegramBridge {
 		};
 	}
 
-	private parseBudgetInput(rawText: string): number | null | undefined {
-		if (rawText === '-') {
-			return null;
+	private async handleCurrentMonthBudgetFocusedInput(
+		message: TelegramMessageContext,
+	): Promise<TelegramHandlerResult> {
+		const rawText = message.text?.trim();
+		if (!rawText) {
+			return {
+				processed: true,
+				answer: 'Send the budget for the current month as a number like `50000` or `-` to clear it.',
+			};
 		}
 
-		const normalized = rawText.replace(',', '.');
-		const value = Number(normalized);
-		if (!Number.isFinite(value) || value < 0) {
-			return undefined;
+		const parsedBudget = parseBudgetInput(rawText);
+		if (parsedBudget === undefined) {
+			return {
+				processed: true,
+				answer: 'Could not parse budget. Send a number like `50000` or `-` to clear it.',
+			};
 		}
 
-		return value;
+		await this.api?.clearInputFocus(PLUGIN_UNIT_NAME);
+		return this.applyCurrentMonthBudgetInput(rawText);
+	}
+
+	private async applyCurrentMonthBudgetInput(rawText: string): Promise<TelegramHandlerResult> {
+		const budget = parseBudgetInput(rawText);
+		if (budget === undefined) {
+			return {
+				processed: true,
+				answer: 'Could not parse budget. Send a number like `50000` or `-` to clear it.',
+			};
+		}
+
+		try {
+			const currentMonth = new Date();
+			const { file, report } = await this.reportSyncService.setStandardPeriodBudget('month', currentMonth, budget);
+			this.expenseService.clearReportRenderCache(file.path);
+			const monthLabel = this.formatBudgetMonthLabel(currentMonth);
+			if (budget === null || !report.budget) {
+				return {
+					processed: true,
+					answer: `Budget cleared for ${monthLabel}.`,
+				};
+			}
+
+			return {
+				processed: true,
+				answer: [
+					`Budget for ${monthLabel} set to ${report.budget.limit.toFixed(2)} RUB.`,
+					`Spent: ${report.budget.spent.toFixed(2)} RUB.`,
+					`Remaining: ${report.budget.remaining.toFixed(2)} RUB.`,
+				].join('\n'),
+			};
+		} catch (error) {
+			return {
+				processed: true,
+				answer: `Error setting current month budget: ${(error as Error).message}`,
+			};
+		}
+	}
+
+	private formatBudgetMonthLabel(date: Date): string {
+		return date.toLocaleString('en-US', {
+			month: 'long',
+			year: 'numeric',
+		});
 	}
 }

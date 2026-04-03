@@ -1461,6 +1461,8 @@ export class ExpenseService {
 		report: PeriodReport,
 		options?: {
 			existingFile?: TFile | null;
+			persistedBudgetLimit?: number | null;
+			persistedAlertState?: ReportBudgetAlertState;
 		},
 	): Promise<TFile> {
 		const descriptor: ReportPeriodDescriptor = {
@@ -1478,9 +1480,15 @@ export class ExpenseService {
 			options?.existingFile ??
 			(existingByPath instanceof TFile ? existingByPath : null) ??
 			await this.findManagedReportFile(descriptor);
-		const existingBudget = existing ? await this.readReportBudget(existing) : report.budget?.limit ?? null;
-		const existingAlertState = existing ? await this.readReportBudgetAlertState(existing) : this.createEmptyBudgetAlertState();
-		const reportForSave = this.applyPersistedBudgetState(report, existingBudget, existingAlertState);
+		const hasPersistedBudgetOverride = Boolean(options && Object.prototype.hasOwnProperty.call(options, 'persistedBudgetLimit'));
+		const persistedBudgetLimit = hasPersistedBudgetOverride
+			? options?.persistedBudgetLimit ?? null
+			: existing
+				? await this.readReportBudget(existing)
+				: report.budget?.limit ?? null;
+		const persistedAlertState = options?.persistedAlertState ??
+			(existing ? await this.readReportBudgetAlertState(existing) : this.createEmptyBudgetAlertState());
+		const reportForSave = this.applyPersistedBudgetState(report, persistedBudgetLimit, persistedAlertState);
 
 		if (existing) {
 			return this.syncExistingReportFile(existing, reportForSave);

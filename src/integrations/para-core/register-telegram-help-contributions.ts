@@ -8,10 +8,12 @@ export function registerFinanceTelegramHelpContributions(api: IParaCoreApi): voi
 		renderHelp: () => [
 			'Finance Telegram commands:',
 			'/finance_record - capture a finance proposal from text, raw receipt QR text, image, or PDF',
+			'/finance_budget - set budget for the current monthly report',
 			'/finance_summary - show monthly finance summary',
 			'/finance_report - open monthly finance report',
 			'',
 			'Examples:',
+			'/finance_budget 50000',
 			'/finance_record expense 500 Lunch | area=Health',
 			'/finance_record income 50000 Salary | area=Career',
 			'/finance_record +5000 Bonus',

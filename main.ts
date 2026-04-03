@@ -10,6 +10,7 @@ import { registerGenerateReportCommand } from './src/commands/generate-report';
 import { registerGenerateReportFileCommand } from './src/commands/generate-report-file';
 import { registerGenerateCustomReportCommand } from './src/commands/generate-custom-report';
 import { registerMigrateLegacyNotesCommand } from './src/commands/migrate-legacy-notes';
+import { registerSetCurrentMonthBudgetCommand } from './src/commands/set-current-month-budget';
 import { getParaCoreApi } from './src/integrations/para-core/para-core-client';
 import { registerFinanceDomain } from './src/integrations/para-core/register-finance-domain';
 import { registerFinanceMetadataContributions } from './src/integrations/para-core/register-metadata-contributions';
@@ -27,8 +28,10 @@ import { FinanceIntakeService } from './src/services/finance-intake-service';
 import { ReportPeriodModal } from './src/ui/report-period-modal';
 import { ReportsModal } from './src/ui/reports-modal';
 import { ExpenseModal } from './src/ui/expense-modal';
+import { BudgetInputModal } from './src/ui/budget-input-modal';
 import { FinanceRuleInputModal } from './src/ui/finance-rule-input-modal';
 import { PLUGIN_UNIT_NAME } from './src/utils/constants';
+import { parseBudgetInput } from './src/utils/budget-input';
 import {
 	ConsolePluginLogger,
 	createPluginLogger,
@@ -90,6 +93,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerGenerateReportFileCommand(this);
 		registerGenerateCustomReportCommand(this);
 		registerMigrateLegacyNotesCommand(this);
+		registerSetCurrentMonthBudgetCommand(this);
 		this.addCommand({
 			id: 'open-debug-log',
 			name: 'Open shared runtime log',
@@ -304,6 +308,47 @@ export default class ExpenseManagerPlugin extends Plugin {
 		} catch (error) {
 			new Notice(`Error generating report: ${(error as Error).message}`);
 			this.logger.error('Failed to save generated report file', error);
+		}
+	}
+
+	async handleSetCurrentMonthBudget() {
+		const monthLabel = new Date().toLocaleString('en-US', {
+			month: 'long',
+			year: 'numeric',
+		});
+		const value = await new Promise<string | null>((resolve) => {
+			const modal = new BudgetInputModal(
+				this.app,
+				'Set current month budget',
+				`Enter the budget for ${monthLabel}. Use "-" to clear the stored budget.`,
+				'50000',
+			);
+
+			modal.onSubmit = (submittedValue) => resolve(submittedValue);
+			modal.onCancel = () => resolve(null);
+			modal.open();
+		});
+		if (value === null) {
+			return;
+		}
+
+		const budget = parseBudgetInput(value);
+		if (budget === undefined) {
+			new Notice('Could not parse budget. Use a number like 50000 or "-" to clear it.');
+			return;
+		}
+
+		try {
+			const { file } = await this.reportSyncService.setStandardPeriodBudget('month', new Date(), budget);
+			this.expenseService.clearReportRenderCache(file.path);
+			new Notice(
+				budget === null
+					? `Budget cleared for ${monthLabel}.`
+					: `Budget for ${monthLabel} set to ${budget.toFixed(2)} ${this.settings.defaultCurrency}.`,
+			);
+		} catch (error) {
+			new Notice(`Error setting current month budget: ${(error as Error).message}`);
+			this.logger.error('Failed to set current month budget', error);
 		}
 	}
 
