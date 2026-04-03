@@ -156,6 +156,14 @@ export default class ExpenseManagerPlugin extends Plugin {
 		await this.reportSyncService.initialize();
 	}
 
+	isParaCoreStorageManaged(): boolean {
+		return this.financeDomain !== null;
+	}
+
+	getManagedExpenseDirectory(): string {
+		return this.financeDomain ? `${this.financeDomain.recordsPath}/Transactions` : this.settings.expenseFolder;
+	}
+
 	async openDebugLog() {
 		const file = await openSharedRuntimeLog(this.app, this.paraCoreApi);
 		if (!file) {
@@ -559,16 +567,22 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 		containerEl.createEl('h2', { text: 'Expense Manager Settings' });
 
 		// Expense folder setting
-		new Setting(containerEl)
-			.setName('Expense folder')
-			.setDesc('Where expense markdown files will be stored')
-			.addText(text => text
-				.setPlaceholder('Expenses')
-				.setValue(this.plugin.settings.expenseFolder)
-				.onChange(async (value) => {
-					this.plugin.settings.expenseFolder = value;
-					await this.plugin.saveSettings();
-				}));
+		if (this.plugin.isParaCoreStorageManaged()) {
+			new Setting(containerEl)
+				.setName('Expense folder')
+				.setDesc(`Storage is managed by PARA Core. Finance records are stored automatically in "${this.plugin.getManagedExpenseDirectory()}".`);
+		} else {
+			new Setting(containerEl)
+				.setName('Expense folder')
+				.setDesc('Where expense markdown files will be stored in standalone mode')
+				.addText(text => text
+					.setPlaceholder('Expenses')
+					.setValue(this.plugin.settings.expenseFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.expenseFolder = value;
+						await this.plugin.saveSettings();
+					}));
+		}
 
 		// Default currency
 		new Setting(containerEl)

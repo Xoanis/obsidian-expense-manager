@@ -73,11 +73,16 @@ npm run build
 ### 1. Configure the basics
 
 Open **Settings → Expense Manager** and set:
-- `Expense folder`
+- `Expense folder` if you use the plugin in standalone mode
 - `Default currency`
 - QR settings if you use receipt parsing
 - report automation settings
 - budget alert thresholds if you use budgets
+
+When `obsidian-para-core` is installed, storage is managed automatically:
+- the `Expense folder` setting is hidden
+- transaction notes are stored under `Records/Finance/Transactions/YYYY/MM/`
+- receipt artifacts are stored under `Attachments/Finance/YYYY/MM/`
 
 ### 2. Add transactions
 
@@ -185,6 +190,8 @@ Every transaction is stored as a markdown note with frontmatter.
 Transaction note placement follows the transaction date:
 - standalone mode stores notes under `<Expense folder>/YYYY/MM/`
 - `PARA Core` mode stores notes under `Records/Finance/Transactions/YYYY/MM/`
+
+When `PARA Core` mode is active, the standalone `Expense folder` setting is hidden because storage location is owned by the shared PARA domain.
 
 Typical fields:
 
@@ -321,6 +328,8 @@ Transaction notes themselves follow the same date-based layout under
 ## PARA Core integration
 
 When `obsidian-para-core` is installed, `Expense Manager` acts as a finance domain plugin.
+
+In this mode, storage is no longer configured through the standalone folder setting. `PARA Core` takes over storage routing, so the `Expense folder` setting is hidden and finance data is written into shared PARA paths.
 
 It registers:
 - finance domain
