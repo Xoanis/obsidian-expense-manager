@@ -254,7 +254,7 @@ export class FinanceTelegramBridge {
 			});
 			return {
 				processed: true,
-				answer: this.buildCapturePrompt(intent),
+				answer: null,
 			};
 		}
 
@@ -483,7 +483,7 @@ export class FinanceTelegramBridge {
 
 		return {
 			processed: true,
-			answer: `Finance capture opened for ${file.basename}. ${this.buildCapturePrompt(state.intent ?? 'neutral')}`,
+			answer: null,
 		};
 	}
 
