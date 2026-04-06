@@ -27,6 +27,7 @@
 	},
 	"dependencies": {
 		"chart.js": "^4.4.0",
+		"imapflow": "^1.2.18",
 		"jsqr": "^1.4.0",
 		"obsidian-para-suite-contracts": "git+https://github.com/Xoanis/obsidian-para-suite-contracts.git#v0.1.1",
 		"pdfjs-dist": "^5.5.207"

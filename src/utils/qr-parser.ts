@@ -22,15 +22,72 @@ export interface QrReceiptData {
 	n?: number;
 }
 
+const RECEIPT_QR_KEYS = new Set(['t', 's', 'fn', 'i', 'fp', 'n']);
+
+export function looksLikeRawReceiptQrString(value: string): boolean {
+	if (!value || typeof value !== 'string') {
+		return false;
+	}
+
+	const normalized = value.trim().replace(/^\?/, '');
+	if (!normalized) {
+		return false;
+	}
+
+	// Receipt QR payload is expected to be a compact key=value&key=value string,
+	// not a full email body, URL, or prose fragment.
+	if (normalized.includes('://') || /[\r\n]/.test(normalized) || /\s/.test(normalized)) {
+		return false;
+	}
+
+	const pairs = normalized.split('&').filter(Boolean);
+	if (pairs.length < 3) {
+		return false;
+	}
+
+	let recognizedKeys = 0;
+	let hasFn = false;
+	let hasStrongReceiptField = false;
+	for (const pair of pairs) {
+		const separatorIndex = pair.indexOf('=');
+		if (separatorIndex <= 0 || separatorIndex === pair.length - 1) {
+			return false;
+		}
+
+		const key = pair.slice(0, separatorIndex).trim();
+		const valuePart = pair.slice(separatorIndex + 1).trim();
+		if (!key || !valuePart) {
+			return false;
+		}
+
+		if (RECEIPT_QR_KEYS.has(key)) {
+			recognizedKeys += 1;
+		}
+		if (key === 'fn') {
+			hasFn = true;
+		}
+		if (key === 't' || key === 's' || key === 'i' || key === 'fp') {
+			hasStrongReceiptField = true;
+		}
+	}
+
+	return hasFn && hasStrongReceiptField && recognizedKeys >= 3;
+}
+
 export function parseQrReceiptString(qrString: string): QrReceiptData | null {
 	if (!qrString || typeof qrString !== 'string') {
+		return null;
+	}
+
+	const normalized = qrString.trim().replace(/^\?/, '');
+	if (!normalized) {
 		return null;
 	}
 
 	const result: QrReceiptData = {};
 	
 	// Split by & to get key=value pairs
-	const pairs = qrString.split('&');
+	const pairs = normalized.split('&');
 	
 	for (const pair of pairs) {
 		const [key, value] = pair.split('=');

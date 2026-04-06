@@ -368,10 +368,26 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 		logLabel: string,
 		logContext: Record<string, unknown>,
 	): Promise<Record<string, unknown>> {
+		const requestBody = {
+			model: this.settings.aiFinanceModel,
+			temperature: 0.1,
+			response_format: {
+				type: 'json_object',
+			},
+			messages,
+		};
+		const loggableRequestBody = this.toLoggableRequestBody(requestBody);
+		const serializedRequestBody = JSON.stringify(loggableRequestBody);
+
 		this.logger.info(`${logLabel}: sending request`, {
 			model: this.settings.aiFinanceModel,
 			baseUrl: this.settings.aiFinanceApiBaseUrl,
+			requestPayloadLength: serializedRequestBody.length,
+			requestPayloadPreview: serializedRequestBody.slice(0, 4000),
 			...logContext,
+		});
+		this.logger.debug(`${logLabel}: request payload`, {
+			requestPayload: serializedRequestBody,
 		});
 
 		const response = await requestUrl({
@@ -381,14 +397,7 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 				'Content-Type': 'application/json',
 				Authorization: `Bearer ${this.settings.aiFinanceApiKey}`,
 			},
-			body: JSON.stringify({
-				model: this.settings.aiFinanceModel,
-				temperature: 0.1,
-				response_format: {
-					type: 'json_object',
-				},
-				messages,
-			}),
+			body: JSON.stringify(requestBody),
 		});
 
 		this.logger.info(`${logLabel}: received response`, {
@@ -406,6 +415,45 @@ export class AiFinanceIntakeProvider implements FinanceIntakeProvider {
 			contentPreview: content.slice(0, 400),
 		});
 		return parseAiFinanceJsonObject(content);
+	}
+
+	private toLoggableRequestBody(value: unknown): unknown {
+		if (Array.isArray(value)) {
+			return value.map((item) => this.toLoggableRequestBody(item));
+		}
+
+		if (!value || typeof value !== 'object') {
+			return value;
+		}
+
+		const record = value as Record<string, unknown>;
+		if (record.type === 'image_url' && record.image_url && typeof record.image_url === 'object') {
+			const imageUrl = record.image_url as Record<string, unknown>;
+			const url = typeof imageUrl.url === 'string' ? imageUrl.url : '';
+			return {
+				...record,
+				image_url: {
+					...imageUrl,
+					url: this.toLoggableImageUrl(url),
+				},
+			};
+		}
+
+		const result: Record<string, unknown> = {};
+		for (const [key, nestedValue] of Object.entries(record)) {
+			result[key] = this.toLoggableRequestBody(nestedValue);
+		}
+		return result;
+	}
+
+	private toLoggableImageUrl(url: string): string {
+		if (!url.startsWith('data:')) {
+			return url;
+		}
+
+		const commaIndex = url.indexOf(',');
+		const header = commaIndex >= 0 ? url.slice(0, commaIndex) : url;
+		return `${header},<omitted;base64-length=${Math.max(url.length - header.length - 1, 0)}>`;
 	}
 
 	private toDocumentExtractionRequest(request: FinanceReceiptProposalRequest): DocumentExtractionRequest {

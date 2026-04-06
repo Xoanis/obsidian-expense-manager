@@ -1,6 +1,7 @@
 import { ExpenseManagerSettings } from '../settings';
 import { TransactionData, TransactionType } from '../types';
 import { ProverkaChekaClient } from '../utils/api-client';
+import { looksLikeRawReceiptQrString } from '../utils/qr-parser';
 import type {
 	FinanceCaptionMetadata,
 	FinanceIntakeIntent,
@@ -112,7 +113,7 @@ export class RuleBasedFinanceIntakeProvider implements FinanceIntakeProvider {
 	): Promise<TransactionData | null> {
 		const { head, metadata } = this.splitHeadAndMetadata(request.text);
 		const normalizedHead = head.trim();
-		if (!normalizedHead.includes('=') || !normalizedHead.includes('&')) {
+		if (!looksLikeRawReceiptQrString(normalizedHead)) {
 			return null;
 		}
 

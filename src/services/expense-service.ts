@@ -10,6 +10,8 @@ import {
 	ReportBudgetSummary,
 	ReportBudgetAlertLevel,
 	ReportBudgetAlertState,
+	TransactionStatus,
+	normalizeTransactionStatus,
 } from '../types';
 import { ExpenseManagerSettings } from '../settings';
 import { DashboardContributionMode } from '../settings';
@@ -21,14 +23,14 @@ import {
 	parseFrontmatter,
 	parseYamlFrontmatter,
 	parseDetailsFromContent,
-	generateFilename 
+	generateFilename,
+	parseSourceContextFromContent,
 } from '../utils/frontmatter';
 import {
 	createCustomPeriodDescriptor,
 	formatDateKey,
 	formatPeriodTitle,
 } from '../utils/report-periods';
-
 export class DuplicateTransactionError extends Error {
 	constructor() {
 		super('Duplicate transaction detected');
@@ -83,6 +85,10 @@ interface DashboardYearlyState {
 	warningMonths: number;
 	forecastMonths: number;
 	criticalMonths: number;
+}
+
+interface TransactionQueryOptions {
+	statuses?: TransactionStatus[];
 }
 
 export class ExpenseService {
@@ -183,16 +189,19 @@ export class ExpenseService {
 	/**
 	 * Get all transactions from vault
 	 */
-	async getAllTransactions(): Promise<TransactionData[]> {
+	async getAllTransactions(options?: TransactionQueryOptions): Promise<TransactionData[]> {
 		const files = this.getTransactionFiles();
 		const transactions: TransactionData[] = [];
+		const allowedStatuses = new Set<TransactionStatus>(options?.statuses?.length
+			? options.statuses
+			: ['recorded']);
 
 		for (const file of files) {
 			if (!(file instanceof TFile)) continue;
 			
 			try {
 				const transaction = await this.parseTransactionFile(file);
-				if (transaction) {
+				if (transaction && allowedStatuses.has(transaction.status ?? 'recorded')) {
 					transactions.push(transaction);
 				}
 			} catch (error) {
@@ -206,6 +215,14 @@ export class ExpenseService {
 		);
 
 		return transactions;
+	}
+
+	async getPendingApprovalTransactions(): Promise<TransactionData[]> {
+		return this.getAllTransactions({ statuses: ['pending-approval'] });
+	}
+
+	async getNeedsAttentionTransactions(): Promise<TransactionData[]> {
+		return this.getAllTransactions({ statuses: ['needs-attention'] });
 	}
 
 	/**
@@ -228,7 +245,9 @@ export class ExpenseService {
 			const content = await this.app.vault.cachedRead(file);
 			const frontmatter = parseYamlFrontmatter(content);
 			
-			if (!frontmatter || !frontmatter.type || !frontmatter.amount) {
+			const hasType = typeof frontmatter?.type === 'string' && String(frontmatter.type).trim().length > 0;
+			const hasAmount = frontmatter && Object.prototype.hasOwnProperty.call(frontmatter, 'amount');
+			if (!frontmatter || !hasType || !hasAmount) {
 				return null;
 			}
 
@@ -237,6 +256,7 @@ export class ExpenseService {
 			return {
 				id: file.path,
 				type: this.normalizeTransactionType(frontmatter.type as string),
+				status: normalizeTransactionStatus(frontmatter.status),
 				amount: Number(frontmatter.amount),
 				currency: (frontmatter.currency as string) || 'RUB',
 				dateTime: (frontmatter.dateTime as string) || (frontmatter.date as string) || '',
@@ -247,6 +267,7 @@ export class ExpenseService {
 				category: frontmatter.category as string,
 				details: details,
 				artifact: frontmatter.artifact as string | undefined,
+				sourceContext: parseSourceContextFromContent(content),
 				source: (frontmatter.source as any) || 'manual',
 				fd: frontmatter.fd as string | undefined,
 				fn: frontmatter.fn as string | undefined,
@@ -404,7 +425,7 @@ export class ExpenseService {
 		amount: number,
 		type: TransactionData['type'],
 	): Promise<boolean> {
-		const allTransactions = await this.getAllTransactions();
+		const allTransactions = await this.getAllTransactions({ statuses: ['recorded', 'pending-approval'] });
 		const transactionTime = new Date(dateTime).getTime();
 
 		for (const t of allTransactions) {
@@ -1432,7 +1453,7 @@ export class ExpenseService {
 		const filename = generateFilename(data).replace(/\.md$/i, '');
 		const tags = Array.from(new Set(['finance', data.type, ...data.tags]));
 
-		return this.paraCoreApi.createNote({
+		const file = await this.paraCoreApi.createNote({
 			type,
 			title: data.description || filename,
 			folderOverride: this.getTransactionFolderPath(data.dateTime),
@@ -1440,6 +1461,7 @@ export class ExpenseService {
 			openAfterCreate: false,
 			frontmatterOverrides: {
 				dateTime: data.dateTime,
+				status: normalizeTransactionStatus(data.status),
 				amount: data.amount,
 				currency: data.currency,
 				description: data.description,
@@ -1455,6 +1477,23 @@ export class ExpenseService {
 				details: data.details ?? [],
 			},
 		});
+		await this.appendSourceContextSectionIfNeeded(file, data.sourceContext);
+		return file;
+	}
+
+	private async appendSourceContextSectionIfNeeded(file: TFile, sourceContext: string | undefined): Promise<void> {
+		const normalized = sourceContext?.trim();
+		if (!normalized) {
+			return;
+		}
+
+		const content = await this.app.vault.cachedRead(file);
+		if (content.includes('## Source Context')) {
+			return;
+		}
+
+		const separator = content.endsWith('\n') ? '\n' : '\n\n';
+		await this.app.vault.modify(file, `${content}${separator}## Source Context\n\n${normalized}\n`);
 	}
 
 	async upsertReportFile(

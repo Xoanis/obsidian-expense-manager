@@ -111,6 +111,7 @@ It also moves legacy flat transaction notes into the dated `YYYY/MM` layout.
 | Command | What it does |
 |---|---|
 | `Add finance record` | Create a finance record from text, signed input, QR text, or receipt image |
+| `Sync finance emails` | Run the email finance sync pipeline and create pending-approval notes from provider messages |
 | `Open current month finance report` | Open the current month report in a modal |
 | `Save current month finance report` | Save the current month report note to the vault |
 | `Generate finance report for custom period` | Build a report for any date range |
@@ -180,6 +181,83 @@ Current PNG charts:
 - `Expense pie`
 - `Year trend`
 - `Balance trend`
+
+## Experimental email intake bridge
+
+The plugin now includes the first end-to-end email intake pipeline:
+
+- manual sync command
+- coarse include/exclude filtering
+- message planning into text, image, and PDF intake units
+- creation of `pending-approval` finance notes
+
+Current provider option:
+
+- `IMAP (login + app password)`
+- `HTTP JSON bridge`
+
+IMAP setup in plugin settings:
+
+- `Email finance provider` -> `IMAP (login + app password)`
+- `Mailbox scope` -> optional folder name, defaults to `INBOX`
+- `IMAP host` -> for example `imap.gmail.com`
+- `IMAP port` -> usually `993`
+- `IMAP secure connection` -> keep enabled for direct TLS IMAP
+- `IMAP username` -> mailbox login
+- `IMAP app password` -> provider-specific application password
+
+Current IMAP behavior:
+
+- fetches messages newer than the last successful sync boundary
+- opens the selected mailbox in read-only mode
+- extracts `text/plain`, `text/html`, and attachment parts
+- supports attachment fan-out into receipt/PDF routes
+- does not mark messages as seen or move them between folders
+
+Expected endpoint shape:
+
+- `GET <base-url>/messages`
+- optional query params:
+  - `since`
+  - `cursor`
+  - `mailboxScope`
+- optional `Authorization: Bearer <token>` header
+
+Expected JSON response shape:
+
+```json
+{
+  "messages": [
+    {
+      "id": "msg-1",
+      "threadId": "thread-1",
+      "from": "shop@example.com",
+      "subject": "Your receipt",
+      "receivedAt": "2026-04-04T10:15:00.000Z",
+      "textBody": "Payment received...",
+      "htmlBody": "<p>Payment received...</p>",
+      "attachmentNames": ["receipt.pdf"],
+      "attachments": [
+        {
+          "id": "att-1",
+          "fileName": "receipt.pdf",
+          "mimeType": "application/pdf",
+          "contentBase64": "JVBERi0xLjQK..."
+        }
+      ]
+    }
+  ],
+  "nextCursor": "cursor-2"
+}
+```
+
+Current behavior:
+
+- image attachments go through the receipt route
+- PDF attachments go through the PDF AI route
+- text-only emails go through the text AI route
+- created notes are saved with status `pending-approval`
+- pending notes do not affect reports or analytics until approved
 
 ## Data model
 
@@ -349,6 +427,7 @@ This means finance becomes part of the same operational layer as your PARA vault
 Internal service interaction and the updated Telegram finance intake flow are documented in:
 
 - [docs/service-architecture.md](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/docs/service-architecture.md)
+- [docs/email-finance-intake-architecture.md](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/docs/email-finance-intake-architecture.md)
 - [docs/ai-finance-intake-provider.md](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/docs/ai-finance-intake-provider.md)
 
 ## Development

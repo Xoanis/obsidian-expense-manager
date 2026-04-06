@@ -6,6 +6,19 @@ import { TFile } from 'obsidian';
 export type TransactionType = 'expense' | 'income';
 
 /**
+ * Lifecycle state of a finance transaction note
+ */
+export type TransactionStatus = 'recorded' | 'pending-approval' | 'needs-attention' | 'archived';
+
+export function normalizeTransactionStatus(value: unknown): TransactionStatus {
+	if (value === 'pending-approval' || value === 'needs-attention' || value === 'archived' || value === 'recorded') {
+		return value;
+	}
+
+	return 'recorded';
+}
+
+/**
  * Core interface for expense/income data
  */
 export interface TransactionData {
@@ -27,6 +40,9 @@ export interface TransactionData {
 	/** Short human-readable description */
 	description: string;
 
+	/** Transaction lifecycle status */
+	status?: TransactionStatus;
+
 	/** Legacy alias kept for backward compatibility while reading old notes */
 	comment?: string;
 
@@ -47,6 +63,9 @@ export interface TransactionData {
 
 	/** Linked artifact such as a receipt image */
 	artifact?: string;
+
+	/** Persisted source context for review flows, e.g. raw email metadata/body preview */
+	sourceContext?: string;
 
 	/** Transient artifact payload before note creation */
 	artifactBytes?: ArrayBuffer;
@@ -86,6 +105,7 @@ export type TransactionSource =
 	| 'manual'           // Manual entry via modal
 	| 'qr'              // QR code from receipt
 	| 'telegram'        // Telegram bot
+	| 'email'           // Email-derived finance proposal or transaction
 	| 'pdf'             // PDF bank statement (future)
 	| 'api';            // External API integration
 

@@ -1,6 +1,7 @@
 import { normalizePath } from 'obsidian';
 import { DashboardContributionMode } from '../../settings';
 import { IParaCoreApi } from './types';
+import { buildFinanceReviewQueueNoteContent } from '../../review/finance-review-queue-note';
 
 export function registerFinanceTemplateContributions(
 	api: IParaCoreApi,
@@ -159,6 +160,7 @@ export function registerFinanceTemplateContributions(
 			'',
 			'### Telegram',
 			'- `/finance_record` - capture a finance proposal from text, signed amounts, raw receipt QR text, image, or PDF.',
+			'- `/finance_review` - review pending approval and needs-attention finance queues.',
 			'- `/finance_summary` - show monthly finance summary.',
 			'- `/finance_report` - open monthly finance report.',
 			'- Project and area Telegram cards can start focused `/finance_record` capture with fixed context.',
@@ -169,6 +171,15 @@ export function registerFinanceTemplateContributions(
 			'- `/finance_record +5000 Bonus`',
 			'- `/finance_record t=20260316T1007&s=1550.00&fn=9999078900012345&i=12345&fp=2890123456&n=1`',
 		].join('\n'),
+	});
+
+	api.registerTemplateContribution({
+		id: 'finance.review-queue',
+		domainId: 'finance',
+		target: 'review',
+		slot: 'review.domainViews',
+		order: 100,
+		render: () => buildFinanceReviewQueueNoteContent(transactionsFolder),
 	});
 }
 

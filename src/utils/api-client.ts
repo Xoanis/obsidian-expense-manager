@@ -1,5 +1,5 @@
 import { TransactionData, TransactionDetail } from '../types';
-import { parseQrReceiptString, QrReceiptData, operationTypeToTransactionType } from './qr-parser';
+import { looksLikeRawReceiptQrString, parseQrReceiptString, QrReceiptData, operationTypeToTransactionType } from './qr-parser';
 import { getPluginLogger } from './plugin-debug-log';
 import jsQR from 'jsqr';
 
@@ -186,6 +186,14 @@ export class ProverkaChekaClient {
 	}> {
 		try {
 			const normalizedQrString = qrString.trim();
+			if (!looksLikeRawReceiptQrString(normalizedQrString)) {
+				return {
+					data: this.createEmptyTransaction(),
+					source: 'local',
+					hasError: true,
+					error: 'Invalid QR code format - expected raw receipt QR payload'
+				};
+			}
 			const qrData = parseQrReceiptString(normalizedQrString);
 
 			if (!qrData) {

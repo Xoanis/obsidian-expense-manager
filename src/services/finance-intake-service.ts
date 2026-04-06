@@ -7,7 +7,7 @@ import {
 } from './document-extraction-service';
 import { AiFinanceIntakeProvider } from './ai-finance-intake-provider';
 import { RuleBasedFinanceIntakeProvider } from './rule-based-finance-intake-provider';
-import { parseQrReceiptString } from '../utils/qr-parser';
+import { looksLikeRawReceiptQrString } from '../utils/qr-parser';
 import type {
 	FinanceCaptionMetadata,
 	FinanceIntakeProvider,
@@ -194,7 +194,7 @@ export class FinanceIntakeService {
 	}
 
 	private looksLikeReceiptQrText(text: string): boolean {
-		return Boolean(parseQrReceiptString(this.getPrimaryTextPayload(text)));
+		return looksLikeRawReceiptQrString(this.getPrimaryTextPayload(text));
 	}
 
 	private isAiTextEnabled(): boolean {

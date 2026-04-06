@@ -1,10 +1,10 @@
-import { TransactionData } from '../../types';
+import { TransactionData, TransactionStatus } from '../../types';
 import { NoteTypeDefinition, TemplateContext } from './types';
 
 type FinanceTransactionNoteType = 'finance-expense' | 'finance-income';
-type FinanceTransactionStatus = 'recorded' | 'archived';
+type FinanceTransactionStatus = TransactionStatus;
 type FinanceReportStatus = 'generated' | 'archived';
-const FINANCE_TRANSACTION_SOURCES = ['manual', 'qr', 'telegram', 'pdf', 'api'] as const;
+const FINANCE_TRANSACTION_SOURCES = ['manual', 'qr', 'telegram', 'email', 'pdf', 'api'] as const;
 const FINANCE_REPORT_PERIOD_KINDS = ['custom', 'month', 'quarter', 'half-year', 'year'] as const;
 
 interface FinanceTransactionFrontmatter {
@@ -71,7 +71,7 @@ function createFinanceTransactionNoteType(
 		folderKey: TRANSACTIONS_FOLDER_KEY,
 		fileNameStrategy: 'title',
 		requiredFields: ['type', 'status', 'domain', 'created', 'dateTime', 'amount', 'currency', 'description', 'source', 'tags'],
-		allowedStatuses: ['recorded', 'archived'] as const,
+		allowedStatuses: ['recorded', 'pending-approval', 'needs-attention', 'archived'] as const,
 		defaultFrontmatter: (date, timestamp) => ({
 			type,
 			status: 'recorded',
@@ -90,7 +90,6 @@ function createFinanceTransactionNoteType(
 			details: [],
 		}),
 		template: (ctx) => renderFinanceTransactionTemplate(ctx, categoryTag),
-		validate: (frontmatter: Partial<FinanceTransactionFrontmatter>) => validateFinanceTransactionFrontmatter(frontmatter, categoryTag),
 	};
 }
 
@@ -158,7 +157,6 @@ function createFinanceReportNoteType(): NoteTypeDefinition<FinanceReportFrontmat
 			tags: ['finance', 'report'],
 		}),
 		template: (ctx) => renderFinanceReportTemplate(ctx),
-		validate: validateFinanceReportFrontmatter,
 	};
 }
 

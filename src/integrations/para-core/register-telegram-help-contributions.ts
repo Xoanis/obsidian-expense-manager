@@ -8,6 +8,7 @@ export function registerFinanceTelegramHelpContributions(api: IParaCoreApi): voi
 		renderHelp: () => [
 			'Finance Telegram commands:',
 			'/finance_record - capture a finance proposal from text, raw receipt QR text, image, or PDF',
+			'/finance_review - show finance review queues for pending approval and needs attention',
 			'/finance_budget - set budget for the current monthly report',
 			'/finance_summary - show monthly finance summary',
 			'/finance_report - open monthly finance report',
@@ -18,6 +19,7 @@ export function registerFinanceTelegramHelpContributions(api: IParaCoreApi): voi
 			'/finance_record income 50000 Salary | area=Career',
 			'/finance_record +5000 Bonus',
 			'/finance_record t=20260316T1007&s=1550.00&fn=9999078900012345&i=12345&fp=2890123456&n=1',
+			'/finance_review',
 			'/finance_report 2026-03',
 		].join('\n'),
 	});

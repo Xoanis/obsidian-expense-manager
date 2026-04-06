@@ -1,7 +1,14 @@
 import { App, TFile } from 'obsidian';
-import type { IParaCoreApi, ParaLogger } from '../integrations/para-core/types';
+import type { IParaCoreApi } from '../integrations/para-core/types';
 
 export interface PluginLogger {
+	info(message: string, ...args: unknown[]): void;
+	warn(message: string, ...args: unknown[]): void;
+	error(message: string, ...args: unknown[]): void;
+	debug(message: string, ...args: unknown[]): void;
+}
+
+interface ParaLoggerLike {
 	info(message: string, ...args: unknown[]): void;
 	warn(message: string, ...args: unknown[]): void;
 	error(message: string, ...args: unknown[]): void;
@@ -33,7 +40,7 @@ export class ConsolePluginLogger implements PluginLogger {
 }
 
 export class ParaCorePluginLogger implements PluginLogger {
-	constructor(private readonly logger: ParaLogger) {}
+	constructor(private readonly logger: ParaLoggerLike) {}
 
 	info(message: string, ...args: unknown[]): void {
 		this.logger.info(message, ...args);
@@ -55,8 +62,9 @@ export class ParaCorePluginLogger implements PluginLogger {
 let activePluginLogger: PluginLogger = new ConsolePluginLogger();
 
 export function createPluginLogger(scope: string, paraCoreApi?: IParaCoreApi | null): PluginLogger {
-	if (paraCoreApi && typeof paraCoreApi.createLogger === 'function') {
-		return new ParaCorePluginLogger(paraCoreApi.createLogger(scope));
+	const createLogger = (paraCoreApi as unknown as { createLogger?: (scope: string) => ParaLoggerLike } | null)?.createLogger;
+	if (typeof createLogger === 'function') {
+		return new ParaCorePluginLogger(createLogger(scope));
 	}
 
 	return new ConsolePluginLogger(scope);
@@ -71,11 +79,12 @@ export function getPluginLogger(): PluginLogger {
 }
 
 export async function openSharedRuntimeLog(app: App, paraCoreApi?: IParaCoreApi | null): Promise<TFile | null> {
-	if (!paraCoreApi || typeof paraCoreApi.getRuntimeLogPath !== 'function') {
+	const getRuntimeLogPath = (paraCoreApi as unknown as { getRuntimeLogPath?: () => string } | null)?.getRuntimeLogPath;
+	if (typeof getRuntimeLogPath !== 'function') {
 		return null;
 	}
 
-	const path = paraCoreApi.getRuntimeLogPath();
+	const path = getRuntimeLogPath();
 	const existing = app.vault.getAbstractFileByPath(path);
 	return existing instanceof TFile ? existing : null;
 }

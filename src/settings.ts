@@ -1,6 +1,93 @@
 import { TransactionType } from './types';
 
 export type DashboardContributionMode = 'simple' | 'interactive';
+export type EmailFinanceProviderKind = 'none' | 'imap' | 'http-json';
+export type EmailFinanceCoarseFilterField = 'from' | 'subject' | 'body' | 'attachmentName' | 'any';
+export type EmailFinanceCoarseFilterMode = 'contains' | 'regex';
+export type EmailFinanceCoarseFilterAction = 'include' | 'exclude';
+
+export interface EmailFinanceCoarseFilterRule {
+	id: string;
+	enabled: boolean;
+	field: EmailFinanceCoarseFilterField;
+	mode: EmailFinanceCoarseFilterMode;
+	pattern: string;
+	action: EmailFinanceCoarseFilterAction;
+}
+
+export interface EmailFinanceSyncState {
+	lastSuccessfulSyncAt: string | null;
+	cursor: string | null;
+	lastAttemptAt: string | null;
+	lastSyncStatus: 'idle' | 'success' | 'failed' | 'skipped';
+	lastSyncSummary: string | null;
+}
+
+export function createDefaultEmailFinanceCoarseFilterRules(): EmailFinanceCoarseFilterRule[] {
+	return [
+		{ id: 'email-include-receipt', enabled: true, field: 'any', mode: 'contains', pattern: 'receipt', action: 'include' },
+		{ id: 'email-include-invoice', enabled: true, field: 'any', mode: 'contains', pattern: 'invoice', action: 'include' },
+		{ id: 'email-include-payment', enabled: true, field: 'any', mode: 'contains', pattern: 'payment', action: 'include' },
+		{ id: 'email-include-чек', enabled: true, field: 'any', mode: 'contains', pattern: 'чек', action: 'include' },
+	];
+}
+
+export function createDefaultEmailFinanceSyncState(): EmailFinanceSyncState {
+	return {
+		lastSuccessfulSyncAt: null,
+		cursor: null,
+		lastAttemptAt: null,
+		lastSyncStatus: 'idle',
+		lastSyncSummary: null,
+	};
+}
+
+export function formatEmailFinanceCoarseFilterRules(rules: EmailFinanceCoarseFilterRule[]): string {
+	return rules.map((rule) => [
+		rule.enabled ? 'enabled' : 'disabled',
+		rule.action,
+		rule.mode,
+		rule.field,
+		rule.pattern,
+	].join('|')).join('\n');
+}
+
+export function parseEmailFinanceCoarseFilterRules(value: string): EmailFinanceCoarseFilterRule[] {
+	const lines = value
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0 && !line.startsWith('#'));
+
+	return lines.map((line, index) => {
+		const [rawEnabled, rawAction, rawMode, rawField, ...patternParts] = line.split('|');
+		const pattern = patternParts.join('|').trim();
+		if (!pattern) {
+			throw new Error(`Rule ${index + 1}: missing pattern`);
+		}
+
+		if (rawEnabled !== 'enabled' && rawEnabled !== 'disabled') {
+			throw new Error(`Rule ${index + 1}: first token must be "enabled" or "disabled"`);
+		}
+		if (rawAction !== 'include' && rawAction !== 'exclude') {
+			throw new Error(`Rule ${index + 1}: action must be "include" or "exclude"`);
+		}
+		if (rawMode !== 'contains' && rawMode !== 'regex') {
+			throw new Error(`Rule ${index + 1}: mode must be "contains" or "regex"`);
+		}
+		if (rawField !== 'from' && rawField !== 'subject' && rawField !== 'body' && rawField !== 'attachmentName' && rawField !== 'any') {
+			throw new Error(`Rule ${index + 1}: field must be from|subject|body|attachmentName|any`);
+		}
+
+		return {
+			id: `email-rule-${index + 1}-${rawField}-${rawAction}`,
+			enabled: rawEnabled === 'enabled',
+			action: rawAction,
+			mode: rawMode,
+			field: rawField,
+			pattern,
+		};
+	});
+}
 
 /**
  * Plugin settings interface
@@ -83,6 +170,48 @@ export interface ExpenseManagerSettings {
 
 	/** Model name for AI-backed finance text extraction */
 	aiFinanceModel: string;
+
+	/** Enable email-based finance intake scaffolding */
+	enableEmailFinanceIntake: boolean;
+
+	/** Mail provider kind used for finance sync */
+	emailFinanceProvider: EmailFinanceProviderKind;
+
+	/** Optional mailbox or folder scope */
+	emailFinanceMailboxScope: string;
+
+	/** IMAP server host */
+	emailFinanceImapHost: string;
+
+	/** IMAP server port */
+	emailFinanceImapPort: number;
+
+	/** Use direct TLS for IMAP */
+	emailFinanceImapSecure: boolean;
+
+	/** IMAP username */
+	emailFinanceImapUser: string;
+
+	/** IMAP password or app password */
+	emailFinanceImapPassword: string;
+
+	/** Base URL for a provider-compatible mail JSON endpoint */
+	emailFinanceProviderBaseUrl: string;
+
+	/** Auth token for the provider-compatible mail JSON endpoint */
+	emailFinanceProviderAuthToken: string;
+
+	/** Enable scheduled email finance sync */
+	enableScheduledEmailFinanceSync: boolean;
+
+	/** Interval for scheduled email sync, in minutes */
+	emailFinanceSyncIntervalMinutes: number;
+
+	/** User-editable coarse filter rules */
+	emailFinanceCoarseFilterRules: EmailFinanceCoarseFilterRule[];
+
+	/** Persisted delta-sync state */
+	emailFinanceSyncState: EmailFinanceSyncState;
 }
 
 /**
@@ -130,4 +259,18 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	aiFinanceApiBaseUrl: 'https://api.openai.com/v1',
 	aiFinanceApiKey: '',
 	aiFinanceModel: 'gpt-4.1-mini',
+	enableEmailFinanceIntake: false,
+	emailFinanceProvider: 'none',
+	emailFinanceMailboxScope: '',
+	emailFinanceImapHost: '',
+	emailFinanceImapPort: 993,
+	emailFinanceImapSecure: true,
+	emailFinanceImapUser: '',
+	emailFinanceImapPassword: '',
+	emailFinanceProviderBaseUrl: '',
+	emailFinanceProviderAuthToken: '',
+	enableScheduledEmailFinanceSync: false,
+	emailFinanceSyncIntervalMinutes: 15,
+	emailFinanceCoarseFilterRules: createDefaultEmailFinanceCoarseFilterRules(),
+	emailFinanceSyncState: createDefaultEmailFinanceSyncState(),
 };

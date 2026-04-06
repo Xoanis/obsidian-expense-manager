@@ -39,6 +39,11 @@ const CALLBACK_ACTIONS = {
 	projectBudgetPrompt: 'pb',
 	monthlyReportOpen: 'mr',
 	monthlyChartSend: 'mc',
+	reviewRefresh: 'rr',
+	reviewShowPending: 'rp',
+	reviewShowAttention: 'rt',
+	reviewShowAll: 'ra',
+	reviewOpenNextPending: 'rn',
 	proposalConfirm: 'pc',
 	proposalReject: 'pr',
 	proposalSetCategory: 'ct',
@@ -55,9 +60,10 @@ const CALLBACK_UNIT_ALIAS = 'f';
 
 type CaptureTarget = 'project' | 'area' | 'generic';
 type SelectorField = 'project' | 'area' | 'category';
+type ReviewQueueMode = 'all' | 'pending' | 'attention';
 
 interface CallbackTokenState {
-	kind: 'capture' | 'project-budget' | 'monthly-report' | 'monthly-chart' | 'proposal';
+	kind: 'capture' | 'project-budget' | 'monthly-report' | 'monthly-chart' | 'proposal' | 'review';
 	createdAt: number;
 	path?: string;
 	page?: number;
@@ -86,6 +92,7 @@ interface PendingFinanceProposal {
 	data: TransactionData;
 	createdAt: number;
 	updatedAt: number;
+	sourceFilePath?: string;
 }
 
 export class FinanceTelegramBridge {
@@ -241,6 +248,27 @@ export class FinanceTelegramBridge {
 
 			return this.applyCurrentMonthBudgetInput(args);
 		}
+		if (command === 'finance_review') {
+			try {
+				const mode = this.parseReviewQueueMode(message.command.args);
+				if (this.api) {
+					await this.showReviewQueueMessage(mode);
+					return {
+						processed: true,
+						answer: null,
+					};
+				}
+				return {
+					processed: true,
+					answer: await this.buildFinanceReviewQueueMessage(mode),
+				};
+			} catch (error) {
+				return {
+					processed: true,
+					answer: `Error loading finance review queue: ${(error as Error).message}`,
+				};
+			}
+		}
 		if (command !== 'finance_record') {
 			return { processed: false, answer: null };
 		}
@@ -392,6 +420,38 @@ export class FinanceTelegramBridge {
 					answer: `Error generating chart: ${(error as Error).message}`,
 				};
 			}
+		}
+
+		if (
+			payload.action === CALLBACK_ACTIONS.reviewRefresh
+			|| payload.action === CALLBACK_ACTIONS.reviewShowPending
+			|| payload.action === CALLBACK_ACTIONS.reviewShowAttention
+			|| payload.action === CALLBACK_ACTIONS.reviewShowAll
+			|| payload.action === CALLBACK_ACTIONS.reviewOpenNextPending
+		) {
+			if (!payload.token) {
+				return { processed: true, answer: 'Finance review action is missing context.' };
+			}
+
+			const state = this.callbackTokens.get(payload.token);
+			if (!state || state.kind !== 'review') {
+				return { processed: true, answer: 'Finance review queue expired. Run /finance_review again.' };
+			}
+
+			if (payload.action === CALLBACK_ACTIONS.reviewOpenNextPending) {
+				return this.openNextPendingReviewProposal(callback.messageId);
+			}
+
+			const mode: ReviewQueueMode = payload.action === CALLBACK_ACTIONS.reviewShowPending
+				? 'pending'
+				: payload.action === CALLBACK_ACTIONS.reviewShowAttention
+					? 'attention'
+					: payload.action === CALLBACK_ACTIONS.reviewShowAll
+						? 'all'
+						: this.parseReviewQueueMode(state.value);
+			await this.showReviewQueueMessage(mode, callback.messageId);
+			await this.api.answerCallbackQuery?.(callback.callbackId);
+			return { processed: true, answer: null };
 		}
 
 		if (
@@ -986,12 +1046,16 @@ export class FinanceTelegramBridge {
 		return lines.join('\n');
 	}
 
-	private async sendProposal(data: TransactionData, messageId?: number): Promise<void> {
+	private async sendProposal(
+		data: TransactionData,
+		messageId?: number,
+		options?: { sourceFilePath?: string },
+	): Promise<void> {
 		if (!this.api) {
 			return;
 		}
 
-		const proposal = this.createProposal(data);
+		const proposal = this.createProposal(data, options);
 		await this.showProposalMessage(proposal, messageId);
 	}
 
@@ -1016,7 +1080,10 @@ export class FinanceTelegramBridge {
 		return sent.messageId;
 	}
 
-	private createProposal(data: TransactionData): PendingFinanceProposal {
+	private createProposal(
+		data: TransactionData,
+		options?: { sourceFilePath?: string },
+	): PendingFinanceProposal {
 		this.cleanupExpiredProposals();
 		this.proposalCounter += 1;
 		const now = Date.now();
@@ -1028,6 +1095,7 @@ export class FinanceTelegramBridge {
 			},
 			createdAt: now,
 			updatedAt: now,
+			sourceFilePath: options?.sourceFilePath,
 		};
 		this.proposals.set(proposal.id, proposal);
 		return proposal;
@@ -1123,8 +1191,152 @@ export class FinanceTelegramBridge {
 		if (proposal.data.artifactFileName) {
 			lines.push(`Artifact: ${proposal.data.artifactFileName}`);
 		}
-		lines.push('', footer ?? 'Confirm to save this record to the vault, or refine the context first.');
+		lines.push(
+			'',
+			footer ?? (
+				proposal.sourceFilePath
+					? 'Confirm to mark this pending note as recorded, or refine the fields first.'
+					: 'Confirm to save this record to the vault, or refine the context first.'
+			),
+		);
 		return lines.join('\n');
+	}
+
+	private async buildFinanceReviewQueueMessage(mode: ReviewQueueMode = 'all'): Promise<string> {
+		const pending = await this.expenseService.getPendingApprovalTransactions();
+		const attention = await this.expenseService.getNeedsAttentionTransactions();
+		const lines = [
+			'Finance review queue',
+			`Pending approval: ${pending.length}`,
+			`Needs attention: ${attention.length}`,
+		];
+
+		if (mode !== 'attention') {
+			lines.push('', ...this.formatReviewQueueSection('Pending approval', pending, 5));
+		}
+
+		if (mode !== 'pending') {
+			lines.push('', ...this.formatReviewQueueSection('Needs attention', attention, 5));
+		}
+
+		if (pending.length === 0 && attention.length === 0) {
+			lines.push('', 'Queue is empty.');
+		} else {
+			lines.push('', 'Use the Obsidian finance review queue note for the full list.');
+		}
+
+		return lines.join('\n');
+	}
+
+	private async showReviewQueueMessage(mode: ReviewQueueMode, messageId?: number): Promise<void> {
+		if (!this.api) {
+			return;
+		}
+
+		const pending = await this.expenseService.getPendingApprovalTransactions();
+		const attention = await this.expenseService.getNeedsAttentionTransactions();
+		const text = await this.buildFinanceReviewQueueMessage(mode);
+		const keyboard = this.buildReviewQueueKeyboard(mode, pending.length, attention.length);
+		if (typeof messageId === 'number' && this.api.editMessage) {
+			await this.api.editMessage(messageId, text, { inlineKeyboard: keyboard });
+			return;
+		}
+
+		await this.api.sendMessage(text, { inlineKeyboard: keyboard });
+	}
+
+	private formatReviewQueueSection(title: string, transactions: TransactionData[], limit: number): string[] {
+		const lines = [`${title}:`];
+		if (transactions.length === 0) {
+			lines.push('- none');
+			return lines;
+		}
+
+		for (const transaction of transactions.slice(0, limit)) {
+			const timestamp = this.formatReviewQueueDate(transaction.dateTime);
+			const amount = transaction.amount > 0
+				? `${transaction.amount.toFixed(2)} ${transaction.currency}`
+				: 'amount pending';
+			lines.push(`- ${timestamp} | ${amount} | ${transaction.description}`);
+		}
+
+		if (transactions.length > limit) {
+			lines.push(`- ...and ${transactions.length - limit} more`);
+		}
+
+		return lines;
+	}
+
+	private formatReviewQueueDate(value: string): string {
+		const date = new Date(value);
+		if (Number.isNaN(date.getTime())) {
+			return value;
+		}
+
+		return date.toISOString().replace('T', ' ').slice(0, 16);
+	}
+
+	private buildReviewQueueKeyboard(
+		mode: ReviewQueueMode,
+		pendingCount: number,
+		attentionCount: number,
+	): TelegramInlineKeyboard {
+		return [
+			[
+				this.buildReviewQueueButton(
+					mode === 'all' ? '[All]' : 'All',
+					CALLBACK_ACTIONS.reviewShowAll,
+					'all',
+				),
+				this.buildReviewQueueButton(
+					mode === 'pending' ? `[Pending ${pendingCount}]` : `Pending ${pendingCount}`,
+					CALLBACK_ACTIONS.reviewShowPending,
+					'pending',
+				),
+				this.buildReviewQueueButton(
+					mode === 'attention' ? `[Attention ${attentionCount}]` : `Attention ${attentionCount}`,
+					CALLBACK_ACTIONS.reviewShowAttention,
+					'attention',
+				),
+			],
+			[
+				this.buildReviewQueueButton('Refresh', CALLBACK_ACTIONS.reviewRefresh, mode),
+				this.buildReviewQueueButton(
+					pendingCount > 0 ? `Open next pending (${pendingCount})` : 'No pending items',
+					pendingCount > 0 ? CALLBACK_ACTIONS.reviewOpenNextPending : CALLBACK_ACTIONS.reviewRefresh,
+					mode,
+				),
+			],
+		];
+	}
+
+	private buildReviewQueueButton(
+		text: string,
+		action: typeof CALLBACK_ACTIONS[keyof typeof CALLBACK_ACTIONS],
+		mode: ReviewQueueMode,
+	) {
+		return {
+			text,
+			callbackData: this.encodeCallbackPayload({
+				unit: PLUGIN_UNIT_NAME,
+				action,
+				token: this.createCallbackToken({
+					kind: 'review',
+					value: mode,
+				}),
+			}),
+		};
+	}
+
+	private parseReviewQueueMode(rawArgs?: string): ReviewQueueMode {
+		const normalized = rawArgs?.trim().toLowerCase() ?? '';
+		if (normalized === 'pending') {
+			return 'pending';
+		}
+		if (normalized === 'attention' || normalized === 'needs-attention' || normalized === 'needs_attention') {
+			return 'attention';
+		}
+		return 'all';
 	}
 
 	private cleanupExpiredProposals(): void {
@@ -1146,15 +1358,35 @@ export class FinanceTelegramBridge {
 		}
 
 		try {
-			await this.expenseService.createTransaction(proposal.data);
+			if (proposal.sourceFilePath) {
+				const file = this.app.vault.getAbstractFileByPath(proposal.sourceFilePath);
+				if (!(file instanceof TFile)) {
+					return { processed: true, answer: 'Pending finance note was not found.' };
+				}
+
+				await this.expenseService.updateTransaction(file, {
+					...proposal.data,
+					status: 'recorded',
+				});
+			} else {
+				await this.expenseService.createTransaction(proposal.data);
+			}
 			this.proposals.delete(proposalId);
 			if (typeof messageId === 'number' && this.api?.editMessage) {
 				await this.api.editMessage(
 					messageId,
-					this.formatSuccessMessage(proposal.data, 'Saved from Telegram finance proposal.'),
+					this.formatSuccessMessage(
+						proposal.data,
+						proposal.sourceFilePath
+							? 'Confirmed from finance review queue.'
+							: 'Saved from Telegram finance proposal.',
+					),
 				);
 			}
-			return { processed: true, answer: 'Finance transaction saved.' };
+			return {
+				processed: true,
+				answer: proposal.sourceFilePath ? 'Finance review item confirmed.' : 'Finance transaction saved.',
+			};
 		} catch (error) {
 			if (error instanceof DuplicateTransactionError) {
 				return { processed: true, answer: 'Duplicate transaction found. Proposal was not saved.' };
@@ -1176,13 +1408,53 @@ export class FinanceTelegramBridge {
 		}
 
 		this.proposals.delete(proposalId);
+		if (proposal.sourceFilePath) {
+			const file = this.app.vault.getAbstractFileByPath(proposal.sourceFilePath);
+			if (file instanceof TFile) {
+				await this.expenseService.updateTransaction(file, {
+					status: 'archived',
+				});
+			}
+		}
 		if (typeof messageId === 'number' && this.api?.editMessage) {
 			await this.api.editMessage(
 				messageId,
-				this.formatProposalMessage(proposal, 'Proposal rejected. Nothing was written to the vault.'),
+				this.formatProposalMessage(
+					proposal,
+					proposal.sourceFilePath
+						? 'Review item archived. Nothing else was written to the vault.'
+						: 'Proposal rejected. Nothing was written to the vault.',
+				),
 			);
 		}
-		return { processed: true, answer: 'Finance proposal rejected.' };
+		return {
+			processed: true,
+			answer: proposal.sourceFilePath ? 'Finance review item archived.' : 'Finance proposal rejected.',
+		};
+	}
+
+	private async openNextPendingReviewProposal(messageId?: number): Promise<TelegramHandlerResult> {
+		const pending = await this.expenseService.getPendingApprovalTransactions();
+		const next = pending[0];
+		if (!next?.file) {
+			if (typeof messageId === 'number' && this.api?.editMessage) {
+				await this.showReviewQueueMessage('pending', messageId);
+			}
+			return { processed: true, answer: 'There are no pending finance review items right now.' };
+		}
+
+		const proposal = this.createProposal({
+			...next,
+			status: 'pending-approval',
+		}, {
+			sourceFilePath: next.file.path,
+		});
+		await this.showProposalMessage(
+			proposal,
+			messageId,
+			'This item is already saved in the vault as pending approval. Confirm to mark it as recorded.',
+		);
+		return { processed: true, answer: null };
 	}
 
 	private async beginProposalDateFlow(

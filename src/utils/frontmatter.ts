@@ -1,4 +1,4 @@
-import { TransactionData, TransactionDetail } from '../types';
+import { normalizeTransactionStatus, TransactionData, TransactionDetail } from '../types';
 
 /**
  * Generate YAML frontmatter from transaction data
@@ -6,6 +6,7 @@ import { TransactionData, TransactionDetail } from '../types';
 export function generateFrontmatter(data: TransactionData): string {
 	const frontmatter: Record<string, unknown> = {
 		type: data.type,
+		status: normalizeTransactionStatus(data.status),
 		amount: data.amount,
 		currency: data.currency,
 		dateTime: data.dateTime,
@@ -115,6 +116,12 @@ export function parseFrontmatter(content: string): Partial<TransactionData> | nu
 	return parseYamlFrontmatter(content) as Partial<TransactionData> | null;
 }
 
+export function parseSourceContextFromContent(content: string): string | undefined {
+	const match = content.match(/## Source Context\s*\n([\s\S]*?)(?=\n## |\s*$)/);
+	const value = match?.[1]?.trim();
+	return value ? value : undefined;
+}
+
 /**
  * Extract transaction details from content body
  */
@@ -163,6 +170,10 @@ export function generateContentBody(data: TransactionData): string {
 
 	if (data.artifact) {
 		lines.push('## Artifact', '', data.artifact, '');
+	}
+
+	if (data.sourceContext?.trim()) {
+		lines.push('## Source Context', '', data.sourceContext.trim(), '');
 	}
 
 	return lines.length > 0 ? `${lines.join('\n').trim()}\n` : '';

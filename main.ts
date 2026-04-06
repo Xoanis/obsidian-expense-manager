@@ -1,5 +1,13 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
-import { ExpenseManagerSettings, DEFAULT_SETTINGS } from './src/settings';
+import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath } from 'obsidian';
+import {
+	createDefaultEmailFinanceCoarseFilterRules,
+	createDefaultEmailFinanceSyncState,
+	DEFAULT_SETTINGS,
+	ExpenseManagerSettings,
+	formatEmailFinanceCoarseFilterRules,
+	parseEmailFinanceCoarseFilterRules,
+	type EmailFinanceSyncState,
+} from './src/settings';
 import { DashboardContributionMode } from './src/settings';
 import { ExpenseService } from './src/services/expense-service';
 import { AnalyticsService } from './src/services/analytics-service';
@@ -11,6 +19,8 @@ import { registerGenerateReportFileCommand } from './src/commands/generate-repor
 import { registerGenerateCustomReportCommand } from './src/commands/generate-custom-report';
 import { registerMigrateLegacyNotesCommand } from './src/commands/migrate-legacy-notes';
 import { registerSetCurrentMonthBudgetCommand } from './src/commands/set-current-month-budget';
+import { registerOpenFinanceReviewQueueCommand } from './src/commands/open-finance-review-queue';
+import { registerSyncFinanceEmailsCommand } from './src/email-finance/commands/sync-finance-emails';
 import { getParaCoreApi } from './src/integrations/para-core/para-core-client';
 import { registerFinanceDomain } from './src/integrations/para-core/register-finance-domain';
 import { registerFinanceMetadataContributions } from './src/integrations/para-core/register-metadata-contributions';
@@ -25,6 +35,9 @@ import { TelegramChartService } from './src/services/telegram-chart-service';
 import { TelegramBudgetAlertService } from './src/services/telegram-budget-alert-service';
 import { MigrationService } from './src/services/migration-service';
 import { FinanceIntakeService } from './src/services/finance-intake-service';
+import { EmailFinanceSyncService } from './src/email-finance/sync/email-finance-sync-service';
+import { EmailFinanceSyncStateStore } from './src/email-finance/sync/email-finance-sync-state-store';
+import { PendingFinanceProposalService } from './src/email-finance/review/pending-finance-proposal-service';
 import { ReportPeriodModal } from './src/ui/report-period-modal';
 import { ReportsModal } from './src/ui/reports-modal';
 import { ExpenseModal } from './src/ui/expense-modal';
@@ -32,6 +45,7 @@ import { BudgetInputModal } from './src/ui/budget-input-modal';
 import { FinanceRuleInputModal } from './src/ui/finance-rule-input-modal';
 import { PLUGIN_UNIT_NAME } from './src/utils/constants';
 import { parseBudgetInput } from './src/utils/budget-input';
+import { buildFinanceReviewQueueNoteContent } from './src/review/finance-review-queue-note';
 import {
 	ConsolePluginLogger,
 	createPluginLogger,
@@ -57,6 +71,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private telegramChartService!: TelegramChartService;
 	private telegramBudgetAlertService!: TelegramBudgetAlertService;
 	private financeIntakeService!: FinanceIntakeService;
+	private emailFinanceSyncService!: EmailFinanceSyncService;
 	private logger: PluginLogger = new ConsolePluginLogger('Expense Manager');
 
 	async onload() {
@@ -82,6 +97,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		this.financeIntakeService = new FinanceIntakeService(this.settings, {
 			logger: this.logger,
 		});
+		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
 		this.registerParaCoreTelegramCardContributions();
 
 		// Initialize Telegram handler if API is available
@@ -94,6 +110,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerGenerateCustomReportCommand(this);
 		registerMigrateLegacyNotesCommand(this);
 		registerSetCurrentMonthBudgetCommand(this);
+		registerOpenFinanceReviewQueueCommand(this);
+		registerSyncFinanceEmailsCommand(this);
 		this.addCommand({
 			id: 'open-debug-log',
 			name: 'Open shared runtime log',
@@ -123,7 +141,19 @@ export default class ExpenseManagerPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const loaded = Object.assign({}, DEFAULT_SETTINGS, await this.loadData()) as ExpenseManagerSettings;
+		this.settings = {
+			...loaded,
+			emailFinanceCoarseFilterRules: Array.isArray(loaded.emailFinanceCoarseFilterRules) && loaded.emailFinanceCoarseFilterRules.length > 0
+				? loaded.emailFinanceCoarseFilterRules
+				: createDefaultEmailFinanceCoarseFilterRules(),
+			emailFinanceSyncState: loaded.emailFinanceSyncState
+				? {
+					...createDefaultEmailFinanceSyncState(),
+					...loaded.emailFinanceSyncState,
+				}
+				: createDefaultEmailFinanceSyncState(),
+		};
 	}
 
 	async saveSettings() {
@@ -150,10 +180,16 @@ export default class ExpenseManagerPlugin extends Plugin {
 		this.financeIntakeService = new FinanceIntakeService(this.settings, {
 			logger: this.logger,
 		});
+		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
 		this.registerParaCoreTelegramCardContributions();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 		await this.initializeTelegramIntegration();
 		await this.reportSyncService.initialize();
+	}
+
+	async persistEmailFinanceSyncState(nextState: EmailFinanceSyncState) {
+		this.settings.emailFinanceSyncState = nextState;
+		await this.saveData(this.settings);
 	}
 
 	isParaCoreStorageManaged(): boolean {
@@ -172,6 +208,39 @@ export default class ExpenseManagerPlugin extends Plugin {
 		}
 
 		await this.app.workspace.getLeaf(true).openFile(file);
+	}
+
+	async handleSyncFinanceEmails() {
+		new Notice('Finance email sync started...', 4000);
+		try {
+			const result = await this.emailFinanceSyncService.syncNewMessages();
+			new Notice(result.summaryText, 7000);
+		} catch (error) {
+			new Notice(`Error syncing finance emails: ${(error as Error).message}`);
+			this.logger.error('Email finance sync failed', error);
+		}
+	}
+
+	async handleOpenFinanceReviewQueue() {
+		try {
+			const pending = await this.expenseService.getPendingApprovalTransactions();
+			const attention = await this.expenseService.getNeedsAttentionTransactions();
+			const path = await this.ensureFinanceReviewQueueNote();
+			const file = this.app.vault.getAbstractFileByPath(path);
+			if (!(file instanceof TFile)) {
+				new Notice('Finance review queue note is unavailable.');
+				return;
+			}
+
+			await this.app.workspace.getLeaf(true).openFile(file);
+			new Notice(
+				`Finance review queue: ${pending.length} pending approval, ${attention.length} need attention.`,
+				6000,
+			);
+		} catch (error) {
+			new Notice(`Error opening finance review queue: ${(error as Error).message}`);
+			this.logger.error('Failed to open finance review queue', error);
+		}
 	}
 
 	async renderReportSection(
@@ -226,6 +295,44 @@ export default class ExpenseManagerPlugin extends Plugin {
 				? (path, page) => this.financeTelegramBridge?.buildProjectBudgetMetadataKeyboard(path, page) ?? null
 				: undefined,
 		});
+	}
+
+	private createEmailFinanceSyncService(): EmailFinanceSyncService {
+		const syncStateStore = new EmailFinanceSyncStateStore(
+			() => this.settings.emailFinanceSyncState,
+			(nextState) => this.persistEmailFinanceSyncState(nextState),
+		);
+
+		return new EmailFinanceSyncService(
+			() => this.settings,
+			syncStateStore,
+			this.financeIntakeService,
+			new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency),
+			{
+				logger: this.logger,
+			},
+		);
+	}
+
+	private async ensureFinanceReviewQueueNote(): Promise<string> {
+		const managedTransactionsPath = this.getManagedExpenseDirectory();
+		const path = this.paraCoreApi
+			? this.paraCoreApi.getSettings().rootNotes.reviewNotePath
+			: normalizePath(`${this.settings.expenseFolder}/Finance Review Queue.md`);
+		const normalizedPath = normalizePath(path);
+		const existing = this.app.vault.getAbstractFileByPath(normalizedPath);
+		const content = buildFinanceReviewQueueNoteContent(managedTransactionsPath);
+		if (existing instanceof TFile) {
+			return normalizedPath;
+		}
+
+		const segments = normalizedPath.split('/').filter(Boolean);
+		if (segments.length > 1) {
+			const parentFolder = segments.slice(0, -1).join('/');
+			await this.app.vault.createFolder(parentFolder).catch(() => undefined);
+		}
+		await this.app.vault.create(normalizedPath, content);
+		return normalizedPath;
 	}
 
 	private registerParaCoreTelegramCardContributions() {
@@ -687,6 +794,201 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.aiFinanceModel = value.trim();
 					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createEl('h3', { text: 'Email finance intake' });
+
+		new Setting(containerEl)
+			.setName('Enable email finance intake')
+			.setDesc('Prepare delta-sync and coarse filtering for mailbox-based finance intake')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableEmailFinanceIntake)
+				.onChange(async (value) => {
+					this.plugin.settings.enableEmailFinanceIntake = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Email finance provider')
+			.setDesc('Choose how finance emails are fetched for sync')
+			.addDropdown(dropdown => dropdown
+				.addOption('none', 'Not configured')
+				.addOption('imap', 'IMAP (login + app password)')
+				.addOption('http-json', 'HTTP JSON bridge')
+				.setValue(this.plugin.settings.emailFinanceProvider)
+				.onChange(async (value) => {
+					if (value === 'none' || value === 'imap' || value === 'http-json') {
+						this.plugin.settings.emailFinanceProvider = value;
+						await this.plugin.saveSettings();
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Mailbox scope')
+			.setDesc('Optional mailbox, folder, or label scope for the future mail provider')
+			.addText(text => text
+				.setPlaceholder('Receipts')
+				.setValue(this.plugin.settings.emailFinanceMailboxScope)
+				.onChange(async (value) => {
+					this.plugin.settings.emailFinanceMailboxScope = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('IMAP host')
+			.setDesc('Hostname of the IMAP server used with login and app password authentication')
+			.addText(text => text
+				.setPlaceholder('imap.gmail.com')
+				.setValue(this.plugin.settings.emailFinanceImapHost)
+				.onChange(async (value) => {
+					this.plugin.settings.emailFinanceImapHost = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('IMAP port')
+			.setDesc('Usually 993 for direct TLS IMAP')
+			.addText(text => text
+				.setPlaceholder('993')
+				.setValue(String(this.plugin.settings.emailFinanceImapPort))
+				.onChange(async (value) => {
+					const parsed = Number(value);
+					if (Number.isFinite(parsed)) {
+						this.plugin.settings.emailFinanceImapPort = Math.max(1, Math.round(parsed));
+						await this.plugin.saveSettings();
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName('IMAP secure connection')
+			.setDesc('Use direct TLS when connecting to the IMAP server')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.emailFinanceImapSecure)
+				.onChange(async (value) => {
+					this.plugin.settings.emailFinanceImapSecure = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('IMAP username')
+			.setDesc('Email login used for IMAP authentication')
+			.addText(text => text
+				.setPlaceholder('you@example.com')
+				.setValue(this.plugin.settings.emailFinanceImapUser)
+				.onChange(async (value) => {
+					this.plugin.settings.emailFinanceImapUser = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('IMAP app password')
+			.setDesc('Application-specific password used instead of the normal account password')
+			.addText(text => {
+				text
+					.setPlaceholder('Enter app password')
+					.setValue(this.plugin.settings.emailFinanceImapPassword)
+					.onChange(async (value) => {
+						this.plugin.settings.emailFinanceImapPassword = value.trim();
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.type = 'password';
+			});
+
+		new Setting(containerEl)
+			.setName('Email provider base URL')
+			.setDesc('For the HTTP JSON bridge, messages are fetched from <base-url>/messages')
+			.addText(text => text
+				.setPlaceholder('https://mail-bridge.example.com')
+				.setValue(this.plugin.settings.emailFinanceProviderBaseUrl)
+				.onChange(async (value) => {
+					this.plugin.settings.emailFinanceProviderBaseUrl = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Email provider auth token')
+			.setDesc('Bearer token used for the HTTP JSON bridge, when required')
+			.addText(text => {
+				text
+					.setPlaceholder('Enter provider token')
+					.setValue(this.plugin.settings.emailFinanceProviderAuthToken)
+					.onChange(async (value) => {
+						this.plugin.settings.emailFinanceProviderAuthToken = value.trim();
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.type = 'password';
+			});
+
+		new Setting(containerEl)
+			.setName('Enable scheduled email sync')
+			.setDesc('Scheduling is planned in a later phase, but the setting is already reserved')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableScheduledEmailFinanceSync)
+				.onChange(async (value) => {
+					this.plugin.settings.enableScheduledEmailFinanceSync = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Email sync interval (minutes)')
+			.setDesc('Reserved for the future scheduled sync worker')
+			.addText(text => text
+				.setPlaceholder('15')
+				.setValue(String(this.plugin.settings.emailFinanceSyncIntervalMinutes))
+				.onChange(async (value) => {
+					const parsed = Number(value);
+					if (Number.isFinite(parsed)) {
+						this.plugin.settings.emailFinanceSyncIntervalMinutes = Math.max(1, Math.round(parsed));
+						await this.plugin.saveSettings();
+					}
+				}));
+
+		const filterRulesHint = containerEl.createEl('p', {
+			text: 'Rule format: enabled|include|contains|any|receipt. Replace contains with regex for advanced patterns.',
+		});
+		filterRulesHint.addClass('setting-item-description');
+
+		new Setting(containerEl)
+			.setName('Email coarse filter rules')
+			.setDesc('User-editable include/exclude rules used before deeper extraction')
+			.addTextArea(text => text
+				.setPlaceholder('enabled|include|contains|any|receipt')
+				.setValue(formatEmailFinanceCoarseFilterRules(this.plugin.settings.emailFinanceCoarseFilterRules))
+				.onChange(async (value) => {
+					try {
+						this.plugin.settings.emailFinanceCoarseFilterRules = parseEmailFinanceCoarseFilterRules(value);
+						await this.plugin.saveSettings();
+					} catch (error) {
+						new Notice(`Email filter rules error: ${(error as Error).message}`);
+					}
+				}))
+			.addButton(button => button
+				.setButtonText('Reset defaults')
+				.onClick(async () => {
+					this.plugin.settings.emailFinanceCoarseFilterRules = createDefaultEmailFinanceCoarseFilterRules();
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+
+		const syncState = this.plugin.settings.emailFinanceSyncState;
+		const syncStatusText = syncState.lastSyncSummary
+			? `${syncState.lastSyncStatus} | ${syncState.lastSyncSummary}`
+			: syncState.lastSyncStatus;
+		new Setting(containerEl)
+			.setName('Email sync state')
+			.setDesc(`Last attempt: ${syncState.lastAttemptAt ?? 'never'} | Last success: ${syncState.lastSuccessfulSyncAt ?? 'never'} | Status: ${syncStatusText}`)
+			.addButton(button => button
+				.setButtonText('Reset boundary')
+				.onClick(async () => {
+					await this.plugin.persistEmailFinanceSyncState(createDefaultEmailFinanceSyncState());
+					new Notice('Email finance sync boundary reset.');
+					this.display();
+				}))
+			.addButton(button => button
+				.setButtonText('Run sync')
+				.onClick(async () => {
+					await this.plugin.handleSyncFinanceEmails();
+					this.display();
 				}));
 
 		new Setting(containerEl)
