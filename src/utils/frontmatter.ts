@@ -29,6 +29,12 @@ export function generateFrontmatter(data: TransactionData): string {
 	if (data.fp) {
 		frontmatter.fp = data.fp;
 	}
+	if (data.receiptOperationType) {
+		frontmatter.receiptOperationType = data.receiptOperationType;
+	}
+	if (data.proverkaCheka === true) {
+		frontmatter.ProverkaCheka = true;
+	}
 
 	// Convert to YAML manually to avoid external dependencies
 	let yaml = '---\n';
@@ -179,6 +185,28 @@ export function generateContentBody(data: TransactionData): string {
 	return lines.length > 0 ? `${lines.join('\n').trim()}\n` : '';
 }
 
+export function upsertItemsSection(content: string, details: TransactionDetail[]): string {
+	if (!details.length) {
+		return content;
+	}
+
+	const renderedSection = renderItemsSection(details);
+	const itemsSectionPattern = /\n## Items\s*\n[\s\S]*?(?=\n## [^\n]+\n|\s*$)/;
+	if (itemsSectionPattern.test(content)) {
+		const updated = content.replace(itemsSectionPattern, `\n\n${renderedSection}`);
+		return updated.endsWith('\n') ? updated : `${updated}\n`;
+	}
+
+	const insertionIndex = findSectionInsertionIndex(content);
+	const before = content.slice(0, insertionIndex).replace(/\s*$/, '');
+	const after = content.slice(insertionIndex).replace(/^\s*/, '');
+	const nextContent = after
+		? `${before}\n\n${renderedSection}\n\n${after}`
+		: `${before}\n\n${renderedSection}\n`;
+
+	return nextContent.endsWith('\n') ? nextContent : `${nextContent}\n`;
+}
+
 /**
  * Format ISO date string to readable format
  */
@@ -230,4 +258,27 @@ function formatLocalDate(date: Date): string {
 	const month = String(date.getMonth() + 1).padStart(2, '0');
 	const day = String(date.getDate()).padStart(2, '0');
 	return `${year}-${month}-${day}`;
+}
+
+function renderItemsSection(details: TransactionDetail[]): string {
+	const lines = ['## Items', ''];
+	for (const detail of details) {
+		const lineTotal = (detail.price * detail.quantity).toFixed(2);
+		lines.push(`- ${detail.name}: ${detail.price.toFixed(2)} x ${detail.quantity} = ${lineTotal}`);
+	}
+
+	return lines.join('\n');
+}
+
+function findSectionInsertionIndex(content: string): number {
+	const sectionAnchors = ['\n## Artifact', '\n## Source Context'];
+	const positions = sectionAnchors
+		.map((anchor) => content.indexOf(anchor))
+		.filter((index) => index >= 0);
+
+	if (positions.length > 0) {
+		return Math.min(...positions);
+	}
+
+	return content.length;
 }

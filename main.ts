@@ -14,6 +14,7 @@ import { AnalyticsService } from './src/services/analytics-service';
 import { QrHandler } from './src/handlers/qr-handler';
 import { FinanceReportSection, TransactionData } from './src/types';
 import { registerAddFinanceRecordCommand } from './src/commands/add-finance-record';
+import { registerFetchReceiptItemsCommand } from './src/commands/fetch-receipt-items';
 import { registerGenerateReportCommand } from './src/commands/generate-report';
 import { registerGenerateReportFileCommand } from './src/commands/generate-report-file';
 import { registerGenerateCustomReportCommand } from './src/commands/generate-custom-report';
@@ -35,6 +36,7 @@ import { TelegramChartService } from './src/services/telegram-chart-service';
 import { TelegramBudgetAlertService } from './src/services/telegram-budget-alert-service';
 import { MigrationService } from './src/services/migration-service';
 import { FinanceIntakeService } from './src/services/finance-intake-service';
+import { ReceiptEnrichmentService } from './src/services/receipt-enrichment-service';
 import { EmailFinanceSyncService } from './src/email-finance/sync/email-finance-sync-service';
 import { EmailFinanceSyncStateStore } from './src/email-finance/sync/email-finance-sync-state-store';
 import { PendingFinanceProposalService } from './src/email-finance/review/pending-finance-proposal-service';
@@ -71,6 +73,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private telegramChartService!: TelegramChartService;
 	private telegramBudgetAlertService!: TelegramBudgetAlertService;
 	private financeIntakeService!: FinanceIntakeService;
+	private receiptEnrichmentService!: ReceiptEnrichmentService;
 	private emailFinanceSyncService!: EmailFinanceSyncService;
 	private logger: PluginLogger = new ConsolePluginLogger('Expense Manager');
 
@@ -97,6 +100,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		this.financeIntakeService = new FinanceIntakeService(this.settings, {
 			logger: this.logger,
 		});
+		this.receiptEnrichmentService = new ReceiptEnrichmentService(this.app, this.settings);
 		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
 		this.registerParaCoreTelegramCardContributions();
 
@@ -105,6 +109,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 
 		// Register commands
 		registerAddFinanceRecordCommand(this);
+		registerFetchReceiptItemsCommand(this);
 		registerGenerateReportCommand(this);
 		registerGenerateReportFileCommand(this);
 		registerGenerateCustomReportCommand(this);
@@ -180,6 +185,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		this.financeIntakeService = new FinanceIntakeService(this.settings, {
 			logger: this.logger,
 		});
+		this.receiptEnrichmentService = new ReceiptEnrichmentService(this.app, this.settings);
 		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
 		this.registerParaCoreTelegramCardContributions();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
@@ -464,6 +470,30 @@ export default class ExpenseManagerPlugin extends Plugin {
 		} catch (error) {
 			new Notice(`Error setting current month budget: ${(error as Error).message}`);
 			this.logger.error('Failed to set current month budget', error);
+		}
+	}
+
+	canFetchReceiptItemsFromActiveNote(): boolean {
+		return this.receiptEnrichmentService.canEnrichFile(this.app.workspace.getActiveFile());
+	}
+
+	async handleFetchReceiptItemsFromActiveNote() {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) {
+			new Notice('Open a finance transaction note first.');
+			return;
+		}
+
+		try {
+			const result = await this.receiptEnrichmentService.enrichFile(file);
+			new Notice(
+				result.itemCount > 0
+					? `Fetched ${result.itemCount} receipt item(s) from ProverkaCheka.`
+					: 'Receipt was verified via ProverkaCheka, but no item details were returned.',
+			);
+		} catch (error) {
+			new Notice(`Could not fetch receipt items: ${(error as Error).message}`);
+			this.logger.error('Failed to enrich receipt from ProverkaCheka', error);
 		}
 	}
 

@@ -1,3 +1,5 @@
+import { ReceiptOperationType, TransactionType } from '../types';
+
 /**
  * Parse QR code raw string from receipt according to 54-FZ standard
  * Format: t=20260316T1007&s=1550.00&fn=9999078900012345&i=12345&fp=2890123456&n=1
@@ -20,6 +22,16 @@ export interface QrReceiptData {
 	
 	/** Operation type: 1=Income, 2=Income return, 3=Expense, 4=Expense return */
 	n?: number;
+}
+
+export interface ReceiptQrLookupFields {
+	type: TransactionType;
+	amount: number;
+	dateTime: string;
+	fn: string;
+	fd: string;
+	fp: string;
+	receiptOperationType?: ReceiptOperationType;
 }
 
 const RECEIPT_QR_KEYS = new Set(['t', 's', 'fn', 'i', 'fp', 'n']);
@@ -202,4 +214,83 @@ export function operationTypeToTransactionType(type: number): 'expense' | 'incom
 	}
 	// Default to expense
 	return 'expense';
+}
+
+export function buildRawReceiptQrPayload(fields: {
+	amount: number;
+	dateTime: string;
+	fn: string;
+	fd: string;
+	fp: string;
+	receiptOperationType: ReceiptOperationType;
+}): string | null {
+	if (!Number.isFinite(fields.amount) || fields.amount <= 0) {
+		return null;
+	}
+
+	const normalizedFn = fields.fn?.trim();
+	const normalizedFd = fields.fd?.trim();
+	const normalizedFp = fields.fp?.trim();
+	if (!normalizedFn || !normalizedFd || !normalizedFp) {
+		return null;
+	}
+
+	const formattedDateTime = formatReceiptQrDateTime(fields.dateTime);
+	if (!formattedDateTime) {
+		return null;
+	}
+
+	return [
+		`t=${formattedDateTime}`,
+		`s=${fields.amount.toFixed(2)}`,
+		`fn=${normalizedFn}`,
+		`i=${normalizedFd}`,
+		`fp=${normalizedFp}`,
+		`n=${fields.receiptOperationType}`,
+	].join('&');
+}
+
+export function buildRawReceiptQrCandidates(fields: ReceiptQrLookupFields): string[] {
+	const operationTypes = inferReceiptOperationTypeCandidates(fields.type, fields.receiptOperationType);
+	const candidates = operationTypes
+		.map((receiptOperationType) => buildRawReceiptQrPayload({
+			amount: fields.amount,
+			dateTime: fields.dateTime,
+			fn: fields.fn,
+			fd: fields.fd,
+			fp: fields.fp,
+			receiptOperationType,
+		}))
+		.filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+	return Array.from(new Set(candidates));
+}
+
+function inferReceiptOperationTypeCandidates(
+	transactionType: TransactionType,
+	receiptOperationType?: ReceiptOperationType,
+): ReceiptOperationType[] {
+	if (receiptOperationType && receiptOperationType >= 1 && receiptOperationType <= 4) {
+		return [receiptOperationType];
+	}
+
+	return transactionType === 'income' ? [2, 3] : [1, 4];
+}
+
+function formatReceiptQrDateTime(value: string): string | null {
+	if (!value || typeof value !== 'string') {
+		return null;
+	}
+
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) {
+		return null;
+	}
+
+	const year = date.getFullYear();
+	const month = String(date.getMonth() + 1).padStart(2, '0');
+	const day = String(date.getDate()).padStart(2, '0');
+	const hours = String(date.getHours()).padStart(2, '0');
+	const minutes = String(date.getMinutes()).padStart(2, '0');
+	return `${year}${month}${day}T${hours}${minutes}`;
 }

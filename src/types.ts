@@ -4,6 +4,7 @@ import { TFile } from 'obsidian';
  * Type of financial transaction
  */
 export type TransactionType = 'expense' | 'income';
+export type ReceiptOperationType = 1 | 2 | 3 | 4;
 
 /**
  * Lifecycle state of a finance transaction note
@@ -83,6 +84,12 @@ export interface TransactionData {
 	
 	/** Fiscal sign (Фискальный признак) */
 	fp?: string;
+
+	/** Original receipt operation type from QR / ProverkaCheka */
+	receiptOperationType?: ReceiptOperationType;
+
+	/** Whether receipt details were confirmed via ProverkaCheka */
+	proverkaCheka?: boolean;
 	
 	/** Reference to the markdown file */
 	file?: TFile;

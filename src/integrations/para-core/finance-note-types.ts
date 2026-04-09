@@ -25,7 +25,8 @@ interface FinanceTransactionFrontmatter {
 	fn?: string;
 	fd?: string;
 	fp?: string;
-	details?: TransactionData['details'];
+	receiptOperationType?: TransactionData['receiptOperationType'];
+	ProverkaCheka?: boolean;
 }
 
 interface FinanceReportFrontmatter {
@@ -87,7 +88,6 @@ function createFinanceTransactionNoteType(
 			source: 'manual',
 			artifact: null,
 			tags: ['finance', categoryTag],
-			details: [],
 		}),
 		template: (ctx) => renderFinanceTransactionTemplate(ctx, categoryTag),
 	};
@@ -222,16 +222,6 @@ function validateFinanceTransactionFrontmatter(
 		}
 	}
 
-	if (frontmatter.details !== undefined) {
-		if (!Array.isArray(frontmatter.details)) {
-			issues.push(createIssue('invalid-finance-details', 'Finance transaction "details" must be an array when present.'));
-		} else {
-			for (const [index, detail] of frontmatter.details.entries()) {
-				issues.push(...validateFinanceTransactionDetail(detail, index));
-			}
-		}
-	}
-
 	for (const fiscalField of ['fn', 'fd', 'fp'] as const) {
 		const value = frontmatter[fiscalField];
 		if (value !== undefined && value !== null && !isNonEmptyString(value)) {
@@ -244,45 +234,21 @@ function validateFinanceTransactionFrontmatter(
 		}
 	}
 
-	return issues;
-}
-
-function validateFinanceTransactionDetail(detail: unknown, index: number) {
-	const issues = [];
-	if (!detail || typeof detail !== 'object') {
-		return [createIssue('invalid-finance-detail-item', `Finance transaction detail #${index + 1} must be an object.`)];
-	}
-
-	const record = detail as Record<string, unknown>;
-	if (!isNonEmptyString(record.name)) {
-		issues.push(createIssue('invalid-finance-detail-name', `Finance transaction detail #${index + 1} must have a non-empty name.`));
-	}
-
-	if (!isPositiveNumber(record.quantity)) {
-		issues.push(createIssue('invalid-finance-detail-quantity', `Finance transaction detail #${index + 1} must have a positive quantity.`));
-	}
-
-	if (!isNonNegativeNumber(record.price)) {
-		issues.push(createIssue('invalid-finance-detail-price', `Finance transaction detail #${index + 1} must have a non-negative price.`));
-	}
-
-	if (!isNonNegativeNumber(record.total)) {
-		issues.push(createIssue('invalid-finance-detail-total', `Finance transaction detail #${index + 1} must have a non-negative total.`));
-	}
-
 	if (
-		isPositiveNumber(record.quantity)
-		&& isNonNegativeNumber(record.price)
-		&& isNonNegativeNumber(record.total)
-		&& !isApproximatelyEqual(Number(record.total), Number(record.price) * Number(record.quantity))
+		frontmatter.receiptOperationType !== undefined
+		&& frontmatter.receiptOperationType !== null
+		&& ![1, 2, 3, 4].includes(Number(frontmatter.receiptOperationType))
 	) {
 		issues.push(
 			createIssue(
-				'inconsistent-finance-detail-total',
-				`Finance transaction detail #${index + 1} total does not match price x quantity.`,
-				'warning',
+				'invalid-finance-receipt-operation-type',
+				'Finance transaction "receiptOperationType" must be one of 1, 2, 3, or 4 when present.',
 			),
 		);
+	}
+
+	if (frontmatter.ProverkaCheka !== undefined && typeof frontmatter.ProverkaCheka !== 'boolean') {
+		issues.push(createIssue('invalid-finance-proverkacheka-flag', 'Finance transaction "ProverkaCheka" must be a boolean when present.'));
 	}
 
 	return issues;
@@ -475,7 +441,6 @@ function renderFinanceTransactionTemplate(
 	categoryTag: 'expense' | 'income',
 ): string {
 	const frontmatter = ctx.frontmatter;
-	const label = categoryTag === 'expense' ? 'Expense' : 'Income';
 	const selectedFrontmatter = {
 		type: frontmatter.type,
 		status: frontmatter.status,
@@ -494,17 +459,11 @@ function renderFinanceTransactionTemplate(
 		fn: frontmatter.fn,
 		fd: frontmatter.fd,
 		fp: frontmatter.fp,
+		receiptOperationType: frontmatter.receiptOperationType,
+		ProverkaCheka: frontmatter.ProverkaCheka,
 	};
 
 	const body: string[] = [];
-
-	if (frontmatter.details && frontmatter.details.length > 0) {
-		body.push('', '## Items', '');
-		for (const detail of frontmatter.details) {
-			const lineTotal = (detail.price * detail.quantity).toFixed(2);
-			body.push(`- ${detail.name}: ${detail.price.toFixed(2)} x ${detail.quantity} = ${lineTotal}`);
-		}
-	}
 
 	if (frontmatter.artifact) {
 		body.push('', '## Artifact', '', frontmatter.artifact);

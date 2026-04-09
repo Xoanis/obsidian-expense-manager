@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import ts from 'typescript';
 
 function run(name, fn) {
 	try {
@@ -37,4 +41,66 @@ run('falls back to source text only when extracted description is missing', () =
 	assert.equal(result, 'Купил кофе 320 руб');
 });
 
+await runBundledTypeScriptTests();
+
 console.log('All tests passed.');
+
+async function runBundledTypeScriptTests() {
+	const generatedDir = path.resolve(process.cwd(), 'tests', '.generated');
+	await mkdir(generatedDir, { recursive: true });
+
+	const configPath = path.resolve(process.cwd(), 'tsconfig.json');
+	const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
+	if (configFile.error) {
+		throw new Error(formatDiagnostics([configFile.error]));
+	}
+
+	const parsedConfig = ts.parseJsonConfigFileContent(
+		configFile.config,
+		ts.sys,
+		process.cwd(),
+		{
+			outDir: generatedDir,
+			rootDir: process.cwd(),
+			noEmit: false,
+			declaration: false,
+			skipLibCheck: true,
+			module: ts.ModuleKind.CommonJS,
+			target: ts.ScriptTarget.ES2020,
+			inlineSourceMap: true,
+			inlineSources: true,
+		},
+		configPath,
+	);
+	const entryPoints = [
+		path.resolve(process.cwd(), 'tests', 'email-finance-regressions.ts'),
+		path.resolve(process.cwd(), 'tests', 'receipt-qr-reconstruction.ts'),
+	];
+	const program = ts.createProgram({
+		rootNames: entryPoints,
+		options: parsedConfig.options,
+	});
+	const emitResult = program.emit();
+	if (emitResult.emitSkipped) {
+		throw new Error(formatDiagnostics(emitResult.diagnostics));
+	}
+
+	const require = createRequire(import.meta.url);
+	for (const entryPoint of entryPoints) {
+		const outfile = path.join(
+			generatedDir,
+			'tests',
+			`${path.basename(entryPoint, '.ts')}.js`,
+		);
+		delete require.cache[require.resolve(outfile)];
+		require(outfile);
+	}
+}
+
+function formatDiagnostics(diagnostics) {
+	return ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+		getCanonicalFileName: (fileName) => fileName,
+		getCurrentDirectory: () => process.cwd(),
+		getNewLine: () => '\n',
+	});
+}

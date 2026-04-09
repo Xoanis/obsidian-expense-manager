@@ -1,4 +1,4 @@
-import { TransactionData, TransactionDetail } from '../types';
+import { ReceiptOperationType, TransactionData, TransactionDetail } from '../types';
 import { looksLikeRawReceiptQrString, parseQrReceiptString, QrReceiptData, operationTypeToTransactionType } from './qr-parser';
 import { getPluginLogger } from './plugin-debug-log';
 import jsQR from 'jsqr';
@@ -140,7 +140,8 @@ export class ProverkaChekaClient {
 			// Store fiscal document numbers as separate properties
 			fn: qrData.fn,
 			fd: qrData.i, // 'i' in QR is the fiscal document number (ФД)
-			fp: qrData.fp
+			fp: qrData.fp,
+			receiptOperationType: normalizeReceiptOperationType(qrData.n),
 		};
 	}
 
@@ -215,7 +216,10 @@ export class ProverkaChekaClient {
 			}
 
 			try {
-				const apiData = await this.processReceiptRawQr(normalizedQrString);
+				const apiData = this.attachQrLookupMetadata(
+					await this.processReceiptRawQr(normalizedQrString),
+					qrData.n,
+				);
 				return {
 					data: apiData,
 					source: 'api',
@@ -223,7 +227,10 @@ export class ProverkaChekaClient {
 				};
 			} catch (rawQrError) {
 				try {
-					const apiData = await this.processReceiptByReceiptFields(normalizedQrString);
+					const apiData = this.attachQrLookupMetadata(
+						await this.processReceiptByReceiptFields(normalizedQrString),
+						qrData.n,
+					);
 					return {
 						data: apiData,
 						source: 'api',
@@ -249,6 +256,36 @@ export class ProverkaChekaClient {
 				hasError: true,
 				error: (error as Error).message
 			};
+		}
+	}
+
+	async processReceiptQrStringViaApi(qrString: string): Promise<TransactionData> {
+		const normalizedQrString = qrString.trim();
+		if (!looksLikeRawReceiptQrString(normalizedQrString)) {
+			throw new Error('Invalid QR code format - expected raw receipt QR payload');
+		}
+
+		const qrData = parseQrReceiptString(normalizedQrString);
+		if (!qrData) {
+			throw new Error('Invalid QR code format - not a receipt');
+		}
+
+		try {
+			return this.attachQrLookupMetadata(
+				await this.processReceiptRawQr(normalizedQrString),
+				qrData.n,
+			);
+		} catch (rawQrError) {
+			try {
+				return this.attachQrLookupMetadata(
+					await this.processReceiptByReceiptFields(normalizedQrString),
+					qrData.n,
+				);
+			} catch (fieldLookupError) {
+				throw new Error(
+					`Raw QR lookup failed: ${(rawQrError as Error).message}. Field-based lookup failed: ${(fieldLookupError as Error).message}`,
+				);
+			}
 		}
 	}
 
@@ -452,7 +489,20 @@ export class ProverkaChekaClient {
 			// Store fiscal document numbers from API response
 			fn: json.fiscalDriveNumber,
 			fd: json.fiscalDocumentNumber,
-			fp: json.fiscalSign
+			fp: json.fiscalSign,
+			receiptOperationType: normalizeReceiptOperationType(json.operationType),
+			proverkaCheka: true,
+		};
+	}
+
+	private attachQrLookupMetadata(
+		data: TransactionData,
+		fallbackReceiptOperationType?: number,
+	): TransactionData {
+		return {
+			...data,
+			receiptOperationType: data.receiptOperationType ?? normalizeReceiptOperationType(fallbackReceiptOperationType),
+			proverkaCheka: true,
 		};
 	}
 
@@ -463,4 +513,12 @@ export class ProverkaChekaClient {
 		// Basic validation - should be non-empty string
 		return typeof apiKey === 'string' && apiKey.length > 0;
 	}
+}
+
+function normalizeReceiptOperationType(value: unknown): ReceiptOperationType | undefined {
+	if (value === 1 || value === 2 || value === 3 || value === 4) {
+		return value;
+	}
+
+	return undefined;
 }

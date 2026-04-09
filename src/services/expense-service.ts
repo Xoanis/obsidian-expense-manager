@@ -25,6 +25,7 @@ import {
 	parseDetailsFromContent,
 	generateFilename,
 	parseSourceContextFromContent,
+	upsertItemsSection,
 } from '../utils/frontmatter';
 import {
 	createCustomPeriodDescriptor,
@@ -272,6 +273,8 @@ export class ExpenseService {
 				fd: frontmatter.fd as string | undefined,
 				fn: frontmatter.fn as string | undefined,
 				fp: frontmatter.fp as string | undefined,
+				receiptOperationType: frontmatter.receiptOperationType as TransactionData['receiptOperationType'] | undefined,
+				proverkaCheka: frontmatter.ProverkaCheka === true,
 				file: file
 			};
 		} catch (error) {
@@ -1474,11 +1477,25 @@ export class ExpenseService {
 				fn: data.fn,
 				fd: data.fd,
 				fp: data.fp,
-				details: data.details ?? [],
+				receiptOperationType: data.receiptOperationType ?? null,
+				ProverkaCheka: data.proverkaCheka === true ? true : null,
 			},
 		});
+		await this.appendItemsSectionIfNeeded(file, data.details);
 		await this.appendSourceContextSectionIfNeeded(file, data.sourceContext);
 		return file;
+	}
+
+	private async appendItemsSectionIfNeeded(file: TFile, details: TransactionData['details']): Promise<void> {
+		if (!details?.length) {
+			return;
+		}
+
+		const content = await this.app.vault.cachedRead(file);
+		const nextContent = upsertItemsSection(content, details);
+		if (nextContent !== content) {
+			await this.app.vault.modify(file, nextContent);
+		}
 	}
 
 	private async appendSourceContextSectionIfNeeded(file: TFile, sourceContext: string | undefined): Promise<void> {
