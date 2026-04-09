@@ -445,6 +445,29 @@ npm run build
 npm run dev
 ```
 
+### VS Code debugging
+
+The repository includes ready-to-use VS Code debug files in [.vscode/launch.json](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/.vscode/launch.json) and [.vscode/tasks.json](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/.vscode/tasks.json).
+
+Recommended flow:
+
+1. Run `Tasks: Run Task` -> `Expense Manager: watch build`
+2. After a rebuild, run `Tasks: Run Task` -> `Expense Manager: sync artifacts to para_test_codex_vault`
+3. Start `Expense Manager: Attach Obsidian Renderer`
+
+One-click option:
+
+1. Start `Expense Manager: Build, Sync, Launch and Attach`
+
+Notes:
+
+- the debug launch targets `C:\Users\petro\OneDrive\Документы\codex_projects\obsidian\para_test_codex_vault`
+- the sync task copies `main.js`, `manifest.json`, and `styles.css` into `para_test_codex_vault/.obsidian/plugins/expense-manager/`
+- the launch task starts Obsidian with `--remote-debugging-port=9222`, then opens the vault via `obsidian://open?vault=para_test_codex_vault`
+- for reliable attach, fully close other Obsidian windows before using the launch task
+- if breakpoints do not bind, make sure Obsidian was launched with `--remote-debugging-port=9222`
+- if attach still does not see the renderer target, fully close Obsidian and relaunch it through the VS Code task
+
 ### Generate test data
 
 The repository includes a generator for synthetic finance data across the last two years.

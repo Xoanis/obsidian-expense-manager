@@ -616,19 +616,21 @@ class ImapFinanceMailProvider implements FinanceMailProvider {
 			attachmentParts: [] as Array<{ part: string; fileName: string; mimeType?: string }>,
 		};
 
-		const visit = (node: MessageStructureObject | undefined): void => {
+		const visit = (node: MessageStructureObject | undefined, isRoot = false): void => {
 			if (!node) {
 				return;
 			}
 
 			if (Array.isArray(node.childNodes) && node.childNodes.length > 0) {
 				for (const child of node.childNodes) {
-					visit(child);
+					visit(child, false);
 				}
 				return;
 			}
 
-			const part = node.part;
+			// ImapFlow can expose a single-part message body as the root node without a part id.
+			// In that case, download('1') activates the library's built-in single-part TEXT fallback.
+			const part = node.part || (isRoot && (node.type || '').toLowerCase().startsWith('text/') ? '1' : '');
 			if (!part) {
 				return;
 			}
@@ -661,7 +663,7 @@ class ImapFinanceMailProvider implements FinanceMailProvider {
 			}
 		};
 
-		visit(bodyStructure);
+		visit(bodyStructure, true);
 		return result;
 	}
 }

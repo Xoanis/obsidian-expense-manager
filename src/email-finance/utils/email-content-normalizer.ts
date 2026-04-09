@@ -13,8 +13,8 @@ export function decodeEmailTransferText(value: string): string {
 	for (let index = 0; index < unfolded.length; index += 1) {
 		const current = unfolded[index];
 		if (current === '=' && index + 2 < unfolded.length) {
-			const hex = unfolded.slice(index + 1, index + 3);
-			if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
+			const hex = unfolded.slice(index + 1, index + 3).toUpperCase();
+			if (shouldDecodeQuotedPrintableHex(unfolded, index, hex)) {
 				bytes.push(parseInt(hex, 16));
 				index += 2;
 				continue;
@@ -40,6 +40,20 @@ export function decodeEmailTransferText(value: string): string {
 
 export function decodeCommonHtmlEntities(value: string): string {
 	return value
+		.replace(/&#x([0-9a-f]+);/gi, (_match, hex) => {
+			try {
+				return String.fromCodePoint(parseInt(hex, 16));
+			} catch {
+				return _match;
+			}
+		})
+		.replace(/&#([0-9]+);/g, (_match, decimal) => {
+			try {
+				return String.fromCodePoint(parseInt(decimal, 10));
+			} catch {
+				return _match;
+			}
+		})
 		.replace(/&nbsp;/gi, ' ')
 		.replace(/&amp;/gi, '&')
 		.replace(/&quot;/gi, '"')
@@ -54,21 +68,49 @@ function looksLikeQuotedPrintable(value: string): boolean {
 	}
 
 	const matches = value.match(/=[0-9A-Fa-f]{2}/g) ?? [];
-	if (matches.length < 3) {
+	return matches.some((match) => isCommonQuotedPrintableHex(match.slice(1).toUpperCase()));
+}
+
+function shouldDecodeQuotedPrintableHex(value: string, index: number, hex: string): boolean {
+	if (!/^[0-9A-F]{2}$/.test(hex)) {
 		return false;
 	}
 
-	const hasCommonQuotedPrintableMarkers = matches.some((match) => {
-		const upper = match.toUpperCase();
-		return upper === '=3D'
-			|| upper === '=20'
-			|| upper === '=09'
-			|| upper === '=0A'
-			|| upper === '=0D'
-			|| upper.startsWith('=D0')
-			|| upper.startsWith('=D1')
-			|| upper.startsWith('=C2')
-			|| upper.startsWith('=C3');
-	});
-	return hasCommonQuotedPrintableMarkers;
+	if (isCommonQuotedPrintableHex(hex)) {
+		return true;
+	}
+
+	return hasAdjacentEncodedOctet(value, index);
+}
+
+function isCommonQuotedPrintableHex(hex: string): boolean {
+	return hex === '3D'
+		|| hex === '20'
+		|| hex === '09'
+		|| hex === '0A'
+		|| hex === '0D'
+		|| hex.startsWith('D0')
+		|| hex.startsWith('D1')
+		|| hex.startsWith('C2')
+		|| hex.startsWith('C3');
+}
+
+function hasAdjacentEncodedOctet(value: string, index: number): boolean {
+	const previousTokenStart = index - 3;
+	if (previousTokenStart >= 0) {
+		const previousToken = value.slice(previousTokenStart, previousTokenStart + 3);
+		if (/^=[0-9A-Fa-f]{2}$/.test(previousToken)) {
+			return true;
+		}
+	}
+
+	const nextTokenStart = index + 3;
+	if (nextTokenStart + 2 < value.length) {
+		const nextToken = value.slice(nextTokenStart, nextTokenStart + 3);
+		if (/^=[0-9A-Fa-f]{2}$/.test(nextToken)) {
+			return true;
+		}
+	}
+
+	return false;
 }

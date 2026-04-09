@@ -1,3 +1,7 @@
+import { requestUrl } from 'obsidian';
+import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib';
 import type { ExpenseManagerSettings } from '../../settings';
 import type { TransactionData } from '../../types';
 import { DuplicateTransactionError } from '../../services/expense-service';
@@ -38,12 +42,34 @@ interface MergedEmailFinanceProposal {
 	unitLabels: string[];
 }
 
+interface ConflictingEmailFinanceProposalGroup {
+	proposals: MergedEmailFinanceProposal[];
+	unitLabels: string[];
+}
+
+interface ResolvedEmailFinanceProposals {
+	accepted: MergedEmailFinanceProposal[];
+	conflicts: ConflictingEmailFinanceProposalGroup[];
+}
+
 interface ProcessedMessageOutcome {
 	plannedUnits: number;
 	createdPendingNotes: number;
 	createdNeedsAttentionNotes: number;
 	failedUnits: number;
 	skippedDuplicates: number;
+}
+
+interface RemoteArtifactFetchResponse {
+	status: number;
+	headers: Record<string, string>;
+	arrayBuffer: ArrayBuffer;
+	text: string;
+}
+
+interface RemoteReceiptMaterializationResult {
+	unit: PlannedEmailFinanceUnit | null;
+	failureReason?: string;
 }
 
 interface EmailFinanceSyncServiceOptions {
@@ -68,8 +94,8 @@ export class EmailFinanceSyncService {
 	) {
 		this.provider = options?.provider;
 		this.coarseFilter = options?.coarseFilter ?? new EmailFinanceCoarseFilter();
-		this.planner = options?.planner ?? new EmailFinanceMessagePlanner();
 		this.logger = options?.logger;
+		this.planner = options?.planner ?? new EmailFinanceMessagePlanner(undefined, this.logger);
 	}
 
 	async syncNewMessages(): Promise<EmailFinanceSyncSummary> {
@@ -182,10 +208,23 @@ export class EmailFinanceSyncService {
 	}
 
 	private async processMessage(message: FinanceMailMessage): Promise<ProcessedMessageOutcome> {
-		const units = this.planner.planMessage(message);
+		const planningResult = this.planner.planMessageDetailed(message);
+		const units = planningResult.units;
+		const remoteReceiptCache = new Map<string, Promise<RemoteReceiptMaterializationResult>>();
 		this.logger?.info('Email finance message planned', {
 			messageId: message.id,
 			subject: message.subject,
+			parserAttempts: planningResult.parserAttempts.map((attempt) => ({
+				parserId: attempt.parserId,
+				matched: attempt.matched,
+				stop: attempt.stop,
+				reason: attempt.reason,
+				unitLabels: attempt.units.map((unit) => `${unit.kind}:${unit.label}`),
+				diagnostics: attempt.diagnostics ?? null,
+			})),
+			usedGenericFallback: planningResult.usedGenericFallback,
+			attachmentUnitCount: planningResult.attachmentUnitCount,
+			textUnitCreated: planningResult.textUnitCreated,
 			plannedUnits: units.map((unit) => ({
 				kind: unit.kind,
 				label: unit.label,
@@ -199,7 +238,15 @@ export class EmailFinanceSyncService {
 		for (const unit of units) {
 			try {
 				this.logPlannedUnit(message, unit);
-				const proposal = await this.extractProposal(unit);
+				const materialization = await this.materializeRemoteReceiptUnit(message, unit, remoteReceiptCache);
+				if (materialization.failureReason) {
+					failureMessages.push(`${this.formatUnitLabel(unit)} -> ${materialization.failureReason}`);
+				}
+				const effectiveUnit = materialization.unit ?? unit;
+				if (effectiveUnit !== unit) {
+					this.logPlannedUnit(message, effectiveUnit);
+				}
+				const proposal = await this.extractProposal(effectiveUnit);
 				if (!proposal || proposal.amount <= 0) {
 					failedUnits += 1;
 					failureMessages.push(`${this.formatUnitLabel(unit)} -> no valid transaction proposal`);
@@ -207,7 +254,7 @@ export class EmailFinanceSyncService {
 				}
 
 				extractedProposals.push({
-					unit,
+					unit: effectiveUnit,
 					proposal: {
 						...proposal,
 						source: 'email',
@@ -226,10 +273,40 @@ export class EmailFinanceSyncService {
 		}
 
 		const mergedProposals = this.mergeEquivalentProposals(extractedProposals);
+		const resolvedProposals = this.resolveMergedProposals(mergedProposals);
 		let createdPendingNotes = 0;
 		let createdNeedsAttentionNotes = 0;
 		let skippedDuplicates = 0;
-		for (const mergedProposal of mergedProposals) {
+		for (const conflict of resolvedProposals.conflicts) {
+			try {
+				this.logger?.warn('Email finance message has conflicting proposals', {
+					messageId: message.id,
+					subject: message.subject,
+					candidateCount: conflict.proposals.length,
+					candidates: conflict.proposals.map((candidate) => this.summarizeProposal(candidate.proposal)),
+				});
+				const sourceContext = this.buildSourceContext(message, units, failureMessages, {
+					kind: 'needs-attention',
+					unitLabels: conflict.unitLabels,
+					candidateProposals: conflict.proposals,
+				});
+				await this.pendingProposalService.createNeedsAttentionProposal({
+					message,
+					reason: this.buildConflictingProposalsReason(conflict),
+					sourceContext,
+					...this.getBestMessageArtifactFields(message, sourceContext),
+				});
+				createdNeedsAttentionNotes += 1;
+			} catch (error) {
+				failedUnits += 1;
+				this.logger?.warn('Email finance conflicting proposals note failed', {
+					messageId: message.id,
+					error: (error as Error).message,
+				});
+			}
+		}
+
+		for (const mergedProposal of resolvedProposals.accepted) {
 			try {
 				const sourceContext = this.buildSourceContext(message, units, failureMessages, {
 					kind: 'pending-approval',
@@ -265,7 +342,7 @@ export class EmailFinanceSyncService {
 			}
 		}
 
-		if (mergedProposals.length === 0) {
+		if (resolvedProposals.accepted.length === 0 && resolvedProposals.conflicts.length === 0) {
 			try {
 				const sourceContext = this.buildSourceContext(message, units, failureMessages, {
 					kind: 'needs-attention',
@@ -294,6 +371,216 @@ export class EmailFinanceSyncService {
 			failedUnits,
 			skippedDuplicates,
 		};
+	}
+
+	private async materializeRemoteReceiptUnit(
+		message: FinanceMailMessage,
+		unit: PlannedEmailFinanceUnit,
+		cache: Map<string, Promise<RemoteReceiptMaterializationResult>>,
+	): Promise<RemoteReceiptMaterializationResult> {
+		if (unit.kind !== 'text' || !unit.remoteArtifactUrl) {
+			return { unit: null };
+		}
+
+		const cacheKey = `${unit.remoteArtifactUrl}::${unit.remoteArtifactFileName ?? ''}`;
+		if (!cache.has(cacheKey)) {
+			cache.set(cacheKey, this.fetchRemoteReceiptUnit(message, unit));
+		}
+		return await (cache.get(cacheKey) ?? Promise.resolve({ unit: null }));
+	}
+
+	private async fetchRemoteReceiptUnit(
+		message: FinanceMailMessage,
+		unit: Extract<PlannedEmailFinanceUnit, { kind: 'text' }>,
+	): Promise<RemoteReceiptMaterializationResult> {
+		const url = unit.remoteArtifactUrl;
+		if (!url) {
+			return { unit: null };
+		}
+
+		this.logger?.info('Email finance remote artifact fetch started', {
+			messageId: message.id,
+			label: unit.label,
+			plannerSourceId: unit.plannerSourceId ?? 'unknown',
+			url,
+		});
+
+		try {
+			const response = await this.fetchRemoteArtifact(url);
+			const contentType = response.headers['content-type'] ?? response.headers['Content-Type'] ?? '';
+			const looksLikePdf = this.looksLikePdfResponse(response.arrayBuffer, contentType, url);
+			if (response.status >= 400 || !looksLikePdf) {
+				this.logger?.warn('Email finance remote artifact fetch fell back to text route', {
+					messageId: message.id,
+					label: unit.label,
+					plannerSourceId: unit.plannerSourceId ?? 'unknown',
+					url,
+					status: response.status,
+					contentType,
+					textPreview: response.text.slice(0, 400),
+				});
+				return {
+					unit: null,
+					failureReason: `remote artifact fetch fell back to text route (status=${response.status}, contentType=${contentType || 'unknown'})`,
+				};
+			}
+
+			const fileName = this.resolveRemoteArtifactFileName(
+				response.headers['content-disposition'] ?? response.headers['Content-Disposition'] ?? '',
+				unit.remoteArtifactFileName,
+				url,
+			);
+			const mimeType = unit.remoteArtifactMimeType ?? (contentType.split(';')[0]?.trim() || 'application/pdf');
+			this.logger?.info('Email finance remote artifact fetched', {
+				messageId: message.id,
+				label: unit.label,
+				plannerSourceId: unit.plannerSourceId ?? 'unknown',
+				url,
+				status: response.status,
+				contentType,
+				fileName,
+				byteLength: response.arrayBuffer.byteLength,
+			});
+
+			return {
+				unit: {
+					kind: 'receipt',
+					label: `${unit.label} [remote-artifact]`,
+					plannerSourceId: `${unit.plannerSourceId ?? 'unknown'}:remote-artifact`,
+					request: {
+						bytes: response.arrayBuffer,
+						fileName,
+						mimeType,
+						caption: unit.request.text,
+						intent: 'neutral',
+						source: 'email',
+					},
+				},
+			};
+		} catch (error) {
+			const errorMessage = (error as Error).message;
+			this.logger?.warn('Email finance remote artifact fetch failed', {
+				messageId: message.id,
+				label: unit.label,
+				plannerSourceId: unit.plannerSourceId ?? 'unknown',
+				url,
+				error: errorMessage,
+			});
+			return {
+				unit: null,
+				failureReason: `remote artifact fetch failed (${errorMessage})`,
+			};
+		}
+	}
+
+	private async fetchRemoteArtifact(url: string): Promise<RemoteArtifactFetchResponse> {
+		try {
+			const response = await requestUrl({
+				url,
+				method: 'GET',
+				throw: false,
+				headers: this.buildRemoteArtifactRequestHeaders(),
+			});
+			return {
+				status: response.status,
+				headers: Object.fromEntries(Object.entries(response.headers).map(([key, value]) => [key.toLowerCase(), String(value)])),
+				arrayBuffer: response.arrayBuffer,
+				text: response.text,
+			};
+		} catch (error) {
+			if (!this.isBlockedByClientError(error)) {
+				throw error;
+			}
+
+			this.logger?.info('Email finance remote artifact requestUrl blocked, retrying with node http', {
+				url,
+				error: (error as Error).message,
+			});
+			return this.fetchRemoteArtifactWithNodeHttp(url);
+		}
+	}
+
+	private async fetchRemoteArtifactWithNodeHttp(
+		url: string,
+		redirectCount = 0,
+		cookieJar: Map<string, string> = new Map(),
+	): Promise<RemoteArtifactFetchResponse> {
+		if (redirectCount > 5) {
+			throw new Error(`Too many redirects while fetching remote artifact: ${url}`);
+		}
+
+		const parsedUrl = new URL(url);
+		const requester = parsedUrl.protocol === 'http:' ? httpRequest : httpsRequest;
+
+		return new Promise<RemoteArtifactFetchResponse>((resolve, reject) => {
+			const request = requester({
+				protocol: parsedUrl.protocol,
+				hostname: parsedUrl.hostname,
+				port: parsedUrl.port || undefined,
+				path: `${parsedUrl.pathname}${parsedUrl.search}`,
+				method: 'GET',
+				headers: this.buildRemoteArtifactRequestHeaders(cookieJar),
+			}, (response) => {
+				const status = response.statusCode ?? 0;
+				const headers = this.normalizeNodeHeaders(response.headers);
+				this.updateCookieJar(cookieJar, headers['set-cookie'] ?? '');
+				const redirectLocation = headers.location;
+				if (status >= 300 && status < 400 && redirectLocation) {
+					this.logger?.debug('Email finance remote artifact redirect', {
+						from: url,
+						to: new URL(redirectLocation, url).toString(),
+						status,
+						cookieCount: cookieJar.size,
+					});
+					response.resume();
+					resolve(this.fetchRemoteArtifactWithNodeHttp(
+						new URL(redirectLocation, url).toString(),
+						redirectCount + 1,
+						cookieJar,
+					));
+					return;
+				}
+
+				const chunks: Buffer[] = [];
+				response.on('data', (chunk: Buffer | Uint8Array | string) => {
+					if (Buffer.isBuffer(chunk)) {
+						chunks.push(chunk);
+						return;
+					}
+
+					if (chunk instanceof Uint8Array) {
+						chunks.push(Buffer.from(chunk));
+						return;
+					}
+
+					chunks.push(Buffer.from(String(chunk)));
+				});
+				response.on('end', () => {
+					try {
+						const rawBuffer = Buffer.concat(chunks);
+						const decodedBuffer = this.decodeNodeHttpBuffer(rawBuffer, headers['content-encoding'] ?? '');
+						resolve({
+							status,
+							headers,
+							arrayBuffer: decodedBuffer.buffer.slice(
+								decodedBuffer.byteOffset,
+								decodedBuffer.byteOffset + decodedBuffer.byteLength,
+							),
+							text: decodedBuffer.toString('utf8'),
+						});
+					} catch (error) {
+						reject(error);
+					}
+				});
+				response.on('error', reject);
+			});
+
+			request.setTimeout(20_000, () => {
+				request.destroy(new Error(`Timed out while fetching remote artifact: ${url}`));
+			});
+			request.on('error', reject);
+			request.end();
+		});
 	}
 
 	private async extractProposal(unit: PlannedEmailFinanceUnit): Promise<TransactionData | null> {
@@ -335,6 +622,136 @@ export class EmailFinanceSyncService {
 		return proposal.data ?? null;
 	}
 
+	private looksLikePdfResponse(bytes: ArrayBuffer, contentType: string, url: string): boolean {
+		const normalizedType = contentType.toLowerCase();
+		if (normalizedType.includes('application/pdf')) {
+			return true;
+		}
+		if (/\.pdf(?:$|[?#])/i.test(url)) {
+			return true;
+		}
+
+		const signature = this.peekAscii(bytes, 5);
+		return signature === '%PDF-';
+	}
+
+	private resolveRemoteArtifactFileName(contentDisposition: string, fallback: string | undefined, url: string): string {
+		const utf8Match = contentDisposition.match(/filename\*\s*=\s*UTF-8''([^;]+)/i)?.[1];
+		if (utf8Match) {
+			try {
+				return decodeURIComponent(utf8Match.trim().replace(/^["']|["']$/g, ''));
+			} catch {
+				// ignore
+			}
+		}
+
+		const simpleMatch = contentDisposition.match(/filename\s*=\s*("?)([^";]+)\1/i)?.[2];
+		if (simpleMatch) {
+			return simpleMatch.trim();
+		}
+
+		if (fallback?.trim()) {
+			return fallback.trim();
+		}
+
+		try {
+			const parsedUrl = new URL(url);
+			const lastSegment = parsedUrl.pathname.split('/').filter(Boolean).pop();
+			if (lastSegment) {
+				return lastSegment.toLowerCase().endsWith('.pdf') ? lastSegment : `${lastSegment}.pdf`;
+			}
+		} catch {
+			// ignore
+		}
+
+		return 'remote-email-artifact.pdf';
+	}
+
+	private peekAscii(bytes: ArrayBuffer, length: number): string {
+		const view = new Uint8Array(bytes, 0, Math.min(length, bytes.byteLength));
+		return Array.from(view, (value) => String.fromCharCode(value)).join('');
+	}
+
+	private buildRemoteArtifactRequestHeaders(cookieJar?: Map<string, string>): Record<string, string> {
+		const headers: Record<string, string> = {
+			Accept: 'application/pdf,application/octet-stream;q=0.9,*/*;q=0.8',
+			Referer: 'https://www.ozon.ru/my/e-check/',
+			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Obsidian Expense Manager',
+			'Accept-Encoding': 'identity',
+		};
+		const cookieHeader = this.buildCookieHeader(cookieJar);
+		if (cookieHeader) {
+			headers.Cookie = cookieHeader;
+		}
+		return headers;
+	}
+
+	private isBlockedByClientError(error: unknown): boolean {
+		return /ERR_BLOCKED_BY_CLIENT/i.test((error as Error)?.message ?? '');
+	}
+
+	private normalizeNodeHeaders(headers: IncomingHttpHeaders): Record<string, string> {
+		return Object.fromEntries(
+			Object.entries(headers)
+				.filter((entry): entry is [string, string | string[]] => entry[1] != null)
+				.map(([key, value]) => [key.toLowerCase(), Array.isArray(value) ? value.join(', ') : String(value)]),
+		);
+	}
+
+	private updateCookieJar(cookieJar: Map<string, string>, setCookieHeader: string): void {
+		if (!setCookieHeader) {
+			return;
+		}
+
+		for (const cookieChunk of setCookieHeader.split(/,(?=[^;,]+=)/)) {
+			const firstPart = cookieChunk.split(';', 1)[0]?.trim();
+			if (!firstPart) {
+				continue;
+			}
+
+			const separatorIndex = firstPart.indexOf('=');
+			if (separatorIndex <= 0) {
+				continue;
+			}
+
+			const name = firstPart.slice(0, separatorIndex).trim();
+			const value = firstPart.slice(separatorIndex + 1).trim();
+			if (!name) {
+				continue;
+			}
+
+			cookieJar.set(name, value);
+		}
+	}
+
+	private buildCookieHeader(cookieJar?: Map<string, string>): string {
+		if (!cookieJar || cookieJar.size === 0) {
+			return '';
+		}
+
+		return Array.from(cookieJar.entries())
+			.map(([name, value]) => `${name}=${value}`)
+			.join('; ');
+	}
+
+	private decodeNodeHttpBuffer(buffer: Buffer, contentEncoding: string): Buffer {
+		const normalizedEncoding = contentEncoding.toLowerCase();
+		try {
+			if (normalizedEncoding.includes('br')) {
+				return brotliDecompressSync(buffer);
+			}
+			if (normalizedEncoding.includes('gzip')) {
+				return gunzipSync(buffer);
+			}
+			if (normalizedEncoding.includes('deflate')) {
+				return inflateSync(buffer);
+			}
+		} catch {
+			return buffer;
+		}
+		return buffer;
+	}
+
 	private logPlannedUnit(message: FinanceMailMessage, unit: PlannedEmailFinanceUnit): void {
 		if (unit.kind === 'text') {
 			this.logger?.info('Email finance text unit prepared', {
@@ -342,6 +759,7 @@ export class EmailFinanceSyncService {
 				subject: message.subject,
 				label: unit.label,
 				plannerSourceId: unit.plannerSourceId ?? 'unknown',
+				remoteArtifactUrl: unit.remoteArtifactUrl ?? null,
 				textLength: unit.request.text.length,
 				textPreview: unit.request.text.slice(0, 4000),
 			});
@@ -349,6 +767,7 @@ export class EmailFinanceSyncService {
 				messageId: message.id,
 				label: unit.label,
 				plannerSourceId: unit.plannerSourceId ?? 'unknown',
+				remoteArtifactUrl: unit.remoteArtifactUrl ?? null,
 				text: unit.request.text,
 			});
 			return;
@@ -421,6 +840,93 @@ export class EmailFinanceSyncService {
 		return merged;
 	}
 
+	private resolveMergedProposals(mergedProposals: MergedEmailFinanceProposal[]): ResolvedEmailFinanceProposals {
+		const groups: MergedEmailFinanceProposal[][] = [];
+		for (const proposal of mergedProposals) {
+			const matchingGroupIndexes: number[] = [];
+			for (let index = 0; index < groups.length; index += 1) {
+				if (groups[index]?.some((candidate) => this.areCompetingProposals(candidate.proposal, proposal.proposal))) {
+					matchingGroupIndexes.push(index);
+				}
+			}
+
+			if (matchingGroupIndexes.length === 0) {
+				groups.push([proposal]);
+				continue;
+			}
+
+			const mergedGroup: MergedEmailFinanceProposal[] = [proposal];
+			for (let index = matchingGroupIndexes.length - 1; index >= 0; index -= 1) {
+				const groupIndex = matchingGroupIndexes[index];
+				const existingGroup = groups[groupIndex];
+				if (!existingGroup) {
+					continue;
+				}
+				mergedGroup.push(...existingGroup);
+				groups.splice(groupIndex, 1);
+			}
+			groups.push(mergedGroup);
+		}
+
+		const accepted: MergedEmailFinanceProposal[] = [];
+		const conflicts: ConflictingEmailFinanceProposalGroup[] = [];
+		for (const group of groups) {
+			if (group.length <= 1) {
+				if (group[0]) {
+					accepted.push(group[0]);
+				}
+				continue;
+			}
+
+			const sortedGroup = group.slice().sort((left, right) => this.scoreProposal(right.proposal) - this.scoreProposal(left.proposal));
+			const autoResolved = this.tryResolveDominantConflict(sortedGroup);
+			if (autoResolved) {
+				accepted.push(autoResolved);
+				continue;
+			}
+
+			conflicts.push({
+				proposals: sortedGroup,
+				unitLabels: this.uniqueStrings(group.flatMap((proposal) => proposal.unitLabels)),
+			});
+		}
+
+		return {
+			accepted,
+			conflicts,
+		};
+	}
+
+	private tryResolveDominantConflict(group: MergedEmailFinanceProposal[]): MergedEmailFinanceProposal | null {
+		const [best, second] = group;
+		if (!best || !second) {
+			return best ?? null;
+		}
+
+		const bestScore = this.scoreProposal(best.proposal);
+		const secondScore = this.scoreProposal(second.proposal);
+		const bestHasFiscalFields = this.hasFiscalFields(best.proposal);
+		const secondHasFiscalFields = this.hasFiscalFields(second.proposal);
+
+		if (!bestHasFiscalFields || secondHasFiscalFields) {
+			return null;
+		}
+
+		if (bestScore < secondScore + 4) {
+			return null;
+		}
+
+		if (group.some((candidate) => this.hasFiscalFields(candidate.proposal) && candidate !== best)) {
+			return null;
+		}
+
+		this.logger?.info('Email finance conflict auto-resolved in favor of dominant fiscal proposal', {
+			accepted: this.summarizeProposal(best.proposal),
+			rejected: group.slice(1).map((candidate) => this.summarizeProposal(candidate.proposal)),
+		});
+		return best;
+	}
+
 	private areEquivalentProposals(left: TransactionData, right: TransactionData): boolean {
 		if (left.type !== right.type) {
 			return false;
@@ -441,6 +947,44 @@ export class EmailFinanceSyncService {
 		}
 
 		return Math.abs(leftTime - rightTime) <= 15 * 60 * 1000;
+	}
+
+	private areCompetingProposals(left: TransactionData, right: TransactionData): boolean {
+		if (this.areEquivalentProposals(left, right)) {
+			return false;
+		}
+
+		if (left.type !== right.type) {
+			return false;
+		}
+
+		if ((left.currency || '').trim().toUpperCase() !== (right.currency || '').trim().toUpperCase()) {
+			return false;
+		}
+
+		if (this.shareFiscalIdentity(left, right)) {
+			return true;
+		}
+
+		const leftTime = new Date(left.dateTime).getTime();
+		const rightTime = new Date(right.dateTime).getTime();
+		if (!Number.isNaN(leftTime) && !Number.isNaN(rightTime)) {
+			return Math.abs(leftTime - rightTime) <= 15 * 60 * 1000;
+		}
+
+		return Boolean(left.dateTime && right.dateTime && left.dateTime === right.dateTime);
+	}
+
+	private shareFiscalIdentity(left: TransactionData, right: TransactionData): boolean {
+		return Boolean(
+			(left.fn && right.fn && left.fn === right.fn)
+			|| (left.fd && right.fd && left.fd === right.fd)
+			|| (left.fp && right.fp && left.fp === right.fp),
+		);
+	}
+
+	private hasFiscalFields(proposal: TransactionData): boolean {
+		return Boolean(proposal.fn || proposal.fd || proposal.fp);
 	}
 
 	private mergeProposalData(left: TransactionData, right: TransactionData): TransactionData {
@@ -547,11 +1091,25 @@ export class EmailFinanceSyncService {
 			return 'Passed coarse filter, but no extraction units were planned for this email.';
 		}
 
+		const authGatedFailure = failureMessages.find((message) =>
+			/remote artifact fetch failed|remote artifact fetch fell back|too many redirects|timed out while fetching remote artifact|requires authorization|auth/i.test(message),
+		);
+		if (authGatedFailure) {
+			return 'Passed coarse filter, but the receipt artifact could not be fetched automatically and likely requires authorization or interactive access.';
+		}
+
 		if (failureMessages.length === 0) {
 			return 'Passed coarse filter, but no valid transaction proposal was extracted.';
 		}
 
 		return `Passed coarse filter, but no valid transaction proposal was extracted from ${units.length} planned unit(s).`;
+	}
+
+	private buildConflictingProposalsReason(conflict: ConflictingEmailFinanceProposalGroup): string {
+		const amounts = this.uniqueStrings(conflict.proposals.map((candidate) =>
+			`${candidate.proposal.amount.toFixed(2)} ${(candidate.proposal.currency || 'RUB').trim().toUpperCase()}`,
+		));
+		return `Multiple conflicting transaction proposals were extracted from the same email. Candidate amounts: ${amounts.join(', ')}.`;
 	}
 
 	private buildSourceContext(
@@ -561,6 +1119,7 @@ export class EmailFinanceSyncService {
 		options: {
 			kind: 'pending-approval' | 'needs-attention';
 			unitLabels: string[];
+			candidateProposals?: MergedEmailFinanceProposal[];
 		},
 	): string {
 		const lines = [
@@ -575,18 +1134,31 @@ export class EmailFinanceSyncService {
 				: '- Attachments: none',
 			'',
 			'### Planned Units',
-			...(units.length > 0 ? units.map((unit) => `- ${this.formatUnitLabel(unit)}`) : ['- none']),
+			...(units.length > 0 ? units.map((unit) => `- ${this.describeUnit(unit)}`) : ['- none']),
 			'',
 			`### Matched Units (${options.kind})`,
 			...(options.unitLabels.length > 0 ? options.unitLabels.map((label) => `- ${label}`) : ['- none']),
 			'',
 			'### Failed Attempts',
-			...(failureMessages.length > 0 ? failureMessages.map((messageValue) => `- ${messageValue}`) : ['- none']),
+			...(failureMessages.length > 0 ? this.uniqueStrings(failureMessages).map((messageValue) => `- ${messageValue}`) : ['- none']),
 		];
+
+		if (options.candidateProposals && options.candidateProposals.length > 0) {
+			lines.push(
+				'',
+				'### Candidate Proposals',
+				...options.candidateProposals.flatMap((candidate, index) => this.describeCandidateProposal(candidate, index + 1)),
+			);
+		}
 
 		const links = this.extractHtmlLinks(message.htmlBody || message.htmlBodyPreview || '');
 		if (links.length > 0) {
 			lines.push('', '### HTML Links', ...links.map((link) => `- ${link}`));
+		}
+
+		const remoteReceiptLinks = this.extractRemoteReceiptLinksFromMessage(message);
+		if (remoteReceiptLinks.length > 0) {
+			lines.push('', '### Remote Receipt Links', ...remoteReceiptLinks.map((link) => `- ${link}`));
 		}
 
 		const bodyPreview = this.getBodyPreview(message);
@@ -595,6 +1167,30 @@ export class EmailFinanceSyncService {
 		}
 
 		return lines.filter((value) => value !== '').join('\n');
+	}
+
+	private describeCandidateProposal(
+		candidate: MergedEmailFinanceProposal,
+		index: number,
+	): string[] {
+		const proposal = candidate.proposal;
+		const details = [
+			`- Candidate ${index}: ${proposal.type} ${proposal.amount.toFixed(2)} ${(proposal.currency || 'RUB').trim().toUpperCase()} at ${proposal.dateTime || 'unknown time'}`,
+			`  Description: ${proposal.description || 'n/a'}`,
+			`  Category: ${proposal.category || 'n/a'}`,
+			`  Matched Units: ${candidate.unitLabels.join(', ') || 'none'}`,
+		];
+
+		const fiscalParts = [
+			proposal.fn ? `fn=${proposal.fn}` : '',
+			proposal.fd ? `fd=${proposal.fd}` : '',
+			proposal.fp ? `fp=${proposal.fp}` : '',
+		].filter((value) => value.length > 0);
+		if (fiscalParts.length > 0) {
+			details.push(`  Fiscal: ${fiscalParts.join(', ')}`);
+		}
+
+		return details;
 	}
 
 	private getBodyPreview(message: FinanceMailMessage): string {
@@ -632,6 +1228,14 @@ export class EmailFinanceSyncService {
 
 	private formatUnitLabel(unit: PlannedEmailFinanceUnit): string {
 		return `${unit.kind}:${unit.label}`;
+	}
+
+	private describeUnit(unit: PlannedEmailFinanceUnit): string {
+		const baseLabel = this.formatUnitLabel(unit);
+		if (unit.kind === 'text' && unit.remoteArtifactUrl) {
+			return `${baseLabel} (remote artifact: ${unit.remoteArtifactUrl})`;
+		}
+		return baseLabel;
 	}
 
 	private pickBestMessageArtifact(message: FinanceMailMessage): FinanceMailAttachment | null {
@@ -741,6 +1345,17 @@ export class EmailFinanceSyncService {
 		const metadataRows = this.buildEmailMetadataRows(message)
 			.map((row) => `<div class="meta-row"><span class="meta-label">${this.escapeHtml(row.label)}:</span> <span class="meta-value">${this.escapeHtml(row.value)}</span></div>`)
 			.join('\n');
+		const remoteReceiptLinks = this.extractRemoteReceiptLinksFromMessage(message);
+		const remoteLinksMarkup = remoteReceiptLinks.length > 0
+			? [
+				'<div class="remote-links">',
+				'  <h2>Remote Receipt Links</h2>',
+				'  <ul>',
+				...remoteReceiptLinks.map((link) => `    <li><a href="${this.escapeHtml(link)}">${this.escapeHtml(link)}</a></li>`),
+				'  </ul>',
+				'</div>',
+			].join('\n')
+			: '';
 		return [
 			'<!DOCTYPE html>',
 			'<html lang="en">',
@@ -756,6 +1371,10 @@ export class EmailFinanceSyncService {
 			'    .meta-label { font-weight: 600; color: #334155; }',
 			'    .meta-value { color: #475569; word-break: break-word; }',
 			'    .content { padding: 24px; background: #ffffff; }',
+			'    .remote-links { margin: 0 24px 24px; padding: 16px 18px; border: 1px solid #dbe2ea; border-radius: 12px; background: #f8fafc; }',
+			'    .remote-links h2 { margin: 0 0 12px 0; font-size: 16px; }',
+			'    .remote-links ul { margin: 0; padding-left: 18px; }',
+			'    .remote-links li { margin: 6px 0; }',
 			'    .content img { max-width: 100%; height: auto; }',
 			'    .content table { max-width: 100%; }',
 			'  </style>',
@@ -766,6 +1385,7 @@ export class EmailFinanceSyncService {
 			`      <h1>${title}</h1>`,
 			metadataRows ? `      ${metadataRows}` : '',
 			'    </div>',
+			remoteLinksMarkup ? `    ${remoteLinksMarkup}` : '',
 			'    <div class="content">',
 			htmlBody,
 			'    </div>',
@@ -778,11 +1398,20 @@ export class EmailFinanceSyncService {
 	private wrapTextEmailArtifact(message: FinanceMailMessage, textBody: string): string {
 		const metadataLines = this.buildEmailMetadataRows(message)
 			.map((row) => `${row.label}: ${row.value}`);
+		const remoteReceiptLinks = this.extractRemoteReceiptLinksFromMessage(message);
 		return [
 			'Email Message Snapshot',
 			'======================',
 			'',
 			...metadataLines,
+			...(remoteReceiptLinks.length > 0
+				? [
+					'',
+					'Remote Receipt Links',
+					'--------------------',
+					...remoteReceiptLinks,
+				]
+				: []),
 			'',
 			'Body',
 			'----',
@@ -803,6 +1432,24 @@ export class EmailFinanceSyncService {
 				: { label: 'Attachments', value: 'none' },
 		].filter((row): row is { label: string; value: string } => Boolean(row?.value));
 		return rows;
+	}
+
+	private extractRemoteReceiptLinksFromMessage(message: FinanceMailMessage): string[] {
+		const htmlLinks = this.extractHtmlLinks(message.htmlBody || message.htmlBodyPreview || '');
+		const bodyLinks = this.extractLinksFromText([
+			message.textBody ?? '',
+			message.textBodyPreview ?? '',
+			message.htmlBody ?? '',
+			message.htmlBodyPreview ?? '',
+		].join('\n'));
+		return this.uniqueStrings([...htmlLinks, ...bodyLinks].filter((link) =>
+			/(?:ozon\.ru\/my\/e-check\/download|check\.yandex\.ru|receipt|e-check)/i.test(link),
+		));
+	}
+
+	private extractLinksFromText(value: string): string[] {
+		const matches = value.match(/https?:\/\/[^\s"'<>]+/gi) ?? [];
+		return this.uniqueStrings(matches.map((match) => match.trim()));
 	}
 
 	private escapeHtml(value: string): string {

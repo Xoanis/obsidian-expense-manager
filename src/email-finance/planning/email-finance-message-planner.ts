@@ -2,11 +2,14 @@ import type {
 	FinanceReceiptProposalRequest,
 	FinanceTextProposalRequest,
 } from '../../services/finance-intake-service';
+import type { PluginLogger } from '../../utils/plugin-debug-log';
 import type { FinanceMailAttachment, FinanceMailMessage } from '../transport/finance-mail-provider';
 import { decodeCommonHtmlEntities, decodeEmailTransferText } from '../utils/email-content-normalizer';
 import {
 	CompositeEmailFinanceMessageParser,
+	collectEmailFinanceMessageDebugSignals,
 	createDefaultEmailFinanceMessageParsers,
+	type EmailFinanceParserAttempt,
 	type EmailFinanceMessageParser,
 } from '../parsers/email-finance-message-parsers';
 
@@ -14,6 +17,9 @@ export interface PlannedEmailFinanceTextUnit {
 	kind: 'text';
 	label: string;
 	plannerSourceId?: string;
+	remoteArtifactUrl?: string;
+	remoteArtifactFileName?: string;
+	remoteArtifactMimeType?: string;
 	request: FinanceTextProposalRequest;
 }
 
@@ -26,23 +32,86 @@ export interface PlannedEmailFinanceReceiptUnit {
 
 export type PlannedEmailFinanceUnit = PlannedEmailFinanceTextUnit | PlannedEmailFinanceReceiptUnit;
 
+export interface EmailFinancePlanningResult {
+	units: PlannedEmailFinanceUnit[];
+	parserAttempts: EmailFinanceParserAttempt[];
+	usedGenericFallback: boolean;
+	attachmentUnitCount: number;
+	textUnitCreated: boolean;
+}
+
 export class EmailFinanceMessagePlanner {
 	private readonly parserChain: CompositeEmailFinanceMessageParser;
+	private readonly logger?: PluginLogger;
 
-	constructor(parsers: EmailFinanceMessageParser[] = createDefaultEmailFinanceMessageParsers()) {
+	constructor(
+		parsers: EmailFinanceMessageParser[] = createDefaultEmailFinanceMessageParsers(),
+		logger?: PluginLogger,
+	) {
 		this.parserChain = new CompositeEmailFinanceMessageParser(parsers);
+		this.logger = logger;
 	}
 
 	planMessage(message: FinanceMailMessage): PlannedEmailFinanceUnit[] {
+		return this.planMessageDetailed(message).units;
+	}
+
+	planMessageDetailed(message: FinanceMailMessage): EmailFinancePlanningResult {
+		const debugSignals = collectEmailFinanceMessageDebugSignals(message);
+		this.logger?.info('Email finance planner started', {
+			messageId: message.id,
+			subject: message.subject,
+			from: message.from,
+			attachmentCount: message.attachments.length,
+			attachmentNames: message.attachmentNames,
+			textBodyLength: message.textBody?.length ?? 0,
+			htmlBodyLength: message.htmlBody?.length ?? 0,
+			textBodyPreviewLength: message.textBodyPreview?.length ?? 0,
+			htmlBodyPreviewLength: message.htmlBodyPreview?.length ?? 0,
+		});
+		this.logger?.info('Email finance planner message signals', {
+			messageId: message.id,
+			subject: message.subject,
+			from: message.from,
+			debugSignals,
+		});
+
 		const units: PlannedEmailFinanceUnit[] = [];
-		const parserResults = this.parserChain.parse(message);
-		for (const result of parserResults) {
-			units.push(...result.units.map((unit) => ({
+		const parserAttempts = this.parserChain.parse(message);
+		for (const attempt of parserAttempts) {
+			this.logger?.info('Email finance parser attempt', {
+				messageId: message.id,
+				subject: message.subject,
+				parserId: attempt.parserId,
+				matched: attempt.matched,
+				stop: attempt.stop,
+				reason: attempt.reason,
+				unitLabels: attempt.units.map((unit) => `${unit.kind}:${unit.label}`),
+				diagnostics: attempt.diagnostics ?? null,
+			});
+			if (!attempt.matched || attempt.units.length === 0) {
+				continue;
+			}
+
+			units.push(...attempt.units.map((unit) => ({
 				...unit,
-				plannerSourceId: result.parserId,
+				plannerSourceId: attempt.parserId,
 			})));
-			if (result.stop) {
-				return this.uniqueUnits(units);
+			if (attempt.stop) {
+				const uniqueUnits = this.uniqueUnits(units);
+				this.logger?.info('Email finance planner stopped after parser match', {
+					messageId: message.id,
+					subject: message.subject,
+					parserId: attempt.parserId,
+					unitCount: uniqueUnits.length,
+				});
+				return {
+					units: uniqueUnits,
+					parserAttempts,
+					usedGenericFallback: false,
+					attachmentUnitCount: 0,
+					textUnitCreated: false,
+				};
 			}
 		}
 
@@ -54,7 +123,21 @@ export class EmailFinanceMessagePlanner {
 			units.push(textUnit);
 		}
 
-		return this.uniqueUnits(units);
+		const uniqueUnits = this.uniqueUnits(units);
+		this.logger?.info('Email finance planner fallback completed', {
+			messageId: message.id,
+			subject: message.subject,
+			attachmentUnitCount: attachmentUnits.length,
+			textUnitCreated: Boolean(textUnit),
+			unitCount: uniqueUnits.length,
+		});
+		return {
+			units: uniqueUnits,
+			parserAttempts,
+			usedGenericFallback: true,
+			attachmentUnitCount: attachmentUnits.length,
+			textUnitCreated: Boolean(textUnit),
+		};
 	}
 
 	private planAttachmentUnits(message: FinanceMailMessage): PlannedEmailFinanceReceiptUnit[] {
@@ -225,7 +308,7 @@ export class EmailFinanceMessagePlanner {
 		const seen = new Set<string>();
 		return units.filter((unit) => {
 			const key = unit.kind === 'text'
-				? `text:${unit.label}:${unit.request.text}`
+				? `text:${unit.label}:${unit.remoteArtifactUrl ?? ''}:${unit.request.text}`
 				: `receipt:${unit.label}:${unit.request.fileName}:${unit.request.mimeType ?? ''}`;
 			if (seen.has(key)) {
 				return false;

@@ -14,6 +14,7 @@ The current implementation supports:
 - persisted delta-sync boundary
 - `pending-approval` transaction notes that stay out of analytics until approval
 - `needs-attention` transaction notes for emails that looked finance-related but did not yield a valid proposal
+- parser-attempt diagnostics in runtime logs
 
 ## 1. High-Level Runtime View
 
@@ -83,10 +84,10 @@ sequenceDiagram
             Filter-->>Sync: passed = false
         else passed
             Filter-->>Sync: passed = true
-            Sync->>Planner: planMessage(message)
+            Sync->>Planner: planMessageDetailed(message)
             Planner->>Parsers: run specialized parsers
-            Parsers-->>Planner: parser units[] or no match
-            Planner-->>Sync: planned units[]
+            Parsers-->>Planner: parser attempts with match/no-match reasons
+            Planner-->>Sync: planned units + parser trace
 
             loop each unit
                 alt text unit
@@ -207,21 +208,67 @@ It now starts with a parser chain that can short-circuit generic planning for kn
 ```mermaid
 flowchart TD
     A["FinanceMailMessage"] --> B["CompositeEmailFinanceMessageParser"]
-    B --> C["Parser 1: FiscalReceiptFieldsEmailParser"]
-    B --> D["Parser N: future vendor-specific parsers"]
-    C --> E{"Matched?"}
-    D --> F{"Matched?"}
-    E -->|"Yes + stop"| G["Return parser-produced units"]
-    E -->|"No"| D
-    F -->|"Yes + stop"| G
-    F -->|"No parser matched"| H["Fallback to generic planner"]
+    B --> C1["Parser 1: MagnitReceiptEmailParser"]
+    B --> C2["Parser 2: LentaReceiptEmailParser"]
+    B --> C3["Parser 3: FiscalReceiptFieldsEmailParser"]
+    B --> C4["Parser 4: YandexCheckReceiptEmailParser"]
+    B --> C5["Parser 5: OzonReceiptEmailParser"]
+    B --> C6["Parser 6: ReceiptLinkEmailParser"]
+    B --> C7["Parser 7: ReceiptSummaryEmailParser"]
+    C1 --> M1{"Matched?"}
+    M1 -->|"Yes + stop"| R["Return parser-produced units"]
+    M1 -->|"No"| C2
+    C2 --> M2{"Matched?"}
+    M2 -->|"Yes + stop"| R
+    M2 -->|"No"| C3
+    C3 --> M3{"Matched?"}
+    M3 -->|"Yes + stop"| R
+    M3 -->|"No"| C4
+    C4 --> M4{"Matched?"}
+    M4 -->|"Yes + stop"| R
+    M4 -->|"No"| C5
+    C5 --> M5{"Matched?"}
+    M5 -->|"Yes + stop"| R
+    M5 -->|"No"| C6
+    C6 --> M6{"Matched?"}
+    M6 -->|"Yes + stop"| R
+    M6 -->|"No"| C7
+    C7 --> M7{"Matched?"}
+    M7 -->|"Yes + stop"| R
+    M7 -->|"No parser matched"| F["Fallback to generic planner"]
 ```
 
 Current purpose of the parser layer:
 
 - extract canonical fiscal receipt fields from email body
+- handle repeated vendor-specific formats without polluting generic planning
+- prefer deterministic transport payloads when a receipt email already contains fiscal evidence
 - support vendor-specific or format-specific parsing without polluting generic planner logic
 - leave generic attachments/text fallback in place for everything else
+
+Current concrete parser order:
+
+- `magnit-receipt`
+- `lenta-receipt`
+- `fiscal-receipt-fields`
+- `yandex-check-receipt`
+- `ozon-receipt`
+- `receipt-link`
+- `receipt-summary`
+
+Planner diagnostics now include:
+
+- one parser-attempt log entry per parser
+- `matched` / `no-match`
+- `reason`
+- compact parser diagnostics such as sender domain, link counts, image-source counts, QR URL candidates, and whether amount/dateTime/fiscal fields were found
+- a separate message-signal snapshot before parser evaluation with:
+  - normalized body preview
+  - `href` link samples
+  - HTML `img src` samples
+  - `data:image/...` counts
+  - fiscal fields reconstructed from body vs QR URL candidates
+- whether generic fallback was used after parser chain evaluation
 
 ## 7. Generic Planner Fallback
 
@@ -250,6 +297,12 @@ Current rule:
 - supported attachments and text body can both produce units for the same email
 - duplicate suppression happens after extraction, not at planning time
 - this deliberately prefers recall over silence, because missed expenses are worse than duplicate candidates
+
+Fallback observability:
+
+- planner logs attachment unit count
+- planner logs whether generic text fallback was created
+- sync logs parser trace and final planned units together for each message
 
 ## 8. Fiscal Receipt Extraction Path
 
@@ -280,6 +333,131 @@ Why this layer exists:
 - it turns email receipts into a structured transport payload before AI routing
 - it gives us a reusable place for provider-specific parsers
 - it lets us preserve fiscal identifiers for dedupe and future enrichment
+
+## 8a. Yandex Receipt Parser Path
+
+`check.yandex.ru` receipts are now a confirmed working vendor-specific case.
+
+```mermaid
+flowchart TD
+    A["FinanceMailMessage"] --> B["YandexCheckReceiptEmailParser"]
+    B --> C{"Sender/link matches check.yandex.ru?"}
+    C -->|"No"| D["Return no match"]
+    C -->|"Yes"| E["Normalize body text and links"]
+    E --> F["Try extractFiscalReceiptFields(...)"]
+    F --> G{"All fiscal fields found?"}
+    G -->|"Yes"| H["Build qrraw: t=...&s=...&fn=...&i=...&fp=...&n=..."]
+    H --> I["Planned text unit labeled yandex-fiscal-receipt-fields"]
+    I --> J["FinanceIntakeService.createTextProposal()"]
+    J --> K["routeTextRequest() => rule-qr"]
+    K --> L["RuleBasedFinanceIntakeProvider"]
+    L --> M["ProverkaChekaClient.processReceiptQrString(...)"]
+    G -->|"No"| N["Emit Yandex receipt summary for AI fallback"]
+```
+
+Current observed behavior:
+
+- Yandex receipt emails can now bypass the generic AI-only path
+- when fiscal fields are extracted, the planner emits a canonical `qrraw` payload
+- `FinanceIntakeService` routes that payload into deterministic `rule-qr`
+- downstream normalization then uses `ProverkaCheka`, not LLM inference, for the core receipt facts
+
+Important nuance:
+
+- this path depends on correct email-body decoding first
+- normal email URLs with `=` in query params must not be mistaken for quoted-printable transport encoding
+- otherwise the fiscal parser sees corrupted `Когда / Сколько / ФН / ФД / ФПД` fields and falls back too early
+
+## 8b. Lenta Format Variants
+
+`Lenta` receipts currently exist in at least three materially different email families:
+
+- legacy format:
+  - sender typically `noreply@ofd.ru`
+  - HTML receipt body contains classic OFD markup
+  - links often point to `ofd.ru/Document/RenderDoc...`
+  - QR evidence may be embedded as inline HTML content or other legacy OFD structures
+  - one confirmed subtype embeds QR as `data:image/png;base64,...`
+- newer Taxcom-backed format:
+  - sender typically `noreply@taxcom.ru`
+  - links point to `receipt.taxcom.ru/...`
+  - QR payload may live in HTML `img src`, for example `api-lk-ofd.taxcom.ru/images/qr?code=t%3D...`
+  - mail clients may additionally wrap that image URL through `resize.yandex.net/mailservice?...`
+- `lenta.com / upmetric / eco-check` format:
+  - sender may be `noreply@lenta.com`
+  - receipt links often point to `check.lenta.com`, `eco-check.ru`, or `prod.upmetric.ru/receiptview/...`
+  - QR payload may live in HTML `img src` as `https://api.qrserver.com/v1/create-qr-code/?data=t=...`
+  - body may also include `Wallet Mail.ru` JSON with useful total/merchant context
+
+Current confirmed implementation:
+
+- the same `LentaReceiptEmailParser` now covers all three families above
+- old OFD `data:image` emails emit a first-class `receipt` unit such as `receipt:lenta-inline-qr-image`
+- Taxcom and `lenta.com / upmetric / qrserver` variants reconstruct canonical `qrraw`
+- once `qrraw` is reconstructed, the message goes through deterministic `rule-qr -> ProverkaCheka`
+
+Why this matters architecturally:
+
+- vendor identity can no longer be inferred from sender domain alone
+- some receipt families keep the canonical fiscal payload in `href`
+- others keep it in `img src`
+- some legacy HTML receipts keep the QR only as inline `data:image`
+- parser trace therefore has to surface both link classes before we can explain a `no-match`
+- safe URL extraction has to be treated separately from generic body decoding
+
+Important implementation nuance:
+
+- HTML `href` / `src` extraction must not reuse the same aggressive transfer-decoding strategy as free-form body text
+- otherwise valid QR URL payloads like `t=20260404T1044...` can degrade into `t 260404T1044...`
+- receipt amount extraction must also avoid matching unrelated tracking params such as marketing `s=...` query fragments
+
+Practical takeaway:
+
+- for receipt emails, `decoded body text` and `decoded URL attributes` are different evidence channels
+- parser diagnostics should continue to show both channels explicitly
+- when one channel degrades, the other often still preserves the canonical fiscal payload
+
+Current observability for Lenta-family debugging:
+
+- `Email finance planner message signals`
+  - sender domain
+  - normalized body preview
+  - extracted `href` links
+  - extracted HTML image sources
+  - `data:image/...` counts
+  - reconstructed fiscal payloads from body and QR URL candidates
+- `Email finance parser attempt`
+  - parser-specific `reason`
+  - matched / no-match
+  - Lenta-specific diagnostics such as:
+    - `hasLegacyLentaReceiptLink`
+    - `hasTaxcomReceiptLink`
+    - `hasTaxcomQrImageLink`
+    - `hasLentaReceiptRedirectLink`
+    - `hasQrServerImageLink`
+    - `qrUrlCandidateSamples`
+    - `dataUrlImageSamples`
+    - `inlineReceiptByteLength` when a data-url image is converted into a receipt unit
+
+## 8c. Confirmed Parser Families
+
+Current parser status based on real mailbox runs:
+
+- `YandexCheckReceiptEmailParser`
+  - confirmed
+  - deterministic `qrraw -> rule-qr -> ProverkaCheka`
+- `LentaReceiptEmailParser`
+  - confirmed
+  - covers legacy `ofd.ru`, newer `taxcom.ru`, and `lenta.com / upmetric / eco-check / qrserver` variants
+- `MagnitReceiptEmailParser`
+  - partially validated
+  - still needs more live coverage before being treated as fully confirmed
+- `OzonReceiptEmailParser`
+  - parser scaffolding exists
+  - downstream artifact download is currently auth-gated, so this family is not yet fully automated
+- generic `receipt-link` and `receipt-summary`
+  - fallback only
+  - useful for reducing total misses, but not a substitute for vendor-specific deterministic parsing
 
 ## 9. Proposal Routing Inside FinanceIntakeService
 
@@ -406,9 +584,9 @@ Architectural implication:
 - [email-finance-coarse-filter.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/sync/email-finance-coarse-filter.ts)
   - pre-routing message filtering
 - [email-finance-message-planner.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/planning/email-finance-message-planner.ts)
-  - parser-first planning plus generic fan-out into intake units
+  - parser-first planning, parser trace logging, and generic fan-out into intake units
 - [email-finance-message-parsers.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/parsers/email-finance-message-parsers.ts)
-  - parser registry, parser contracts, and fiscal receipt extraction
+  - parser registry, parser contracts, parser-attempt reasons/diagnostics, fiscal receipt extraction, and vendor-specific parsers such as Magnit, Lenta, Yandex, and Ozon receipt emails
 - [finance-intake-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/finance-intake-service.ts)
   - proposal extraction routing
 - [pending-finance-proposal-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/review/pending-finance-proposal-service.ts)
@@ -418,7 +596,8 @@ Architectural implication:
 
 ## 15. Recommended File Split
 
-The current code works, but email intake is now large enough that keeping every piece under `src/services/` will get noisy.
+The current code already lives under `src/email-finance/`, which is the right long-term direction.
+The remaining goal is to keep responsibilities clear inside that feature module as the number of parsers and review flows grows.
 
 Recommended future split:
 
@@ -448,7 +627,9 @@ Suggested mapping:
   - parser contracts
   - parser registry
   - fiscal field parser
-  - future Yandex/vendor parsers
+  - Yandex receipt parser
+  - Ozon receipt parser
+  - future vendor parsers
   - future HTML QR-grid parser
 - `planning/`
   - generic message planner
@@ -457,7 +638,7 @@ Suggested mapping:
   - pending proposal persistence
   - later approval/rejection transitions
 - `types/`
-  - email message summary and parser/planner shared types
+  - email message and parser/planner shared types
 
 Practical recommendation:
 
@@ -469,9 +650,12 @@ Practical recommendation:
 
 - no scheduler yet, only manual sync
 - IMAP provider does not yet mark messages as processed server-side
-- parser registry is still small; only the fiscal field parser exists today
-- vendor-specific receipt link parsers are not implemented yet
+- parser registry is still intentionally small; current concrete parsers are Magnit, Lenta, fiscal-field, Yandex receipt, Ozon receipt, generic receipt-link, and generic receipt-summary
+- confirmed vendor coverage is currently strongest for Yandex and Lenta; other families still need more live validation
+- some vendor families already have known internal format splits, for example legacy `ofd.ru`, `taxcom.ru`, and `lenta.com / upmetric / eco-check` Lenta receipts
 - HTML QR-grid rendering is not parsed as a first-class receipt artifact yet
+- inline `data:image/...` receipt QR sources are now visible in parser diagnostics, and some confirmed families such as legacy Lenta are already promoted into first-class receipt artifacts
 - merge heuristics are intentionally simple for now: type + currency + amount + near dateTime
 - one message can produce many pending notes, but there is not yet a dedicated review UI for them
 - Telegram approval flow for `pending-approval` notes is still a future phase
+- parser diagnostics are now much better, but some vendor-specific failures still require reading raw message artifacts and runtime trace together

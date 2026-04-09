@@ -6,7 +6,7 @@ Status:
 
 Last updated:
 
-- 2026-04-03
+- 2026-04-06
 
 ## Summary
 
@@ -381,7 +381,8 @@ Why this matters:
 Examples of parsers we should expect:
 
 - fiscal-field parser
-- Yandex receipt-link parser
+- Yandex receipt parser
+- Ozon receipt parser
 - bank notification parser
 - HTML receipt parser
 - specialized parser for repeated vendor-specific HTML QR-grid formats
@@ -413,6 +414,18 @@ Important guardrail:
 
 - only true compact QR-style payloads should go down the raw QR path
 - an HTML email that merely contains a receipt link with `fn=...&fp=...` should not be mistaken for a raw QR string
+
+Current confirmed implementation note:
+
+- `check.yandex.ru` receipt emails are now handled by a dedicated Yandex parser
+- when the parser can reconstruct canonical fiscal fields, it emits `qrraw`-compatible text and the pipeline goes through deterministic `rule-qr -> ProverkaCheka`
+- this path is preferable to AI normalization because it preserves authoritative receipt identifiers and yields stable purchase date/time extraction
+- `LentaReceiptEmailParser` is now also confirmed on live mailbox data across several internal formats:
+  - legacy `ofd.ru` receipts with inline `data:image`
+  - newer `taxcom.ru` receipts with QR payload in `img src`
+  - `lenta.com / upmetric / eco-check` receipts with QR payload inside `api.qrserver.com/...data=t=...`
+- for the confirmed Lenta variants, the parser either emits a first-class receipt image unit or reconstructs canonical `qrraw` and then uses deterministic `rule-qr -> ProverkaCheka`
+- a key design lesson from this work: HTML attribute URLs must be normalized more conservatively than free-form body text, otherwise valid QR payloads can be corrupted during transfer-decoding
 
 ### 5. `PendingFinanceProposalService`
 
@@ -615,6 +628,7 @@ The recommended first delivery should already align with the long-term model.
 - persisted `pending-approval` transaction notes
 - analytics explicitly ignoring `pending-approval`
 - manual review in Obsidian
+- first vendor-specific parsers, with confirmed live coverage for Yandex and Lenta, plus Magnit/Ozon parser scaffolding or partial coverage
 
 ### Deferred
 
@@ -624,6 +638,7 @@ The recommended first delivery should already align with the long-term model.
 - server-side mailbox labeling policies
 - historical mailbox backfill
 - rich Telegram bulk-review ergonomics
+- full automation for auth-gated receipt families such as Ozon
 
 ## Phased Delivery
 
