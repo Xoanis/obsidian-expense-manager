@@ -2,11 +2,11 @@
 
 Status:
 
-- Proposed
+- In Progress
 
 Last updated:
 
-- 2026-04-06
+- 2026-04-09
 
 ## Summary
 
@@ -16,6 +16,7 @@ This RFC proposes a new finance intake channel for `obsidian-expense-manager`:
 - sync only messages newer than the previous successful sync boundary
 - apply a user-editable coarse filter before expensive extraction
 - run a chain of custom email parsers before generic planning
+- resolve strong receipt evidence generically before falling back to sender-specific logic
 - classify the remaining messages by evidence type and route them through the existing finance intake paths
 - allow one email to produce zero, one, or many finance proposals
 - persist proposals as transaction notes with status `pending-approval`
@@ -26,6 +27,12 @@ The main architectural rule is:
 `email is another finance transport, but its first persisted form is a pending transaction note, not an immediately recorded transaction`
 
 That keeps the current architecture coherent while making email proposals visible and editable directly inside Obsidian.
+
+Implementation note:
+
+- this RFC is no longer purely theoretical
+- the feature is partially implemented and validated on live mailbox data
+- the main outcome of the current iteration is that a generic receipt-evidence layer now resolves a meaningful share of real receipts without requiring a dedicated parser for every sender
 
 ## Why This Matters
 
@@ -425,7 +432,27 @@ Current confirmed implementation note:
   - newer `taxcom.ru` receipts with QR payload in `img src`
   - `lenta.com / upmetric / eco-check` receipts with QR payload inside `api.qrserver.com/...data=t=...`
 - for the confirmed Lenta variants, the parser either emits a first-class receipt image unit or reconstructs canonical `qrraw` and then uses deterministic `rule-qr -> ProverkaCheka`
+- Magnit receipts are now also validated on live mailbox data
+- a generic `ResolvedReceiptEvidenceEmailParser` now resolves several receipt families directly from mixed evidence such as:
+  - body text
+  - receipt links
+  - QR-like URL payloads
+  - path-based OFD links
+  - partially corrupted QR-like URL values
+- text-based PDF receipts now have a deterministic preflight path:
+  - local `pdf.js` text extraction
+  - fiscal-field reconstruction from extracted PDF text
+  - deterministic `rule-qr` when canonical payload can be rebuilt
 - a key design lesson from this work: HTML attribute URLs must be normalized more conservatively than free-form body text, otherwise valid QR payloads can be corrupted during transfer-decoding
+
+Current architectural conclusion:
+
+- vendor-specific parsers are still useful, but should increasingly behave like thin adapters
+- the scalable core should be:
+  - generic evidence extraction
+  - confidence-aware evidence resolution
+  - deterministic fiscal reconstruction when possible
+- sender-specific parsers should mainly handle wrappers, redirects, inline image conventions, and unusual encodings
 
 ### 5. `PendingFinanceProposalService`
 
@@ -623,12 +650,14 @@ The recommended first delivery should already align with the long-term model.
 - user-editable coarse filter rules
 - evidence routing by attachment and text type
 - image attachments routed QR-first
-- PDF and text routed into AI-backed intake
+- text-based PDF documents first attempt local deterministic extraction before AI fallback
+- PDF and text can still route into AI-backed intake when deterministic extraction is insufficient
 - one email able to produce multiple pending proposal notes
 - persisted `pending-approval` transaction notes
 - analytics explicitly ignoring `pending-approval`
 - manual review in Obsidian
-- first vendor-specific parsers, with confirmed live coverage for Yandex and Lenta, plus Magnit/Ozon parser scaffolding or partial coverage
+- first vendor-specific parsers, with confirmed live coverage for Yandex, Lenta, and Magnit
+- generic resolved-evidence coverage for multiple non-trivial receipt families
 
 ### Deferred
 
@@ -713,3 +742,21 @@ Proceed with email intake as the next finance-productization slice, but with the
 - later scheduled sync and Telegram review on top of the same note state
 
 That keeps the feature practical for real usage while staying aligned with the architecture the project already has.
+
+## Iteration Outcome Snapshot
+
+As of 2026-04-09, the implementation has reached this practical state:
+
+- live mailbox runs now validate deterministic receipt extraction for:
+  - Yandex
+  - Lenta
+  - Magnit
+  - several OFD-style and QR-link-driven generic families through resolved evidence
+- text-based PDF receipts can now succeed without AI when fiscal text is extractable locally
+- the most significant known unresolved family is still Ozon, because receipt download is auth-gated
+
+That means the next phase should focus less on adding many new sender-specific parsers and more on:
+
+- strengthening the generic evidence layer
+- adding thin adapters only where wrappers or transport quirks demand them
+- improving operator visibility and review ergonomics around the remaining `needs-attention` notes

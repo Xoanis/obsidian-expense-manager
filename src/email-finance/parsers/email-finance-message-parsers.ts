@@ -361,21 +361,9 @@ class LentaReceiptEmailParser implements EmailFinanceMessageParser {
 				fiscalFieldsFromQrUrl: qrFields ? buildRawReceiptQrPayload(qrFields) : null,
 				qrUrlCandidateCount: qrUrlCandidates.length,
 				qrUrlCandidateSamples: sanitizeDebugSourceSamples(qrUrlCandidates),
-				hasFn: Boolean(matchFirst(normalizedBody, [
-					/серийный номер фн\s*[:=]?\s*(\d{10,})/i,
-					/\bфн\s*[:=]?\s*(\d{10,})/i,
-					/\bfn\s*[=:]\s*(\d{10,})/i,
-				])),
-				hasFd: Boolean(matchFirst(normalizedBody, [
-					/\bфд(?: в смене)?\s*[:=]?\s*#?\s*(\d{1,})/i,
-					/номер фд(?: в смене)?\s*[:=]?\s*#?\s*(\d{1,})/i,
-					/\b(?:fd|i)\s*[=:]\s*(\d{1,})/i,
-				])),
-				hasFp: Boolean(matchFirst(normalizedBody, [
-					/фпд\s*[:=]?\s*(\d{6,})/i,
-					/фп\s*[:=]?\s*(\d{6,})/i,
-					/\bfp\s*[=:]\s*(\d{6,})/i,
-				])),
+				hasFn: Boolean(matchFirst(normalizedBody, FISCAL_FN_PATTERNS)),
+				hasFd: Boolean(matchFirst(normalizedBody, FISCAL_FD_PATTERNS)),
+				hasFp: Boolean(matchFirst(normalizedBody, FISCAL_FP_PATTERNS)),
 			});
 		}
 
@@ -766,6 +754,26 @@ export function buildRawReceiptQrPayload(fields: ExtractedFiscalReceiptFields): 
 	return `t=${fields.dateTime}&s=${fields.amount}&fn=${fields.fn}&i=${fields.i}&fp=${fields.fp}&n=${fields.n}`;
 }
 
+const FISCAL_FN_PATTERNS = [
+	/серийный номер фн\s*[:=]?\s*(\d{10,})/i,
+	/(?:^|[^a-zа-яё0-9])фн\s*[:=]?\s*(\d{10,})/iu,
+	/\bfn\s*[=:]\s*(\d{10,})/i,
+];
+
+const FISCAL_FD_PATTERNS = [
+	/(?:^|[^a-zа-яё0-9])фд(?: в смене)?\s*[:=]?\s*#?\s*(\d{1,})/iu,
+	/номер фд(?: в смене)?\s*[:=]?\s*#?\s*(\d{1,})/i,
+	/фискальный документ\s*#?\s*(\d{1,})/i,
+	/\b(?:fd|i)\s*[=:]\s*(\d{1,})/i,
+];
+
+const FISCAL_FP_PATTERNS = [
+	/(?:^|[^a-zа-яё0-9])фпд\s*[:=]?\s*(\d{6,})/iu,
+	/(?:^|[^a-zа-яё0-9])фп\s*[:=]?\s*(\d{6,})/iu,
+	/фискальный признак\s*[:=]?\s*(\d{6,})/i,
+	/\bfp\s*[=:]\s*(\d{6,})/i,
+];
+
 export function extractFiscalReceiptFields(value: string): ExtractedFiscalReceiptFields | null {
 	if (!value || typeof value !== 'string') {
 		return null;
@@ -780,19 +788,13 @@ export function extractFiscalReceiptFields(value: string): ExtractedFiscalReceip
 	}
 
 	const fn = matchFirst(normalized, [
-		/серийный номер фн\s*[:=]?\s*(\d{10,})/i,
-		/\bфн\s*[:=]?\s*(\d{10,})/i,
-		/\bfn\s*[=:]\s*(\d{10,})/i,
+		...FISCAL_FN_PATTERNS,
 	]);
 	const documentNumber = matchFirst(normalized, [
-		/\bфд(?: в смене)?\s*[:=]?\s*#?\s*(\d{1,})/i,
-		/номер фд(?: в смене)?\s*[:=]?\s*#?\s*(\d{1,})/i,
-		/\b(?:fd|i)\s*[=:]\s*(\d{1,})/i,
+		...FISCAL_FD_PATTERNS,
 	]);
 	const fiscalSign = matchFirst(normalized, [
-		/фпд\s*[:=]?\s*(\d{6,})/i,
-		/фп\s*[:=]?\s*(\d{6,})/i,
-		/\bfp\s*[=:]\s*(\d{6,})/i,
+		...FISCAL_FP_PATTERNS,
 	]);
 	const amount = extractReceiptAmount(normalized);
 	const dateTime = extractReceiptDateTime(normalized);
@@ -1109,6 +1111,8 @@ function extractReceiptAmount(value: string): string | null {
 		/сколько\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/i,
 		/безналичными\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/i,
 		/сумма\s+расч[её]та\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/i,
+		/сумма\s+заказа\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/i,
+		/сумма\s+оплат[ыы]\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/i,
 		/(?:сумма(?:\s+к\s+оплате)?|к\s+оплате|оплачено|total|amount)\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/i,
 	];
 	for (const pattern of candidates) {
@@ -1173,6 +1177,15 @@ function extractReceiptDateTime(value: string): string | null {
 	const russianDate = searchable.match(/когда\s*(\d{1,2})\s+([а-яё]+)\s+(\d{4})\s+(\d{2}):(\d{2})/i);
 	if (russianDate) {
 		const [, day, monthName, year, hour, minute] = russianDate;
+		const month = mapRussianMonth(monthName);
+		if (month) {
+			return `${year}${month}${pad2(day)}T${hour}${minute}`;
+		}
+	}
+
+	const issuedRussianDate = searchable.match(/(?:дата\s+выдачи|дата)\s*(\d{1,2})\s+([а-яё]+)\s+(\d{4})\s*(?:г\.?)?\s*(?:в)?\s*(\d{2}):(\d{2})/i);
+	if (issuedRussianDate) {
+		const [, day, monthName, year, hour, minute] = issuedRussianDate;
 		const month = mapRussianMonth(monthName);
 		if (month) {
 			return `${year}${month}${pad2(day)}T${hour}${minute}`;

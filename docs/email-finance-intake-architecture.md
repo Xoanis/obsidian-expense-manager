@@ -12,9 +12,28 @@ The current implementation supports:
 - `HTTP JSON bridge`
 - manual sync command
 - persisted delta-sync boundary
+- generic `evidence -> resolution -> proposal` receipt layer
+- deterministic text-based PDF preflight before AI fallback
 - `pending-approval` transaction notes that stay out of analytics until approval
 - `needs-attention` transaction notes for emails that looked finance-related but did not yield a valid proposal
 - parser-attempt diagnostics in runtime logs
+
+## 0. Current Iteration Summary
+
+Current state after the latest live mailbox iteration:
+
+- generic `ResolvedReceiptEvidenceEmailParser` is no longer experimental-only; it now closes a meaningful share of real receipt emails before vendor-specific logic is needed
+- confirmed live deterministic coverage now includes:
+  - Yandex receipt emails
+  - multiple Lenta families
+  - Magnit receipt emails
+  - several OFD / receipt-link families that resolve through the generic evidence layer
+- text-based PDF receipts can now succeed without AI when local PDF extraction yields enough fiscal text
+- the main intentionally open gap remains auth-gated Ozon receipt retrieval
+
+The biggest architectural lesson from this iteration is:
+
+`generic evidence extraction + thin vendor adapters` scales better than growing a large set of fully custom vendor parsers.
 
 ## 1. High-Level Runtime View
 
@@ -253,12 +272,12 @@ Current purpose of the parser layer:
 
 Current concrete parser order:
 
+- `resolved-receipt-evidence`
 - `magnit-receipt`
 - `lenta-receipt`
 - `fiscal-receipt-fields`
 - `yandex-check-receipt`
 - `ozon-receipt`
-- `resolved-receipt-evidence`
 - `receipt-link`
 - `receipt-summary`
 
@@ -305,13 +324,23 @@ Current resolution rules:
 - canonical `qrraw` wins only when it can be reconstructed unambiguously
 - if equally strong fiscal payload candidates disagree, generic evidence resolution returns `no match`
 - medium-confidence values like amount/dateTime are logged as evidence, but do not override a missing or conflicting canonical fiscal payload
-- vendor-specific parsers still run first and remain the preferred place for format-specific logic
+- generic evidence resolution now runs before vendor-specific adapters
+- vendor-specific parsers remain the preferred place for format-specific wrappers, redirects, inline image conventions, and unusual encodings
 
 Why this layer exists:
 
 - reduce the need for a new vendor parser every time a sender moves the same `qrraw` between body, `href`, and `img src`
 - make evidence conflicts explicit instead of letting them leak into duplicate or low-quality proposals
 - keep vendor-specific parsers thin and focused on wrappers, redirects, and unusual encodings
+
+Current observed outcome:
+
+- the generic layer now successfully resolves real receipts from several families that previously needed either custom adapters or AI fallback
+- this includes messages where the fiscal payload is spread across:
+  - body text plus receipt links
+  - QR-like URLs in `href` / `img src`
+  - OFD-style path parameters
+  - partially corrupted URL payloads that need repair before parsing
 
 ## 7. Generic Planner Fallback
 
@@ -493,8 +522,15 @@ Current parser status based on real mailbox runs:
   - confirmed
   - covers legacy `ofd.ru`, newer `taxcom.ru`, and `lenta.com / upmetric / eco-check / qrserver` variants
 - `MagnitReceiptEmailParser`
-  - partially validated
-  - still needs more live coverage before being treated as fully confirmed
+  - confirmed on live mailbox data
+  - deterministic result may now come either from Magnit-specific logic or from the generic evidence layer resolving the same fiscal payload first
+- `ResolvedReceiptEvidenceEmailParser`
+  - confirmed as a first-class deterministic path
+  - now resolves multiple live families without brand-specific adapters
+  - especially useful for OFD-style receipts, QR-like receipt links, and messages where `qrraw` can be reconstructed from mixed evidence
+- text-based PDF preflight in `FinanceIntakeService`
+  - confirmed for PDF receipts with extractable text layers
+  - local `pdf.js` extraction can now reconstruct fiscal payloads before any AI fallback is attempted
 - `OzonReceiptEmailParser`
   - parser scaffolding exists
   - downstream artifact download is currently auth-gated, so this family is not yet fully automated
@@ -518,7 +554,10 @@ flowchart TD
     G -->|"No"| F
 
     D --> I{"PDF?"}
-    I -->|"Yes"| H
+    I -->|"Yes"| P["Local PDF text extraction preflight"]
+    P --> Q{"Fiscal payload reconstructed?"}
+    Q -->|"Yes"| F
+    Q -->|"No"| H
     I -->|"No"| J{"AI receipt mode enabled?"}
     J -->|"Yes"| K["Rule-based first, AI fallback if needed"]
     J -->|"No"| F
@@ -528,6 +567,10 @@ Important routing nuance:
 
 - raw QR route should trigger only for genuine compact QR payloads
 - email bodies that merely contain `fn=...&fp=...` inside a URL or prose should not be treated as raw QR strings
+- for PDF receipts, routing is now effectively:
+  - local `pdf.js` text extraction
+  - attempt deterministic fiscal reconstruction from PDF text, optionally combined with caption context
+  - only then allow AI fallback if needed and configured
 
 ## 10. Pending Proposal Persistence
 
@@ -631,7 +674,7 @@ Architectural implication:
 - [email-finance-message-parsers.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/parsers/email-finance-message-parsers.ts)
   - parser registry, parser contracts, parser-attempt reasons/diagnostics, fiscal receipt extraction, and vendor-specific parsers such as Magnit, Lenta, Yandex, and Ozon receipt emails
 - [finance-intake-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/finance-intake-service.ts)
-  - proposal extraction routing
+  - proposal extraction routing and text-based PDF deterministic preflight
 - [pending-finance-proposal-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/review/pending-finance-proposal-service.ts)
   - conversion from proposal to pending transaction note
 - [expense-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/expense-service.ts)
@@ -693,11 +736,13 @@ Practical recommendation:
 
 - no scheduler yet, only manual sync
 - IMAP provider does not yet mark messages as processed server-side
-- parser registry is still intentionally small; current concrete parsers are Magnit, Lenta, fiscal-field, Yandex receipt, Ozon receipt, resolved-evidence, generic receipt-link, and generic receipt-summary
-- confirmed vendor coverage is currently strongest for Yandex and Lenta; other families still need more live validation
+- parser registry is still intentionally small; current concrete parsers are resolved-evidence, Magnit, Lenta, fiscal-field, Yandex receipt, Ozon receipt, generic receipt-link, and generic receipt-summary
+- confirmed live coverage is now strongest for Yandex, Lenta, Magnit, and generic evidence-resolved receipt families
 - some vendor families already have known internal format splits, for example legacy `ofd.ru`, `taxcom.ru`, and `lenta.com / upmetric / eco-check` Lenta receipts
 - HTML QR-grid rendering is not parsed as a first-class receipt artifact yet
 - inline `data:image/...` receipt QR sources are now visible in parser diagnostics, and some confirmed families such as legacy Lenta are already promoted into first-class receipt artifacts
+- text-based PDF receipts are now much better covered, but scanned/image-only PDFs still remain outside the current deterministic path
+- auth-gated receipt families such as Ozon still need either browser-assisted flow or an authenticated bridge
 - merge heuristics are intentionally simple for now: type + currency + amount + near dateTime
 - one message can produce many pending notes, but there is not yet a dedicated review UI for them
 - Telegram approval flow for `pending-approval` notes is still a future phase

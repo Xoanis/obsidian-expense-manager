@@ -4,10 +4,12 @@ import { ConsolePluginLogger, PluginLogger } from '../utils/plugin-debug-log';
 import {
 	createDefaultDocumentExtractionService,
 	DocumentExtractionService,
+	isUsableDocumentExtractionResult,
 } from './document-extraction-service';
 import { AiFinanceIntakeProvider } from './ai-finance-intake-provider';
 import { RuleBasedFinanceIntakeProvider } from './rule-based-finance-intake-provider';
 import { looksLikeRawReceiptQrString } from '../utils/qr-parser';
+import { buildRawReceiptQrPayload, extractFiscalReceiptFields } from '../email-finance/parsers/email-finance-message-parsers';
 import type {
 	FinanceCaptionMetadata,
 	FinanceIntakeProvider,
@@ -42,6 +44,7 @@ interface FinanceIntakeServiceOptions {
 export class FinanceIntakeService {
 	private readonly ruleProvider: FinanceIntakeProvider;
 	private readonly aiProvider: FinanceIntakeProvider;
+	private readonly documentExtractionService: DocumentExtractionService;
 	private readonly logger: PluginLogger;
 
 	constructor(
@@ -49,10 +52,11 @@ export class FinanceIntakeService {
 		options?: FinanceIntakeServiceOptions,
 	) {
 		this.logger = options?.logger ?? new ConsolePluginLogger();
+		this.documentExtractionService = options?.documentExtractionService ?? createDefaultDocumentExtractionService();
 		this.ruleProvider = options?.ruleProvider ?? new RuleBasedFinanceIntakeProvider(settings);
 		this.aiProvider = options?.aiProvider ?? new AiFinanceIntakeProvider(
 			settings,
-			options?.documentExtractionService ?? createDefaultDocumentExtractionService(),
+			this.documentExtractionService,
 			this.logger,
 		);
 	}
@@ -80,6 +84,14 @@ export class FinanceIntakeService {
 	): Promise<FinanceReceiptProposalResult> {
 		const decision = this.routeReceiptRequest(request);
 		this.logger.info('FinanceIntakeService.createReceiptProposal: route selected', decision);
+		if (this.isPdfRequest(request)) {
+			const localPdfResult = await this.tryCreatePdfTextBasedProposal(request);
+			if (localPdfResult) {
+				this.logger.info('FinanceIntakeService.createReceiptProposal: local PDF text extraction produced a deterministic transaction before AI fallback was needed.');
+				return this.applyReceiptCaptionContext(localPdfResult, request);
+			}
+		}
+
 		if (!this.isPdfRequest(request) && this.isAiTextEnabled()) {
 			try {
 				const ruleResult = this.applyReceiptCaptionContext(
@@ -114,6 +126,58 @@ export class FinanceIntakeService {
 			await this.ruleProvider.createReceiptTransaction(request),
 			request,
 		);
+	}
+
+	private async tryCreatePdfTextBasedProposal(
+		request: FinanceReceiptProposalRequest,
+	): Promise<FinanceReceiptProposalResult | null> {
+		try {
+			const extraction = await this.documentExtractionService.extractPdf({
+				bytes: request.bytes,
+				fileName: request.fileName,
+				mimeType: request.mimeType,
+			});
+			this.logger.info('FinanceIntakeService.tryCreatePdfTextBasedProposal: document extraction result', {
+				status: extraction.status,
+				textLength: extraction.text.length,
+				pageCount: extraction.pages.length,
+				warnings: extraction.warnings,
+				provider: extraction.provider,
+				textPreview: extraction.text.slice(0, 800),
+			});
+			if (!isUsableDocumentExtractionResult(extraction)) {
+				return null;
+			}
+
+			const qrPayload = this.extractReceiptQrPayloadFromDocumentText(extraction.text, request.caption);
+			if (!qrPayload) {
+				return null;
+			}
+
+			const transaction = await this.ruleProvider.createTextTransaction({
+				text: qrPayload,
+				intent: request.intent,
+				source: request.source,
+				area: request.area,
+				project: request.project,
+			});
+			if (!transaction || transaction.amount <= 0) {
+				return null;
+			}
+
+			return {
+				source: 'local',
+				data: {
+					...transaction,
+					artifactBytes: request.bytes,
+					artifactFileName: request.fileName,
+					artifactMimeType: request.mimeType,
+				},
+			};
+		} catch (error) {
+			this.logger.warn('FinanceIntakeService.tryCreatePdfTextBasedProposal: local PDF text extraction failed, falling back to regular receipt flow.', error);
+			return null;
+		}
 	}
 
 	parseCaption(caption: string): FinanceCaptionMetadata {
@@ -195,6 +259,28 @@ export class FinanceIntakeService {
 
 	private looksLikeReceiptQrText(text: string): boolean {
 		return looksLikeRawReceiptQrString(this.getPrimaryTextPayload(text));
+	}
+
+	private extractReceiptQrPayloadFromDocumentText(text: string, caption?: string): string | null {
+		const primaryPayload = this.getPrimaryTextPayload(text);
+		if (looksLikeRawReceiptQrString(primaryPayload)) {
+			return primaryPayload;
+		}
+
+		const textCandidates = [
+			text,
+			caption ? `${text}\n\n${caption}` : '',
+			caption ?? '',
+		].filter(Boolean);
+
+		for (const candidate of textCandidates) {
+			const receiptFields = extractFiscalReceiptFields(candidate);
+			if (receiptFields) {
+				return buildRawReceiptQrPayload(receiptFields);
+			}
+		}
+
+		return null;
 	}
 
 	private isAiTextEnabled(): boolean {
