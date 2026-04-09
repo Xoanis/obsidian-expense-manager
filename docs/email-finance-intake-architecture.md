@@ -208,13 +208,14 @@ It now starts with a parser chain that can short-circuit generic planning for kn
 ```mermaid
 flowchart TD
     A["FinanceMailMessage"] --> B["CompositeEmailFinanceMessageParser"]
-    B --> C1["Parser 1: MagnitReceiptEmailParser"]
-    B --> C2["Parser 2: LentaReceiptEmailParser"]
-    B --> C3["Parser 3: FiscalReceiptFieldsEmailParser"]
-    B --> C4["Parser 4: YandexCheckReceiptEmailParser"]
-    B --> C5["Parser 5: OzonReceiptEmailParser"]
-    B --> C6["Parser 6: ReceiptLinkEmailParser"]
-    B --> C7["Parser 7: ReceiptSummaryEmailParser"]
+    B --> C1["Parser 1: ResolvedReceiptEvidenceEmailParser"]
+    B --> C2["Parser 2: MagnitReceiptEmailParser"]
+    B --> C3["Parser 3: LentaReceiptEmailParser"]
+    B --> C4["Parser 4: FiscalReceiptFieldsEmailParser"]
+    B --> C5["Parser 5: YandexCheckReceiptEmailParser"]
+    B --> C6["Parser 6: OzonReceiptEmailParser"]
+    B --> C7["Parser 7: ReceiptLinkEmailParser"]
+    B --> C8["Parser 8: ReceiptSummaryEmailParser"]
     C1 --> M1{"Matched?"}
     M1 -->|"Yes + stop"| R["Return parser-produced units"]
     M1 -->|"No"| C2
@@ -235,7 +236,10 @@ flowchart TD
     M6 -->|"No"| C7
     C7 --> M7{"Matched?"}
     M7 -->|"Yes + stop"| R
-    M7 -->|"No parser matched"| F["Fallback to generic planner"]
+    M7 -->|"No"| C8
+    C8 --> M8{"Matched?"}
+    M8 -->|"Yes + stop"| R
+    M8 -->|"No parser matched"| F["Fallback to generic planner"]
 ```
 
 Current purpose of the parser layer:
@@ -243,6 +247,7 @@ Current purpose of the parser layer:
 - extract canonical fiscal receipt fields from email body
 - handle repeated vendor-specific formats without polluting generic planning
 - prefer deterministic transport payloads when a receipt email already contains fiscal evidence
+- collect conflicting receipt evidence before generic AI fallback
 - support vendor-specific or format-specific parsing without polluting generic planner logic
 - leave generic attachments/text fallback in place for everything else
 
@@ -253,6 +258,7 @@ Current concrete parser order:
 - `fiscal-receipt-fields`
 - `yandex-check-receipt`
 - `ozon-receipt`
+- `resolved-receipt-evidence`
 - `receipt-link`
 - `receipt-summary`
 
@@ -268,7 +274,44 @@ Planner diagnostics now include:
   - HTML `img src` samples
   - `data:image/...` counts
   - fiscal fields reconstructed from body vs QR URL candidates
+  - generic evidence summary with:
+    - total evidence items
+    - resolved canonical fiscal payload when available
+    - conflicting fiscal payload candidates
+    - amount/dateTime candidate sets
 - whether generic fallback was used after parser chain evaluation
+
+## 6a. Generic Evidence Layer
+
+We now have a thin generic `evidence -> resolution -> proposal` layer alongside vendor parsers.
+
+Its job is intentionally narrower than a full transaction parser:
+
+- collect candidate evidence from different channels
+- preserve provenance and confidence
+- resolve only strong, non-conflicting receipt facts
+- abstain when evidence conflicts instead of forcing a bad proposal
+
+Current evidence channels:
+
+- normalized body text
+- QR-like payloads reconstructed from `href` / `img src`
+- inline `data:image/...` sources
+- receipt-like links
+- `Wallet Mail.ru` JSON total when present
+
+Current resolution rules:
+
+- canonical `qrraw` wins only when it can be reconstructed unambiguously
+- if equally strong fiscal payload candidates disagree, generic evidence resolution returns `no match`
+- medium-confidence values like amount/dateTime are logged as evidence, but do not override a missing or conflicting canonical fiscal payload
+- vendor-specific parsers still run first and remain the preferred place for format-specific logic
+
+Why this layer exists:
+
+- reduce the need for a new vendor parser every time a sender moves the same `qrraw` between body, `href`, and `img src`
+- make evidence conflicts explicit instead of letting them leak into duplicate or low-quality proposals
+- keep vendor-specific parsers thin and focused on wrappers, redirects, and unusual encodings
 
 ## 7. Generic Planner Fallback
 
@@ -650,7 +693,7 @@ Practical recommendation:
 
 - no scheduler yet, only manual sync
 - IMAP provider does not yet mark messages as processed server-side
-- parser registry is still intentionally small; current concrete parsers are Magnit, Lenta, fiscal-field, Yandex receipt, Ozon receipt, generic receipt-link, and generic receipt-summary
+- parser registry is still intentionally small; current concrete parsers are Magnit, Lenta, fiscal-field, Yandex receipt, Ozon receipt, resolved-evidence, generic receipt-link, and generic receipt-summary
 - confirmed vendor coverage is currently strongest for Yandex and Lenta; other families still need more live validation
 - some vendor families already have known internal format splits, for example legacy `ofd.ru`, `taxcom.ru`, and `lenta.com / upmetric / eco-check` Lenta receipts
 - HTML QR-grid rendering is not parsed as a first-class receipt artifact yet

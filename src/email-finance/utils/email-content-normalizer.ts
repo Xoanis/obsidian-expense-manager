@@ -62,6 +62,28 @@ export function decodeCommonHtmlEntities(value: string): string {
 		.replace(/&gt;/gi, '>');
 }
 
+export function toSearchablePlainText(value: string): string {
+	if (!value || typeof value !== 'string') {
+		return '';
+	}
+
+	return decodeCommonHtmlEntities(
+		value
+			.replace(/<style[\s\S]*?<\/style>/gi, ' ')
+			.replace(/<script[\s\S]*?<\/script>/gi, ' ')
+			.replace(/<br\s*\/?>/gi, '\n')
+			.replace(/<\/p>/gi, '\n')
+			.replace(/<\/div>/gi, '\n')
+			.replace(/<\/li>/gi, '\n')
+			.replace(/<\/tr>/gi, '\n')
+			.replace(/<\/t[dh]>/gi, ' ')
+			.replace(/<[^>]+>/g, ' '),
+	)
+		.replace(/[\u200B-\u200D\uFEFF]/g, '')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
 function looksLikeQuotedPrintable(value: string): boolean {
 	if (/=\n/.test(value) || /=\r\n/.test(value)) {
 		return true;

@@ -4,7 +4,7 @@ import type {
 } from '../../services/finance-intake-service';
 import type { PluginLogger } from '../../utils/plugin-debug-log';
 import type { FinanceMailAttachment, FinanceMailMessage } from '../transport/finance-mail-provider';
-import { decodeCommonHtmlEntities, decodeEmailTransferText } from '../utils/email-content-normalizer';
+import { decodeEmailTransferText, toSearchablePlainText } from '../utils/email-content-normalizer';
 import {
 	CompositeEmailFinanceMessageParser,
 	collectEmailFinanceMessageDebugSignals,
@@ -247,7 +247,7 @@ export class EmailFinanceMessagePlanner {
 			return decodeEmailTransferText(message.textBodyPreview?.trim() ?? '');
 		}
 
-		return decodeCommonHtmlEntities(htmlBody
+		return toSearchablePlainText(htmlBody
 			.replace(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_match, href, text) => {
 				const label = this.stripHtmlTags(String(text)).trim();
 				const normalizedHref = String(href).trim();
@@ -255,21 +255,7 @@ export class EmailFinanceMessagePlanner {
 					return ` ${normalizedHref} `;
 				}
 				return ` ${label} (${normalizedHref}) `;
-			})
-			.replace(/<style[\s\S]*?<\/style>/gi, ' ')
-			.replace(/<script[\s\S]*?<\/script>/gi, ' ')
-			.replace(/<br\s*\/?>/gi, '\n')
-			.replace(/<\/p>/gi, '\n')
-			.replace(/<\/div>/gi, '\n')
-			.replace(/<[^>]+>/g, ' ')
-			.replace(/&nbsp;/gi, ' ')
-			.replace(/&amp;/gi, '&')
-			.replace(/&quot;/gi, '"')
-			.replace(/&#39;/gi, '\'')
-			.replace(/&lt;/gi, '<')
-			.replace(/&gt;/gi, '>')
-			.replace(/\s+/g, ' ')
-			.trim());
+			}));
 	}
 
 	private extractHtmlLinks(html: string): string[] {

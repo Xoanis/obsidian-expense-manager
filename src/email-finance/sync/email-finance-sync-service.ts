@@ -6,6 +6,7 @@ import type { ExpenseManagerSettings } from '../../settings';
 import type { TransactionData } from '../../types';
 import { DuplicateTransactionError } from '../../services/expense-service';
 import type { PluginLogger } from '../../utils/plugin-debug-log';
+import { toSearchablePlainText } from '../utils/email-content-normalizer';
 import { EmailFinanceCoarseFilter } from './email-finance-coarse-filter';
 import { EmailFinanceMessagePlanner, type PlannedEmailFinanceUnit } from '../planning/email-finance-message-planner';
 import { EmailFinanceSyncStateStore } from './email-finance-sync-state-store';
@@ -1200,22 +1201,7 @@ export class EmailFinanceSyncService {
 		}
 
 		const htmlBody = message.htmlBody?.trim() || message.htmlBodyPreview?.trim() || '';
-		return htmlBody
-			.replace(/<style[\s\S]*?<\/style>/gi, ' ')
-			.replace(/<script[\s\S]*?<\/script>/gi, ' ')
-			.replace(/<br\s*\/?>/gi, '\n')
-			.replace(/<\/p>/gi, '\n')
-			.replace(/<\/div>/gi, '\n')
-			.replace(/<[^>]+>/g, ' ')
-			.replace(/&nbsp;/gi, ' ')
-			.replace(/&amp;/gi, '&')
-			.replace(/&quot;/gi, '"')
-			.replace(/&#39;/gi, '\'')
-			.replace(/&lt;/gi, '<')
-			.replace(/&gt;/gi, '>')
-			.replace(/\s+/g, ' ')
-			.trim()
-			.slice(0, 4000);
+		return toSearchablePlainText(htmlBody).slice(0, 4000);
 	}
 
 	private extractHtmlLinks(html: string): string[] {

@@ -8,7 +8,7 @@ import type {
 	PlannedEmailFinanceTextUnit,
 	PlannedEmailFinanceUnit,
 } from '../planning/email-finance-message-planner';
-import { decodeCommonHtmlEntities, decodeEmailTransferText } from '../utils/email-content-normalizer';
+import { decodeCommonHtmlEntities, decodeEmailTransferText, toSearchablePlainText } from '../utils/email-content-normalizer';
 
 export interface EmailFinanceParserResult {
 	units: PlannedEmailFinanceUnit[];
@@ -45,6 +45,52 @@ export interface EmailFinanceMessageDebugSignals {
 	qrUrlCandidateSamples: string[];
 	fiscalFieldsFromBody: string | null;
 	fiscalFieldsFromQrUrl: string | null;
+	evidenceSummary: EmailFinanceEvidenceSummary;
+}
+
+type EmailFinanceEvidenceKind =
+	| 'fiscal-qr-payload'
+	| 'amount'
+	| 'date-time'
+	| 'merchant'
+	| 'operation-type'
+	| 'receipt-link'
+	| 'image-source'
+	| 'remote-artifact-link';
+
+type EmailFinanceEvidenceConfidence = 'high' | 'medium' | 'low';
+
+interface EmailFinanceEvidenceItem {
+	kind: EmailFinanceEvidenceKind;
+	value: string;
+	sourceId: string;
+	confidence: EmailFinanceEvidenceConfidence;
+}
+
+interface EmailFinanceResolvedEvidenceValue {
+	value: string | null;
+	candidates: string[];
+	conflictingValues: string[];
+}
+
+interface EmailFinanceEvidenceCollection {
+	items: EmailFinanceEvidenceItem[];
+	resolved: {
+		fiscalQrPayload: EmailFinanceResolvedEvidenceValue;
+		amount: EmailFinanceResolvedEvidenceValue;
+		dateTime: EmailFinanceResolvedEvidenceValue;
+		merchant: EmailFinanceResolvedEvidenceValue;
+		operationType: EmailFinanceResolvedEvidenceValue;
+	};
+}
+
+interface EmailFinanceEvidenceSummary {
+	totalEvidenceCount: number;
+	fiscalQrCandidateCount: number;
+	resolvedFiscalQrPayload: string | null;
+	conflictingFiscalQrPayloads: string[];
+	amountCandidates: string[];
+	dateTimeCandidates: string[];
 }
 
 export class CompositeEmailFinanceMessageParser {
@@ -99,6 +145,7 @@ function noMatchParserAttempt(
 
 export function createDefaultEmailFinanceMessageParsers(): EmailFinanceMessageParser[] {
 	return [
+		new ResolvedReceiptEvidenceEmailParser(),
 		new MagnitReceiptEmailParser(),
 		new LentaReceiptEmailParser(),
 		new FiscalReceiptFieldsEmailParser(),
@@ -117,11 +164,10 @@ export function collectEmailFinanceMessageDebugSignals(message: FinanceMailMessa
 	const links = extractMessageLinks(message, normalizedBody);
 	const imageSources = extractMessageImageSources(message);
 	const dataUrlImages = imageSources.filter((source) => /^data:image\//i.test(source));
-	const qrUrlCandidates = [...links, ...imageSources].filter((candidate) =>
-		/api-lk-ofd\.taxcom\.ru\/images\/qr|resize\.yandex\.net\/mailservice|check\.yandex\.ru|receipt\.taxcom\.ru|lk\.ofd-magnit\.ru|api\.qrserver\.com\/v1\/create-qr-code|check\.lenta\.com|eco-check\.ru|prod\.upmetric\.ru\/receiptview|upmetric\.lenta\.com/i.test(candidate),
-	);
+	const qrUrlCandidates = collectQrUrlCandidates(links, imageSources);
 	const fiscalFieldsFromBody = extractFiscalReceiptFields(normalizedBody);
 	const fiscalFieldsFromQrUrl = extractFiscalReceiptFieldsFromQrUrlCandidates(qrUrlCandidates);
+	const evidence = collectEmailFinanceEvidence(message, normalizedBody, links, imageSources);
 	return {
 		senderDomain,
 		subject,
@@ -137,6 +183,7 @@ export function collectEmailFinanceMessageDebugSignals(message: FinanceMailMessa
 		qrUrlCandidateSamples: sanitizeDebugSourceSamples(qrUrlCandidates),
 		fiscalFieldsFromBody: fiscalFieldsFromBody ? buildRawReceiptQrPayload(fiscalFieldsFromBody) : null,
 		fiscalFieldsFromQrUrl: fiscalFieldsFromQrUrl ? buildRawReceiptQrPayload(fiscalFieldsFromQrUrl) : null,
+		evidenceSummary: summarizeEmailFinanceEvidence(evidence),
 	};
 }
 
@@ -166,7 +213,7 @@ class MagnitReceiptEmailParser implements EmailFinanceMessageParser {
 		}
 
 		const linkFields = extractMagnitReceiptFields(message, normalizedBody, links);
-		const amount = extractReceiptAmount(normalizedBody);
+		const amount = extractReceiptAmount(normalizedBody) ?? extractMagnitReceiptAmount(normalizedBody);
 		const dateTime = extractReceiptDateTime(normalizedBody);
 		const operationType = extractReceiptOperationType(normalizedBody);
 		if (!linkFields || !amount || !dateTime || !operationType) {
@@ -510,6 +557,42 @@ class OzonReceiptEmailParser implements EmailFinanceMessageParser {
 	}
 }
 
+class ResolvedReceiptEvidenceEmailParser implements EmailFinanceMessageParser {
+	readonly id = 'resolved-receipt-evidence';
+
+	parse(message: FinanceMailMessage): EmailFinanceParserAttempt {
+		const normalizedBody = normalizeMessageText(message);
+		if (!normalizedBody) {
+			return noMatchParserAttempt(this.id, 'normalized message body is empty');
+		}
+
+		const evidence = collectEmailFinanceEvidence(message, normalizedBody);
+		const resolvedFiscalQrPayload = evidence.resolved.fiscalQrPayload.value;
+		if (!resolvedFiscalQrPayload) {
+			return noMatchParserAttempt(this.id, 'generic evidence layer did not resolve a canonical fiscal qr payload', {
+				evidenceSummary: summarizeEmailFinanceEvidence(evidence),
+			});
+		}
+
+		const receiptFields = extractFiscalReceiptFields(resolvedFiscalQrPayload);
+		if (!receiptFields) {
+			return noMatchParserAttempt(this.id, 'resolved fiscal evidence could not be converted back into receipt fields', {
+				resolvedFiscalQrPayload,
+				evidenceSummary: summarizeEmailFinanceEvidence(evidence),
+			});
+		}
+
+		return matchedParserAttempt(this.id, [buildFiscalReceiptUnit('resolved-fiscal-evidence', receiptFields)], {
+			stop: true,
+			reason: 'generic evidence layer resolved a canonical fiscal receipt payload',
+			diagnostics: {
+				resolvedFiscalQrPayload,
+				evidenceSummary: summarizeEmailFinanceEvidence(evidence),
+			},
+		});
+	}
+}
+
 class ReceiptLinkEmailParser implements EmailFinanceMessageParser {
 	readonly id = 'receipt-link';
 
@@ -670,6 +753,15 @@ interface ExtractedFiscalReceiptFields {
 	n: '1' | '2' | '3' | '4';
 }
 
+interface PartialExtractedFiscalReceiptFields {
+	dateTime?: string;
+	amount?: string;
+	fn?: string;
+	i?: string;
+	fp?: string;
+	n?: '1' | '2' | '3' | '4';
+}
+
 export function buildRawReceiptQrPayload(fields: ExtractedFiscalReceiptFields): string {
 	return `t=${fields.dateTime}&s=${fields.amount}&fn=${fields.fn}&i=${fields.i}&fp=${fields.fp}&n=${fields.n}`;
 }
@@ -679,13 +771,10 @@ export function extractFiscalReceiptFields(value: string): ExtractedFiscalReceip
 		return null;
 	}
 
-	const normalized = value
+	const normalized = toSearchablePlainText(value)
 		.replace(/&nbsp;/gi, ' ')
 		.replace(/&quot;/gi, '"')
-		.replace(/&#39;/gi, '\'')
-		.replace(/<[^>]+>/g, ' ')
-		.replace(/\s+/g, ' ')
-		.trim();
+		.replace(/&#39;/gi, '\'');
 	if (!normalized) {
 		return null;
 	}
@@ -721,6 +810,241 @@ export function extractFiscalReceiptFields(value: string): ExtractedFiscalReceip
 		fp: fiscalSign,
 		n: operationType,
 	};
+}
+
+function collectEmailFinanceEvidence(
+	message: FinanceMailMessage,
+	precomputedNormalizedBody?: string,
+	precomputedLinks?: string[],
+	precomputedImageSources?: string[],
+): EmailFinanceEvidenceCollection {
+	const normalizedBody = precomputedNormalizedBody ?? normalizeMessageText(message);
+	const from = decodeEmailTransferText(message.from?.trim() ?? '');
+	const links = precomputedLinks ?? extractMessageLinks(message, normalizedBody);
+	const imageSources = precomputedImageSources ?? extractMessageImageSources(message);
+	const qrUrlCandidates = collectQrUrlCandidates(links, imageSources);
+
+	const items: EmailFinanceEvidenceItem[] = [];
+
+	const fiscalFieldsFromBody = extractFiscalReceiptFields(normalizedBody);
+	if (fiscalFieldsFromBody) {
+		items.push({
+			kind: 'fiscal-qr-payload',
+			value: buildRawReceiptQrPayload(fiscalFieldsFromBody),
+			sourceId: 'body-fiscal-fields',
+			confidence: 'high',
+		});
+	}
+
+	const fiscalFieldsFromQrUrl = extractFiscalReceiptFieldsFromQrUrlCandidates(qrUrlCandidates);
+	if (fiscalFieldsFromQrUrl) {
+		items.push({
+			kind: 'fiscal-qr-payload',
+			value: buildRawReceiptQrPayload(fiscalFieldsFromQrUrl),
+			sourceId: 'qr-url-fiscal-fields',
+			confidence: 'high',
+		});
+	}
+
+	const amount = extractReceiptAmount(normalizedBody);
+	if (amount) {
+		items.push({
+			kind: 'amount',
+			value: amount,
+			sourceId: 'body-amount',
+			confidence: 'medium',
+		});
+	}
+
+	const walletJsonAmount = extractWalletMailRuTotalPrice(message);
+	if (walletJsonAmount) {
+		items.push({
+			kind: 'amount',
+			value: walletJsonAmount,
+			sourceId: 'wallet-mail-ru-json',
+			confidence: 'medium',
+		});
+	}
+
+	const dateTime = extractReceiptDateTime(normalizedBody);
+	if (dateTime) {
+		items.push({
+			kind: 'date-time',
+			value: dateTime,
+			sourceId: 'body-date-time',
+			confidence: 'medium',
+		});
+	}
+
+	const merchant = extractReceiptMerchant(normalizedBody, from);
+	if (merchant) {
+		items.push({
+			kind: 'merchant',
+			value: merchant,
+			sourceId: 'body-merchant',
+			confidence: 'medium',
+		});
+	}
+
+	const operationType = extractReceiptOperationType(normalizedBody);
+	if (operationType) {
+		items.push({
+			kind: 'operation-type',
+			value: operationType,
+			sourceId: 'body-operation-type',
+			confidence: 'medium',
+		});
+	}
+
+	if (!fiscalFieldsFromQrUrl && amount && dateTime && operationType) {
+		const partialFiscalFieldsFromQrUrl = extractPartialFiscalReceiptFieldsFromQrUrlCandidates(qrUrlCandidates);
+		if (partialFiscalFieldsFromQrUrl?.fn && partialFiscalFieldsFromQrUrl.i && partialFiscalFieldsFromQrUrl.fp) {
+			const combinedFiscalFields = extractFiscalReceiptFields(
+				buildRawReceiptQrPayload({
+					dateTime,
+					amount,
+					fn: partialFiscalFieldsFromQrUrl.fn,
+					i: partialFiscalFieldsFromQrUrl.i,
+					fp: partialFiscalFieldsFromQrUrl.fp,
+					n: operationType,
+				}),
+			);
+
+			if (combinedFiscalFields) {
+				items.push({
+					kind: 'fiscal-qr-payload',
+					value: buildRawReceiptQrPayload(combinedFiscalFields),
+					sourceId: 'combined-link-and-body-fiscal-fields',
+					confidence: 'high',
+				});
+			}
+		}
+	}
+
+	const receiptLinks = links.filter((link) => looksLikeReceiptLink(link, normalizedBody, message.subject ?? ''));
+	for (const link of receiptLinks.slice(0, 12)) {
+		items.push({
+			kind: /(?:\.pdf\b|format=pdf\b)/i.test(link) ? 'remote-artifact-link' : 'receipt-link',
+			value: link,
+			sourceId: 'receipt-link',
+			confidence: 'low',
+		});
+	}
+
+	for (const source of imageSources.slice(0, 12)) {
+		items.push({
+			kind: 'image-source',
+			value: sanitizeDebugSource(source),
+			sourceId: /^data:image\//i.test(source) ? 'inline-image-source' : 'html-image-source',
+			confidence: /^data:image\//i.test(source) ? 'medium' : 'low',
+		});
+	}
+
+	return {
+		items,
+		resolved: {
+			fiscalQrPayload: resolveEvidenceValue(items, 'fiscal-qr-payload'),
+			amount: resolveEvidenceValue(items, 'amount'),
+			dateTime: resolveEvidenceValue(items, 'date-time'),
+			merchant: resolveEvidenceValue(items, 'merchant'),
+			operationType: resolveEvidenceValue(items, 'operation-type'),
+		},
+	};
+}
+
+function summarizeEmailFinanceEvidence(evidence: EmailFinanceEvidenceCollection): EmailFinanceEvidenceSummary {
+	return {
+		totalEvidenceCount: evidence.items.length,
+		fiscalQrCandidateCount: evidence.resolved.fiscalQrPayload.candidates.length,
+		resolvedFiscalQrPayload: evidence.resolved.fiscalQrPayload.value,
+		conflictingFiscalQrPayloads: evidence.resolved.fiscalQrPayload.conflictingValues,
+		amountCandidates: evidence.resolved.amount.candidates,
+		dateTimeCandidates: evidence.resolved.dateTime.candidates,
+	};
+}
+
+function resolveEvidenceValue(
+	items: EmailFinanceEvidenceItem[],
+	kind: EmailFinanceEvidenceKind,
+): EmailFinanceResolvedEvidenceValue {
+	const filtered = items.filter((item) => item.kind === kind && item.value.trim().length > 0);
+	if (filtered.length === 0) {
+		return {
+			value: null,
+			candidates: [],
+			conflictingValues: [],
+		};
+	}
+
+	const grouped = new Map<string, EmailFinanceEvidenceItem[]>();
+	for (const item of filtered) {
+		const existing = grouped.get(item.value) ?? [];
+		existing.push(item);
+		grouped.set(item.value, existing);
+	}
+
+	const ranked = Array.from(grouped.entries())
+		.map(([value, groupedItems]) => ({
+			value,
+			groupedItems,
+			maxConfidence: Math.max(...groupedItems.map((item) => evidenceConfidenceWeight(item.confidence))),
+			supportCount: groupedItems.length,
+		}))
+		.sort((left, right) => {
+			if (right.maxConfidence !== left.maxConfidence) {
+				return right.maxConfidence - left.maxConfidence;
+			}
+			return right.supportCount - left.supportCount;
+		});
+
+	const winner = ranked[0];
+	const conflictingValues = ranked
+		.filter((candidate) => candidate.value !== winner.value && candidate.maxConfidence >= winner.maxConfidence)
+		.map((candidate) => candidate.value);
+
+	return {
+		value: conflictingValues.length > 0 ? null : winner.value,
+		candidates: ranked.map((candidate) => candidate.value),
+		conflictingValues,
+	};
+}
+
+function evidenceConfidenceWeight(value: EmailFinanceEvidenceConfidence): number {
+	switch (value) {
+		case 'high':
+			return 3;
+		case 'medium':
+			return 2;
+		case 'low':
+		default:
+			return 1;
+	}
+}
+
+function extractWalletMailRuTotalPrice(message: FinanceMailMessage): string | null {
+	const htmlParts = [
+		message.htmlBody ?? '',
+		message.htmlBodyPreview ?? '',
+	];
+
+	for (const html of htmlParts) {
+		const decoded = decodeMessagePart(html);
+		if (!decoded) {
+			continue;
+		}
+
+		const matched = decoded.match(/"total"\s*:\s*\{[^}]*"price"\s*:\s*"([0-9]+(?:\.[0-9]{1,2})?)"/i)?.[1];
+		if (!matched) {
+			continue;
+		}
+
+		const parsed = Number(matched);
+		if (Number.isFinite(parsed) && parsed > 0) {
+			return parsed.toFixed(2);
+		}
+	}
+
+	return null;
 }
 
 function looksLikeReceiptLink(link: string, body: string, subject: string): boolean {
@@ -759,17 +1083,7 @@ function looksLikeReceiptLikeMessage(
 }
 
 function buildReceiptFocusedExcerpt(value: string, links: string[]): string {
-	const withoutHtml = decodeCommonHtmlEntities(
-		value
-			.replace(/<style[\s\S]*?<\/style>/gi, ' ')
-			.replace(/<script[\s\S]*?<\/script>/gi, ' ')
-			.replace(/<br\s*\/?>/gi, '\n')
-			.replace(/<\/p>/gi, '\n')
-			.replace(/<\/div>/gi, '\n')
-			.replace(/<[^>]+>/g, ' '),
-	)
-		.replace(/\s+/g, ' ')
-		.trim();
+	const withoutHtml = toSearchablePlainText(value);
 	if (!withoutHtml) {
 		return '';
 	}
@@ -788,6 +1102,7 @@ function buildReceiptFocusedExcerpt(value: string, links: string[]): string {
 }
 
 function extractReceiptAmount(value: string): string | null {
+	const searchable = toSearchablePlainText(value);
 	const candidates = [
 		/итого\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/i,
 		/итог\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/i,
@@ -797,7 +1112,7 @@ function extractReceiptAmount(value: string): string | null {
 		/(?:сумма(?:\s+к\s+оплате)?|к\s+оплате|оплачено|total|amount)\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/i,
 	];
 	for (const pattern of candidates) {
-		const matched = value.match(pattern)?.[1];
+		const matched = searchable.match(pattern)?.[1];
 		if (!matched) {
 			continue;
 		}
@@ -809,8 +1124,8 @@ function extractReceiptAmount(value: string): string | null {
 		}
 	}
 
-	const qrAmountMatch = value.match(/\bs\s*[=:]\s*([0-9]+(?:[.,][0-9]{1,2})?)\b/i)?.[1];
-	if (qrAmountMatch && /\b(?:fn|fp|fd|i|n)\s*[=:]/i.test(value)) {
+	const qrAmountMatch = searchable.match(/\bs\s*[=:]\s*([0-9]+(?:[.,][0-9]{1,2})?)\b/i)?.[1];
+	if (qrAmountMatch && /\b(?:fn|fp|fd|i|n)\s*[=:]/i.test(searchable)) {
 		const normalized = qrAmountMatch.replace(',', '.');
 		const parsed = Number(normalized);
 		if (Number.isFinite(parsed) && parsed > 0) {
@@ -821,13 +1136,41 @@ function extractReceiptAmount(value: string): string | null {
 	return null;
 }
 
+function extractMagnitReceiptAmount(value: string): string | null {
+	const searchable = toSearchablePlainText(value);
+
+	const patterns = [
+		/итого\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/giu,
+		/безналичными\s*[:=]?\s*([0-9][0-9\s\u00A0]*(?:[.,][0-9]{1,2})?)/giu,
+	];
+
+	for (const pattern of patterns) {
+		const matches = Array.from(searchable.matchAll(pattern));
+		for (let index = matches.length - 1; index >= 0; index -= 1) {
+			const matched = matches[index]?.[1];
+			if (!matched) {
+				continue;
+			}
+
+			const normalized = matched.replace(/[\s\u00A0]+/g, '').replace(',', '.');
+			const parsed = Number(normalized);
+			if (Number.isFinite(parsed) && parsed > 0) {
+				return parsed.toFixed(2);
+			}
+		}
+	}
+
+	return null;
+}
+
 function extractReceiptDateTime(value: string): string | null {
-	const explicitQrDate = value.match(/\bt\s*[=:]\s*(\d{8}T\d{4})/i)?.[1];
+	const searchable = toSearchablePlainText(value);
+	const explicitQrDate = searchable.match(/\bt\s*[=:]\s*(\d{8}T\d{4})/i)?.[1];
 	if (explicitQrDate) {
 		return explicitQrDate;
 	}
 
-	const russianDate = value.match(/когда\s*(\d{1,2})\s+([а-яё]+)\s+(\d{4})\s+(\d{2}):(\d{2})/i);
+	const russianDate = searchable.match(/когда\s*(\d{1,2})\s+([а-яё]+)\s+(\d{4})\s+(\d{2}):(\d{2})/i);
 	if (russianDate) {
 		const [, day, monthName, year, hour, minute] = russianDate;
 		const month = mapRussianMonth(monthName);
@@ -836,19 +1179,19 @@ function extractReceiptDateTime(value: string): string | null {
 		}
 	}
 
-	const dottedDate = value.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{4})\s+(\d{2}):(\d{2})\b/);
+	const dottedDate = searchable.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?:\s+в)?\s+(\d{2}):(\d{2})\b/i);
 	if (dottedDate) {
 		const [, day, month, year, hour, minute] = dottedDate;
 		return `${year}${pad2(month)}${pad2(day)}T${hour}${minute}`;
 	}
 
-	const shortDottedDate = value.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2})\s+(\d{2}):(\d{2})\b/);
+	const shortDottedDate = searchable.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2})(?:\s+в)?\s+(\d{2}):(\d{2})\b/i);
 	if (shortDottedDate) {
 		const [, day, month, year, hour, minute] = shortDottedDate;
 		return `${normalizeTwoDigitYear(year)}${pad2(month)}${pad2(day)}T${hour}${minute}`;
 	}
 
-	const isoLikeDate = value.match(/\b(\d{4})-(\d{2})-(\d{2})[ t](\d{2}):(\d{2})\b/i);
+	const isoLikeDate = searchable.match(/\b(\d{4})-(\d{2})-(\d{2})[ t](\d{2}):(\d{2})\b/i);
 	if (isoLikeDate) {
 		const [, year, month, day, hour, minute] = isoLikeDate;
 		return `${year}${month}${day}T${hour}${minute}`;
@@ -858,7 +1201,7 @@ function extractReceiptDateTime(value: string): string | null {
 }
 
 function extractReceiptMerchant(value: string, from: string): string | null {
-	const normalized = value.replace(/\s+/g, ' ').trim();
+	const normalized = toSearchablePlainText(value);
 	const candidates = [
 		normalized.match(/кассовый чек\s*\/\s*(?:приход|расход)\s+(.+?)(?=\s+(?:когда|дата|время|сумма|сколько|товары|итого|безналичными|инн|адрес|место|налогообложение)\b|$)/i)?.[1],
 		normalized.match(/(?:продавец|поставщик|merchant|seller|получатель)\s*[:=]?\s*(.+?)(?=\s+(?:инн|кпп|итого|сумма|дата|время|чек|квитанц)\b|$)/i)?.[1],
@@ -887,20 +1230,25 @@ function extractReceiptMerchant(value: string, from: string): string | null {
 }
 
 function extractReceiptOperationType(value: string): '1' | '2' | '3' | '4' | null {
-	const explicitOperationType = value.match(/\bn\s*[=:]\s*([1-4])\b/i)?.[1] as '1' | '2' | '3' | '4' | undefined;
+	const searchable = toSearchablePlainText(value);
+	const explicitOperationType = searchable.match(/\bn\s*[=:]\s*([1-4])\b/i)?.[1] as '1' | '2' | '3' | '4' | undefined;
 	if (explicitOperationType) {
 		return explicitOperationType;
 	}
-	if (/возврат\s+прихода/i.test(value)) {
+
+	if (/(^|[^a-zа-яё])возврат\s+прихода($|[^a-zа-яё])/iu.test(searchable)) {
 		return '2';
 	}
-	if (/возврат\s+расхода/i.test(value)) {
+
+	if (/(^|[^a-zа-яё])возврат\s+расхода($|[^a-zа-яё])/iu.test(searchable)) {
 		return '4';
 	}
-	if (/кассовый чек\s*\/\s*расход/i.test(value) || /\bрасход\b/i.test(value)) {
+
+	if (/кассовый чек\s*\/\s*расход/i.test(searchable) || /(^|[^a-zа-яё])расход($|[^a-zа-яё])/iu.test(searchable)) {
 		return '3';
 	}
-	if (/кассовый чек\s*\/\s*приход/i.test(value) || /\bприход\b/i.test(value)) {
+
+	if (/кассовый чек\s*\/\s*приход/i.test(searchable) || /(^|[^a-zа-яё])приход($|[^a-zа-яё])/iu.test(searchable)) {
 		return '1';
 	}
 	return null;
@@ -1338,6 +1686,35 @@ function sanitizeDebugSource(value: string): string {
 	return `data:${mimeType};base64,<omitted;length=${base64Length}>`;
 }
 
+function collectQrUrlCandidates(links: string[], imageSources: string[]): string[] {
+	return [...links, ...imageSources].filter((candidate) => looksLikeQrUrlCandidate(candidate));
+}
+
+function looksLikeQrUrlCandidate(value: string): boolean {
+	const normalized = normalizeExtractedSource(value) ?? normalizeExtractedLink(value);
+	if (!normalized) {
+		return false;
+	}
+
+	if (/api-lk-ofd\.taxcom\.ru\/images\/qr|resize\.yandex\.net\/mailservice|check\.yandex\.ru|receipt\.taxcom\.ru|lk\.ofd-magnit\.ru|api\.qrserver\.com\/v1\/create-qr-code|check\.lenta\.com|eco-check\.ru|prod\.upmetric\.ru\/receiptview|upmetric\.lenta\.com/i.test(normalized)) {
+		return true;
+	}
+
+	if (/[?&](?:t|s|fn|fp|i|n)=/i.test(normalized)) {
+		return true;
+	}
+
+	if (/[?&](?:q|data|code)=/i.test(normalized) && /(?:t%3[dD]|s%3[dD]|fn%3[dD]|fp%3[dD]|i%3[dD]|n%3[dD]|t=|s=|fn=|fp=|i=|n=)/i.test(normalized)) {
+		return true;
+	}
+
+	if (/\/(?:fn|fd|fp|fs|i|qrcode)\//i.test(normalized) || /\/CashReceipt\/View\//i.test(normalized)) {
+		return true;
+	}
+
+	return false;
+}
+
 function prepareHtmlForAttributeExtraction(value: string): string {
 	if (!value) {
 		return '';
@@ -1389,9 +1766,10 @@ function extractFiscalReceiptFieldsFromQrUrlCandidate(value: string): ExtractedF
 		return null;
 	}
 
-	const candidates = new Set<string>([normalized]);
+	const repairedNormalized = repairCorruptedQrUrlCandidate(normalized);
+	const candidates = new Set<string>([repairedNormalized]);
 	try {
-		const url = new URL(normalized);
+		const url = new URL(repairedNormalized);
 		const nestedUrl = url.searchParams.get('url');
 		if (nestedUrl) {
 			candidates.add(decodeRepeatedUrlComponent(nestedUrl));
@@ -1410,10 +1788,42 @@ function extractFiscalReceiptFieldsFromQrUrlCandidate(value: string): ExtractedF
 	return null;
 }
 
+function extractPartialFiscalReceiptFieldsFromQrUrlCandidates(values: string[]): PartialExtractedFiscalReceiptFields | null {
+	for (const value of values) {
+		const extracted = extractPartialFiscalReceiptFieldsFromQrUrlCandidate(value);
+		if (extracted?.fn && extracted.i && extracted.fp) {
+			return extracted;
+		}
+	}
+
+	return null;
+}
+
+function extractPartialFiscalReceiptFieldsFromQrUrlCandidate(value: string): PartialExtractedFiscalReceiptFields | null {
+	const normalized = normalizeExtractedLink(value);
+	if (!normalized) {
+		return null;
+	}
+
+	const repairedNormalized = repairCorruptedQrUrlCandidate(normalized);
+
+	try {
+		const url = new URL(repairedNormalized);
+		return extractPartialFiscalReceiptFieldsFromResolvedQrUrl(url);
+	} catch {
+		return null;
+	}
+}
+
 function extractFiscalReceiptFieldsFromResolvedQrUrl(value: string): ExtractedFiscalReceiptFields | null {
 	try {
-		const url = new URL(value);
-		const payload = url.searchParams.get('code') ?? url.searchParams.get('data');
+		const url = new URL(repairCorruptedQrUrlCandidate(value));
+		const directParams = extractFiscalReceiptFieldsFromDirectUrlParams(url);
+		if (directParams) {
+			return directParams;
+		}
+
+		const payload = url.searchParams.get('code') ?? url.searchParams.get('data') ?? url.searchParams.get('q');
 		if (!payload) {
 			return null;
 		}
@@ -1429,6 +1839,107 @@ function extractFiscalReceiptFieldsFromResolvedQrUrl(value: string): ExtractedFi
 	} catch {
 		return null;
 	}
+}
+
+function extractPartialFiscalReceiptFieldsFromResolvedQrUrl(url: URL): PartialExtractedFiscalReceiptFields | null {
+	const directParams = extractPartialFiscalReceiptFieldsFromDirectUrlParams(url);
+	if (directParams?.fn && directParams.i && directParams.fp) {
+		return directParams;
+	}
+
+	const pathFields = extractPartialFiscalReceiptFieldsFromUrlPath(url);
+	if (pathFields?.fn && pathFields.i && pathFields.fp) {
+		return pathFields;
+	}
+
+	const payload = url.searchParams.get('code') ?? url.searchParams.get('data') ?? url.searchParams.get('q');
+	if (!payload) {
+		return directParams ?? pathFields ?? null;
+	}
+
+	const decodedPayload = decodeRepeatedUrlComponent(payload);
+	for (const candidate of buildQrPayloadCandidates(decodedPayload)) {
+		const extracted = extractFiscalReceiptFields(candidate);
+		if (extracted) {
+			return extracted;
+		}
+	}
+
+	return directParams ?? pathFields ?? null;
+}
+
+function extractFiscalReceiptFieldsFromDirectUrlParams(url: URL): ExtractedFiscalReceiptFields | null {
+	const partial = extractPartialFiscalReceiptFieldsFromDirectUrlParams(url);
+	const t = partial?.dateTime?.trim() ?? '';
+	const s = partial?.amount?.trim() ?? '';
+	const fn = partial?.fn?.trim() ?? '';
+	const i = partial?.i?.trim() ?? '';
+	const fp = partial?.fp?.trim() ?? '';
+	const n = partial?.n?.trim() ?? '';
+
+	if (!t || !s || !fn || !i || !fp || !/^[1-4]$/.test(n)) {
+		return null;
+	}
+
+	return extractFiscalReceiptFields(
+		buildRawReceiptQrPayload({
+			dateTime: t,
+			amount: s.replace(',', '.'),
+			fn,
+			i,
+			fp,
+			n: n as '1' | '2' | '3' | '4',
+		}),
+	);
+}
+
+function extractPartialFiscalReceiptFieldsFromDirectUrlParams(url: URL): PartialExtractedFiscalReceiptFields | null {
+	const fields: PartialExtractedFiscalReceiptFields = {
+		dateTime: sanitizeFiscalFieldValue(url.searchParams.get('t')),
+		amount: sanitizeFiscalFieldValue(url.searchParams.get('s'))?.replace(',', '.'),
+		fn: sanitizeFiscalNumericValue(url.searchParams.get('fn')),
+		i: sanitizeFiscalNumericValue(url.searchParams.get('i') ?? url.searchParams.get('fd')),
+		fp: sanitizeFiscalNumericValue(url.searchParams.get('fp') ?? url.searchParams.get('fs')),
+		n: sanitizeOperationTypeValue(url.searchParams.get('n')),
+	};
+
+	return fields.dateTime || fields.amount || fields.fn || fields.i || fields.fp || fields.n ? fields : null;
+}
+
+function extractPartialFiscalReceiptFieldsFromUrlPath(url: URL): PartialExtractedFiscalReceiptFields | null {
+	const segments = url.pathname
+		.split('/')
+		.map((segment) => sanitizeUrlPathSegment(segment))
+		.filter(Boolean);
+	if (segments.length === 0) {
+		return null;
+	}
+
+	const fields: PartialExtractedFiscalReceiptFields = {};
+	for (let index = 0; index < segments.length - 1; index += 1) {
+		const key = segments[index].toLowerCase();
+		const next = segments[index + 1];
+		switch (key) {
+			case 'fn':
+				fields.fn = sanitizeFiscalNumericValue(next) ?? fields.fn;
+				break;
+			case 'fd':
+			case 'i':
+				fields.i = sanitizeFiscalNumericValue(next) ?? fields.i;
+				break;
+			case 'fp':
+			case 'fs':
+				fields.fp = sanitizeFiscalNumericValue(next) ?? fields.fp;
+				break;
+			case 'n':
+				fields.n = sanitizeOperationTypeValue(next) ?? fields.n;
+				break;
+			default:
+				break;
+		}
+	}
+
+	return fields.fn || fields.i || fields.fp || fields.n ? fields : null;
 }
 
 function buildQrPayloadCandidates(value: string): string[] {
@@ -1461,6 +1972,16 @@ function repairCorruptedQrPayload(value: string): string {
 		.join('&');
 }
 
+function repairCorruptedQrUrlCandidate(value: string): string {
+	if (!value) {
+		return '';
+	}
+
+	return value.replace(/([?&])(t|s|fn|fp|fs|i|fd|n)#(\d[\d.,T]*)/gi, (_match, prefix, key, rawValue) => {
+		return `${prefix}${key}=${rawValue}`;
+	});
+}
+
 function repairCorruptedQrSegment(segment: string): string {
 	const trimmed = segment.trim();
 	const match = trimmed.match(/^([a-z]{1,2})\s+(.+)$/i);
@@ -1476,6 +1997,38 @@ function repairCorruptedQrSegment(segment: string): string {
 	}
 
 	return `${key}=${normalizedValue}`;
+}
+
+function sanitizeFiscalFieldValue(value: string | null | undefined): string | undefined {
+	if (!value) {
+		return undefined;
+	}
+
+	const normalized = value
+		.replace(/[\u200B-\u200D\uFEFF]/g, '')
+		.trim();
+	return normalized || undefined;
+}
+
+function sanitizeFiscalNumericValue(value: string | null | undefined): string | undefined {
+	const normalized = sanitizeFiscalFieldValue(value);
+	if (!normalized) {
+		return undefined;
+	}
+
+	const digits = normalized.replace(/[^\d]/g, '');
+	return digits || undefined;
+}
+
+function sanitizeOperationTypeValue(value: string | null | undefined): '1' | '2' | '3' | '4' | undefined {
+	const normalized = sanitizeFiscalFieldValue(value);
+	return normalized && /^[1-4]$/.test(normalized) ? normalized as '1' | '2' | '3' | '4' : undefined;
+}
+
+function sanitizeUrlPathSegment(value: string): string {
+	return decodeRepeatedUrlComponent(value)
+		.replace(/[)>,"'\]]+$/g, '')
+		.trim();
 }
 
 function decodeRepeatedUrlComponent(value: string, maxRounds = 3): string {

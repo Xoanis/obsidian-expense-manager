@@ -432,7 +432,7 @@ export class ExpenseService {
 			const fnMatch = fn && t.fn && t.fn === fn;
 			const fdMatch = fd && t.fd && t.fd === fd;
 			const fpMatch = fp && t.fp && t.fp === fp;
-			if (fnMatch || fdMatch || fpMatch) {
+			if (fnMatch && fdMatch && fpMatch) {
 				return true;
 			}
 
