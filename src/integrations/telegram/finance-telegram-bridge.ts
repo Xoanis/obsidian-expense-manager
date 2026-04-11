@@ -1,5 +1,6 @@
 import { App, TFile } from 'obsidian';
 import { DuplicateTransactionMatch, ExpenseService } from '../../services/expense-service';
+import { DuplicateMergeSession, DuplicateMergeWorkflowService } from '../../services/duplicate-merge-workflow-service';
 import { ReportSyncService } from '../../services/report-sync-service';
 import {
 	TelegramChartService,
@@ -43,8 +44,10 @@ const CALLBACK_ACTIONS = {
 	reviewRefresh: 'rr',
 	reviewShowPending: 'rp',
 	reviewShowAttention: 'rt',
+	reviewShowDuplicates: 'rd',
 	reviewShowAll: 'ra',
 	reviewOpenNextPending: 'rn',
+	reviewOpenNextDuplicate: 'rx',
 	proposalConfirm: 'pc',
 	proposalSaveDraft: 'pd',
 	proposalReject: 'pr',
@@ -63,7 +66,7 @@ const CALLBACK_UNIT_ALIAS = 'f';
 
 type CaptureTarget = 'project' | 'area' | 'generic';
 type SelectorField = 'project' | 'area' | 'category';
-type ReviewQueueMode = 'all' | 'pending' | 'attention';
+type ReviewQueueMode = 'all' | 'pending' | 'attention' | 'duplicate';
 
 interface CallbackTokenState {
 	kind: 'capture' | 'project-budget' | 'monthly-report' | 'monthly-chart' | 'proposal' | 'review';
@@ -106,6 +109,7 @@ export class FinanceTelegramBridge {
 	private proposalCounter = 0;
 	private readonly proposals = new Map<string, PendingFinanceProposal>();
 	private readonly pendingProposalService: PendingFinanceProposalService;
+	private readonly duplicateMergeWorkflowService: DuplicateMergeWorkflowService;
 
 	constructor(
 		private readonly app: App,
@@ -117,6 +121,7 @@ export class FinanceTelegramBridge {
 	) {
 		this.api = getTelegramBotApi(app);
 		this.pendingProposalService = new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency);
+		this.duplicateMergeWorkflowService = new DuplicateMergeWorkflowService(this.app, this.expenseService);
 	}
 
 	register(): boolean {
@@ -431,8 +436,10 @@ export class FinanceTelegramBridge {
 			payload.action === CALLBACK_ACTIONS.reviewRefresh
 			|| payload.action === CALLBACK_ACTIONS.reviewShowPending
 			|| payload.action === CALLBACK_ACTIONS.reviewShowAttention
+			|| payload.action === CALLBACK_ACTIONS.reviewShowDuplicates
 			|| payload.action === CALLBACK_ACTIONS.reviewShowAll
 			|| payload.action === CALLBACK_ACTIONS.reviewOpenNextPending
+			|| payload.action === CALLBACK_ACTIONS.reviewOpenNextDuplicate
 		) {
 			if (!payload.token) {
 				return { processed: true, answer: 'Finance review action is missing context.' };
@@ -446,11 +453,16 @@ export class FinanceTelegramBridge {
 			if (payload.action === CALLBACK_ACTIONS.reviewOpenNextPending) {
 				return this.openNextPendingReviewProposal(callback.messageId);
 			}
+			if (payload.action === CALLBACK_ACTIONS.reviewOpenNextDuplicate) {
+				return this.openNextDuplicateReviewProposal(callback.messageId);
+			}
 
 			const mode: ReviewQueueMode = payload.action === CALLBACK_ACTIONS.reviewShowPending
 				? 'pending'
 				: payload.action === CALLBACK_ACTIONS.reviewShowAttention
 					? 'attention'
+					: payload.action === CALLBACK_ACTIONS.reviewShowDuplicates
+						? 'duplicate'
 					: payload.action === CALLBACK_ACTIONS.reviewShowAll
 						? 'all'
 						: this.parseReviewQueueMode(state.value);
@@ -1228,24 +1240,30 @@ export class FinanceTelegramBridge {
 	private async buildFinanceReviewQueueMessage(mode: ReviewQueueMode = 'all'): Promise<string> {
 		const pending = await this.expenseService.getPendingApprovalTransactions();
 		const attention = await this.expenseService.getNeedsAttentionTransactions();
+		const duplicates = await this.expenseService.getDuplicateTransactions();
 		const lines = [
 			'Finance review queue',
 			`Pending approval: ${pending.length}`,
 			`Needs attention: ${attention.length}`,
+			`Duplicates: ${duplicates.length}`,
 		];
 
-		if (mode !== 'attention') {
+		if (mode === 'all' || mode === 'pending') {
 			lines.push('', ...this.formatReviewQueueSection('Pending approval', pending, 5));
 		}
 
-		if (mode !== 'pending') {
+		if (mode === 'all' || mode === 'attention') {
 			lines.push('', ...this.formatReviewQueueSection('Needs attention', attention, 5));
 		}
 
-		if (pending.length === 0 && attention.length === 0) {
+		if (mode === 'all' || mode === 'duplicate') {
+			lines.push('', ...this.formatReviewQueueSection('Duplicates', duplicates, 5));
+		}
+
+		if (pending.length === 0 && attention.length === 0 && duplicates.length === 0) {
 			lines.push('', 'Queue is empty.');
 		} else {
-			lines.push('', 'Use the Obsidian finance review queue note for the full list.');
+			lines.push('', 'Use the Obsidian finance review queue note for the full list. Duplicate merge still happens in Obsidian.');
 		}
 
 		return lines.join('\n');
@@ -1258,8 +1276,9 @@ export class FinanceTelegramBridge {
 
 		const pending = await this.expenseService.getPendingApprovalTransactions();
 		const attention = await this.expenseService.getNeedsAttentionTransactions();
+		const duplicates = await this.expenseService.getDuplicateTransactions();
 		const text = await this.buildFinanceReviewQueueMessage(mode);
-		const keyboard = this.buildReviewQueueKeyboard(mode, pending.length, attention.length);
+		const keyboard = this.buildReviewQueueKeyboard(mode, pending.length, attention.length, duplicates.length);
 		if (typeof messageId === 'number' && this.api.editMessage) {
 			await this.api.editMessage(messageId, text, { inlineKeyboard: keyboard });
 			return;
@@ -1304,6 +1323,7 @@ export class FinanceTelegramBridge {
 		mode: ReviewQueueMode,
 		pendingCount: number,
 		attentionCount: number,
+		duplicateCount: number,
 	): TelegramInlineKeyboard {
 		return [
 			[
@@ -1322,12 +1342,22 @@ export class FinanceTelegramBridge {
 					CALLBACK_ACTIONS.reviewShowAttention,
 					'attention',
 				),
+				this.buildReviewQueueButton(
+					mode === 'duplicate' ? `[Duplicates ${duplicateCount}]` : `Duplicates ${duplicateCount}`,
+					CALLBACK_ACTIONS.reviewShowDuplicates,
+					'duplicate',
+				),
 			],
 			[
 				this.buildReviewQueueButton('Refresh', CALLBACK_ACTIONS.reviewRefresh, mode),
 				this.buildReviewQueueButton(
 					pendingCount > 0 ? `Open next pending (${pendingCount})` : 'No pending items',
 					pendingCount > 0 ? CALLBACK_ACTIONS.reviewOpenNextPending : CALLBACK_ACTIONS.reviewRefresh,
+					mode,
+				),
+				this.buildReviewQueueButton(
+					duplicateCount > 0 ? `Open next duplicate (${duplicateCount})` : 'No duplicates',
+					duplicateCount > 0 ? CALLBACK_ACTIONS.reviewOpenNextDuplicate : CALLBACK_ACTIONS.reviewRefresh,
 					mode,
 				),
 			],
@@ -1359,6 +1389,9 @@ export class FinanceTelegramBridge {
 		}
 		if (normalized === 'attention' || normalized === 'needs-attention' || normalized === 'needs_attention') {
 			return 'attention';
+		}
+		if (normalized === 'duplicate' || normalized === 'duplicates') {
+			return 'duplicate';
 		}
 		return 'all';
 	}
@@ -1626,6 +1659,119 @@ export class FinanceTelegramBridge {
 			'This item is already saved in the vault as pending approval. Confirm to mark it as recorded.',
 		);
 		return { processed: true, answer: null };
+	}
+
+	private async openNextDuplicateReviewProposal(messageId?: number): Promise<TelegramHandlerResult> {
+		if (!this.api) {
+			return { processed: true, answer: 'Telegram integration is not available.' };
+		}
+
+		const duplicates = await this.expenseService.getDuplicateTransactions();
+		const next = duplicates[0];
+		if (!next?.file) {
+			if (typeof messageId === 'number' && this.api.editMessage) {
+				await this.showReviewQueueMessage('duplicate', messageId);
+			}
+			return { processed: true, answer: 'There are no duplicate finance items right now.' };
+		}
+
+		try {
+			const session = await this.duplicateMergeWorkflowService.buildSession(next.file);
+			const text = this.formatDuplicateReviewMessage(session, duplicates.length);
+			const keyboard = this.buildDuplicateReviewKeyboard();
+			if (typeof messageId === 'number' && this.api.editMessage) {
+				await this.api.editMessage(messageId, text, { inlineKeyboard: keyboard });
+			} else {
+				await this.api.sendMessage(text, { inlineKeyboard: keyboard });
+			}
+			return { processed: true, answer: null };
+		} catch (error) {
+			return {
+				processed: true,
+				answer: `Error opening duplicate review: ${(error as Error).message}`,
+			};
+		}
+	}
+
+	private buildDuplicateReviewKeyboard(): TelegramInlineKeyboard {
+		return [
+			[
+				this.buildReviewQueueButton('Back to duplicates', CALLBACK_ACTIONS.reviewShowDuplicates, 'duplicate'),
+				this.buildReviewQueueButton('Next duplicate', CALLBACK_ACTIONS.reviewOpenNextDuplicate, 'duplicate'),
+			],
+			[
+				this.buildReviewQueueButton('All queues', CALLBACK_ACTIONS.reviewShowAll, 'all'),
+			],
+		];
+	}
+
+	private formatDuplicateReviewMessage(session: DuplicateMergeSession, duplicateCount: number): string {
+		const differingFields = session.fields.filter((field) => field.state !== 'equal');
+		const differingSections = session.sections.filter((section) => section.state !== 'equal');
+		const lines = [
+			'Duplicate review',
+			`Duplicates in queue: ${duplicateCount}`,
+			`Original: ${session.originalFile.path}`,
+			`Duplicate: ${session.duplicateFile.path}`,
+			'',
+			'Original summary:',
+			`- ${this.formatDuplicateTransactionSummary(session.original)}`,
+			'Duplicate summary:',
+			`- ${this.formatDuplicateTransactionSummary(session.duplicate)}`,
+			'',
+			`Field differences: ${differingFields.length}`,
+		];
+
+		if (differingFields.length === 0) {
+			lines.push('- none');
+		} else {
+			for (const field of differingFields.slice(0, 6)) {
+				lines.push(
+					`- ${field.label}: ${this.formatDuplicateCompareValue(field.originalValue)} -> ${this.formatDuplicateCompareValue(field.duplicateValue)}`,
+				);
+			}
+			if (differingFields.length > 6) {
+				lines.push(`- ...and ${differingFields.length - 6} more field difference(s)`);
+			}
+		}
+
+		lines.push('', `Body section differences: ${differingSections.length}`);
+		if (differingSections.length === 0) {
+			lines.push('- none');
+		} else {
+			for (const section of differingSections.slice(0, 6)) {
+				lines.push(`- ${section.label}`);
+			}
+			if (differingSections.length > 6) {
+				lines.push(`- ...and ${differingSections.length - 6} more section difference(s)`);
+			}
+		}
+
+		lines.push(
+			'',
+			'Telegram duplicate merge stays limited on purpose.',
+			'Use the Obsidian command palette: "Open duplicate merge queue" to complete the merge safely.',
+		);
+
+		return this.truncateTelegramText(lines.join('\n'), 3800);
+	}
+
+	private formatDuplicateTransactionSummary(transaction: TransactionData): string {
+		return [
+			transaction.type,
+			`${transaction.amount.toFixed(2)} ${transaction.currency}`,
+			this.formatReviewQueueDate(transaction.dateTime),
+			transaction.description || 'no description',
+		].join(' | ');
+	}
+
+	private formatDuplicateCompareValue(value: string): string {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return 'empty';
+		}
+
+		return this.truncateTelegramText(trimmed.replace(/\s+/g, ' '), 80);
 	}
 
 	private async sendProposalNotePreview(proposalId: string): Promise<TelegramHandlerResult> {

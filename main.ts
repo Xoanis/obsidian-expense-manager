@@ -21,6 +21,7 @@ import { registerGenerateCustomReportCommand } from './src/commands/generate-cus
 import { registerMigrateLegacyNotesCommand } from './src/commands/migrate-legacy-notes';
 import { registerSetCurrentMonthBudgetCommand } from './src/commands/set-current-month-budget';
 import { registerOpenFinanceReviewQueueCommand } from './src/commands/open-finance-review-queue';
+import { registerOpenDuplicateMergeQueueCommand } from './src/commands/open-duplicate-merge-queue';
 import { registerSyncCurrentTransactionNoteCommand } from './src/commands/sync-current-transaction-note';
 import { registerSyncFinanceEmailsCommand } from './src/email-finance/commands/sync-finance-emails';
 import { registerRebuildCurrentEmailTransactionCommand } from './src/email-finance/commands/rebuild-current-email-transaction';
@@ -40,6 +41,7 @@ import { TelegramEmailSyncNotificationService } from './src/services/telegram-em
 import { MigrationService } from './src/services/migration-service';
 import { FinanceIntakeService } from './src/services/finance-intake-service';
 import { ReceiptEnrichmentService } from './src/services/receipt-enrichment-service';
+import { DuplicateMergeWorkflowService } from './src/services/duplicate-merge-workflow-service';
 import { EmailFinanceSyncService } from './src/email-finance/sync/email-finance-sync-service';
 import { EmailFinanceSyncStateStore } from './src/email-finance/sync/email-finance-sync-state-store';
 import { PendingFinanceProposalService } from './src/email-finance/review/pending-finance-proposal-service';
@@ -48,6 +50,7 @@ import { ReportsModal } from './src/ui/reports-modal';
 import { ExpenseModal } from './src/ui/expense-modal';
 import { BudgetInputModal } from './src/ui/budget-input-modal';
 import { FinanceRuleInputModal } from './src/ui/finance-rule-input-modal';
+import { DuplicateMergeModal } from './src/ui/duplicate-merge-modal';
 import { PLUGIN_UNIT_NAME } from './src/utils/constants';
 import { parseBudgetInput } from './src/utils/budget-input';
 import { buildFinanceReviewQueueNoteContent } from './src/review/finance-review-queue-note';
@@ -78,6 +81,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private telegramEmailSyncNotificationService!: TelegramEmailSyncNotificationService;
 	private financeIntakeService!: FinanceIntakeService;
 	private receiptEnrichmentService!: ReceiptEnrichmentService;
+	private duplicateMergeWorkflowService!: DuplicateMergeWorkflowService;
 	private emailFinanceSyncService!: EmailFinanceSyncService;
 	private pendingFinanceProposalService!: PendingFinanceProposalService;
 	private logger: PluginLogger = new ConsolePluginLogger('Expense Manager');
@@ -109,6 +113,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			logger: this.logger,
 		});
 		this.receiptEnrichmentService = new ReceiptEnrichmentService(this.app, this.settings);
+		this.duplicateMergeWorkflowService = new DuplicateMergeWorkflowService(this.app, this.expenseService);
 		this.pendingFinanceProposalService = new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency);
 		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
 		this.registerParaCoreTelegramCardContributions();
@@ -125,6 +130,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerMigrateLegacyNotesCommand(this);
 		registerSetCurrentMonthBudgetCommand(this);
 		registerOpenFinanceReviewQueueCommand(this);
+		registerOpenDuplicateMergeQueueCommand(this);
 		registerSyncCurrentTransactionNoteCommand(this);
 		registerSyncFinanceEmailsCommand(this);
 		registerRebuildCurrentEmailTransactionCommand(this);
@@ -202,6 +208,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			logger: this.logger,
 		});
 		this.receiptEnrichmentService = new ReceiptEnrichmentService(this.app, this.settings);
+		this.duplicateMergeWorkflowService = new DuplicateMergeWorkflowService(this.app, this.expenseService);
 		this.pendingFinanceProposalService = new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency);
 		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
 		this.registerParaCoreTelegramCardContributions();
@@ -247,6 +254,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		try {
 			const pending = await this.expenseService.getPendingApprovalTransactions();
 			const attention = await this.expenseService.getNeedsAttentionTransactions();
+			const duplicates = await this.expenseService.getDuplicateTransactions();
 			const path = await this.ensureFinanceReviewQueueNote();
 			const file = this.app.vault.getAbstractFileByPath(path);
 			if (!(file instanceof TFile)) {
@@ -256,13 +264,34 @@ export default class ExpenseManagerPlugin extends Plugin {
 
 			await this.app.workspace.getLeaf(true).openFile(file);
 			new Notice(
-				`Finance review queue: ${pending.length} pending approval, ${attention.length} need attention.`,
+				`Finance review queue: ${pending.length} pending approval, ${attention.length} need attention, ${duplicates.length} duplicates.`,
 				6000,
 			);
 		} catch (error) {
 			new Notice(`Error opening finance review queue: ${(error as Error).message}`);
 			this.logger.error('Failed to open finance review queue', error);
 		}
+	}
+
+	async handleOpenDuplicateMergeQueue() {
+		let preferredDuplicatePath: string | null = null;
+		const activeFile = this.app.workspace.getActiveFile();
+		if (activeFile && this.expenseService.isTransactionFile(activeFile)) {
+			const transaction = await this.expenseService.parseTransactionFile(activeFile);
+			if (transaction?.status === 'duplicate') {
+				preferredDuplicatePath = activeFile.path;
+			}
+		}
+
+		const modal = new DuplicateMergeModal(
+			this.app,
+			this.duplicateMergeWorkflowService,
+			preferredDuplicatePath,
+		);
+		modal.onMerged = async (file) => {
+			await this.app.workspace.getLeaf(false).openFile(file);
+		};
+		modal.open();
 	}
 
 	async renderReportSection(

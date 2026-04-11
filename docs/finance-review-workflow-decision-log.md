@@ -168,11 +168,78 @@ Implications:
 
 - new behavior should prefer orchestration services over adding more branching directly into `main.ts` or `ExpenseService`
 
+### Decision 10. Duplicate merge edits only user-meaningful fields
+
+Accepted:
+
+- duplicate merge UI hides service-managed fields from manual editing
+- at minimum this includes:
+  - `status`
+  - `duplicate_of`
+  - `source`
+  - `type`
+  - `email_msg_id`
+  - provider-specific email metadata
+- merge completion sets service-managed fields automatically:
+  - surviving note becomes `status: recorded`
+  - `duplicate_of` is cleared
+  - hidden metadata is resolved by workflow rules instead of manual editing
+
+Why:
+
+- service metadata is important, but it is not a good manual merge surface
+- users should focus on business data, not storage mechanics
+
+Implications:
+
+- duplicate merge needs a dedicated hidden-metadata merge policy
+- the modal should prioritize editable finance fields and structured note sections
+
+### Decision 11. Duplicate merge works on structured note sections, not raw markdown body
+
+Accepted:
+
+- Obsidian duplicate merge compares and merges structured body sections instead of arbitrary raw markdown
+- current first-class sections are:
+  - `Items`
+  - `Artifact`
+  - `Source Context`
+- the implementation should treat the body format as evolving and preserve unknown top-level sections when possible
+
+Why:
+
+- finance notes currently use structured sections that already map to plugin behavior
+- full raw-markdown merge would add a much larger and riskier persistence problem
+
+Implications:
+
+- merge workflow needs generic top-level section parsing/rendering helpers
+- future note sections should flow into the merge UI without requiring a full redesign
+
+### Decision 12. Telegram duplicate merge starts as a limited safe-flow
+
+Accepted:
+
+- the full duplicate merge experience is Obsidian-first
+- Telegram should initially support queue visibility and only simple duplicate handling where the conflict surface stays small
+- complex duplicates with structured body conflicts should continue to be resolved in Obsidian
+
+Why:
+
+- Telegram is useful for triage, but awkward for high-context field-by-field and section-by-section merges
+- Obsidian provides much safer visibility for note comparison
+
+Implications:
+
+- the first implementation priority is the Obsidian modal and workflow
+- Telegram duplicate merge can be added incrementally without blocking the main merge release
+
 ## Planned implementation order
 
 1. Foundation: statuses, metadata fields, frontmatter persistence, validation.
 2. Quick UX wins: date/time in Obsidian and save-as-draft in Obsidian and Telegram.
 3. Email rebuild foundation: provider fetch-by-id and current-note rebuild workflow.
 4. Duplicate persistence: create duplicate notes instead of skipping.
-5. Duplicate merge UI.
-6. Rejected archive/delete policy and archive storage helpers.
+5. Duplicate merge workflow service and Obsidian modal.
+6. Telegram duplicate triage helpers.
+7. Rejected archive/delete policy and archive storage helpers.

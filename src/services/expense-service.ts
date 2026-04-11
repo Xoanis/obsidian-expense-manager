@@ -238,6 +238,10 @@ export class ExpenseService {
 		return this.getAllTransactions({ statuses: ['needs-attention'] });
 	}
 
+	async getDuplicateTransactions(): Promise<TransactionData[]> {
+		return this.getAllTransactions({ statuses: ['duplicate'] });
+	}
+
 	/**
 	 * Get transactions within a date range
 	 */
@@ -388,6 +392,16 @@ export class ExpenseService {
 	async updateTransactionWithFileSync(file: TFile, data: Partial<TransactionData>): Promise<TFile> {
 		await this.updateTransaction(file, data);
 		return this.syncTransactionFileStorage(file);
+	}
+
+	async replaceTransactionContentWithFileSync(
+		file: TFile,
+		content: string,
+		storageData: Pick<TransactionData, 'dateTime' | 'type' | 'amount' | 'description' | 'area' | 'project'>,
+	): Promise<TFile> {
+		await this.validateLinkedContext(storageData);
+		await this.app.vault.modify(file, content);
+		return this.renameAndRelocateTransactionFile(file, storageData);
 	}
 
 	/**

@@ -1,5 +1,10 @@
 import { normalizeTransactionStatus, TransactionData, TransactionDetail } from '../types';
 
+export interface MarkdownSection {
+	title: string;
+	content: string;
+}
+
 /**
  * Generate YAML frontmatter from transaction data
  */
@@ -49,6 +54,10 @@ export function generateFrontmatter(data: TransactionData): string {
 		frontmatter.ProverkaCheka = true;
 	}
 
+	return generateYamlFrontmatterRecord(frontmatter);
+}
+
+export function generateYamlFrontmatterRecord(frontmatter: Record<string, unknown>): string {
 	// Convert to YAML manually to avoid external dependencies
 	let yaml = '---\n';
 	for (const [key, value] of Object.entries(frontmatter)) {
@@ -133,6 +142,81 @@ export function parseYamlFrontmatter(content: string): Record<string, unknown> |
 
 export function parseFrontmatter(content: string): Partial<TransactionData> | null {
 	return parseYamlFrontmatter(content) as Partial<TransactionData> | null;
+}
+
+export function stripYamlFrontmatter(content: string): string {
+	if (!content.startsWith('---\n')) {
+		return content;
+	}
+
+	const endIndex = content.indexOf('\n---\n', 4);
+	if (endIndex === -1) {
+		return content;
+	}
+
+	return content.slice(endIndex + 5);
+}
+
+export function parseMarkdownSections(content: string): MarkdownSection[] {
+	const body = stripYamlFrontmatter(content).trim();
+	if (!body) {
+		return [];
+	}
+
+	const sections: MarkdownSection[] = [];
+	const headingPattern = /^##\s+([^\n]+)\n/gm;
+	const matches = Array.from(body.matchAll(headingPattern));
+	if (matches.length === 0) {
+		return [{ title: '', content: body }];
+	}
+
+	const firstMatch = matches[0];
+	if (firstMatch && firstMatch.index !== undefined && firstMatch.index > 0) {
+		const preamble = body.slice(0, firstMatch.index).trim();
+		if (preamble) {
+			sections.push({
+				title: '',
+				content: preamble,
+			});
+		}
+	}
+
+	for (let index = 0; index < matches.length; index += 1) {
+		const current = matches[index];
+		const next = matches[index + 1];
+		if (!current || current.index === undefined) {
+			continue;
+		}
+
+		const title = (current[1] ?? '').trim();
+		const sectionStart = current.index + current[0].length;
+		const sectionEnd = next?.index ?? body.length;
+		const sectionContent = body.slice(sectionStart, sectionEnd).trim();
+		sections.push({
+			title,
+			content: sectionContent,
+		});
+	}
+
+	return sections;
+}
+
+export function renderMarkdownSections(sections: MarkdownSection[]): string {
+	const rendered = sections
+		.map((section) => {
+			const normalizedContent = section.content.trim();
+			if (!section.title.trim()) {
+				return normalizedContent;
+			}
+			return normalizedContent
+				? `## ${section.title}\n\n${normalizedContent}`
+				: `## ${section.title}`;
+		})
+		.filter((value) => value.length > 0)
+		.join('\n\n')
+		.trim();
+
+	return rendered ? `${rendered}\n` : '';
 }
 
 export function parseSourceContextFromContent(content: string): string | undefined {

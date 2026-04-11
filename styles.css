@@ -220,3 +220,272 @@
 	font-size: 3em;
 	margin-bottom: 10px;
 }
+
+/* Duplicate merge modal */
+.expense-manager-duplicate-merge-modal {
+	width: min(1400px, calc(100vw - 32px));
+	height: min(88vh, calc(100vh - 32px));
+	min-width: 760px;
+	min-height: 520px;
+	resize: both;
+	overflow: hidden;
+}
+
+.expense-manager-duplicate-merge-modal .modal-content {
+	width: 100%;
+	max-width: none;
+	height: 100%;
+	max-height: none;
+	overflow: auto;
+	box-sizing: border-box;
+}
+
+.expense-manager-duplicate-merge-layout {
+	display: grid;
+	grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+	gap: 18px;
+	min-height: 0;
+}
+
+.expense-manager-duplicate-merge-sidebar,
+.expense-manager-duplicate-merge-main {
+	min-width: 0;
+}
+
+.expense-manager-duplicate-merge-main {
+	overflow-x: hidden;
+}
+
+.expense-manager-duplicate-merge-sidebar {
+	border-right: 1px solid var(--background-modifier-border);
+	padding-right: 14px;
+}
+
+.expense-manager-duplicate-merge-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	max-height: 65vh;
+	overflow-y: auto;
+	padding-right: 4px;
+}
+
+.expense-manager-duplicate-merge-list-item {
+	padding: 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	background: var(--background-secondary);
+	cursor: pointer;
+}
+
+.expense-manager-duplicate-merge-list-item:hover {
+	border-color: var(--interactive-accent);
+}
+
+.expense-manager-duplicate-merge-list-item.is-active {
+	border-color: var(--interactive-accent);
+	background: var(--background-secondary-alt);
+	box-shadow: inset 0 0 0 1px var(--interactive-accent);
+}
+
+.expense-manager-duplicate-merge-list-title {
+	font-weight: 600;
+	margin-bottom: 6px;
+}
+
+.expense-manager-duplicate-merge-list-meta {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	line-height: 1.35;
+}
+
+.expense-manager-duplicate-merge-summary {
+	display: grid;
+	gap: 4px;
+	padding: 12px 14px;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 12px;
+	margin-bottom: 12px;
+}
+
+.expense-manager-duplicate-merge-feedback {
+	margin-bottom: 12px;
+	padding: 12px 14px;
+	border-radius: 12px;
+	border: 1px solid var(--background-modifier-border);
+}
+
+.expense-manager-duplicate-merge-feedback.is-error {
+	background: color-mix(in srgb, var(--background-modifier-error) 18%, var(--background-primary));
+	border-color: color-mix(in srgb, var(--text-error) 40%, var(--background-modifier-border));
+	color: var(--text-normal);
+}
+
+.expense-manager-duplicate-merge-feedback.is-success {
+	background: color-mix(in srgb, var(--background-modifier-success) 18%, var(--background-primary));
+	border-color: color-mix(in srgb, var(--text-success) 40%, var(--background-modifier-border));
+	color: var(--text-normal);
+}
+
+.expense-manager-duplicate-merge-toggle-row {
+	margin-bottom: 16px;
+}
+
+.expense-manager-duplicate-merge-toggle-label {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+}
+
+.expense-manager-duplicate-merge-section {
+	margin-bottom: 24px;
+}
+
+.expense-manager-duplicate-merge-header,
+.expense-manager-duplicate-merge-row {
+	display: grid;
+	grid-template-columns: minmax(140px, 170px) minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr);
+	gap: 12px;
+	align-items: start;
+}
+
+.expense-manager-duplicate-merge-header > *,
+.expense-manager-duplicate-merge-row > * {
+	min-width: 0;
+}
+
+.expense-manager-duplicate-merge-header {
+	margin-bottom: 10px;
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	color: var(--text-muted);
+}
+
+.expense-manager-duplicate-merge-row {
+	padding: 12px;
+	margin-bottom: 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 12px;
+	background: var(--background-primary-alt);
+}
+
+.expense-manager-duplicate-merge-row.state-conflict {
+	border-color: var(--text-warning);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-warning) 35%, transparent);
+}
+
+.expense-manager-duplicate-merge-row-label {
+	display: grid;
+	gap: 6px;
+}
+
+.expense-manager-duplicate-merge-row-status {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.expense-manager-duplicate-merge-cell {
+	min-height: 44px;
+	padding: 10px 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	background: var(--background-primary);
+	box-sizing: border-box;
+	white-space: pre-wrap;
+	word-break: break-word;
+	overflow-wrap: anywhere;
+}
+
+.expense-manager-duplicate-merge-cell.is-multiline {
+	min-height: 180px;
+}
+
+.expense-manager-duplicate-merge-editor {
+	display: grid;
+	gap: 10px;
+}
+
+.expense-manager-duplicate-merge-choice-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.expense-manager-duplicate-merge-choice-row button.is-active {
+	border-color: var(--interactive-accent);
+	box-shadow: inset 0 0 0 1px var(--interactive-accent);
+}
+
+.expense-manager-duplicate-merge-input,
+.expense-manager-duplicate-merge-textarea {
+	width: 100%;
+	max-width: 100%;
+	box-sizing: border-box;
+}
+
+.expense-manager-duplicate-merge-textarea {
+	resize: vertical;
+	min-height: 88px;
+}
+
+.expense-manager-duplicate-merge-actions {
+	display: flex;
+	gap: 10px;
+	justify-content: flex-end;
+	padding-top: 8px;
+}
+
+.expense-manager-duplicate-merge-empty {
+	padding: 16px;
+	border: 1px dashed var(--background-modifier-border);
+	border-radius: 12px;
+	color: var(--text-muted);
+	background: var(--background-secondary);
+	box-sizing: border-box;
+}
+
+.expense-manager-duplicate-merge-modal.is-tight .expense-manager-duplicate-merge-layout {
+	grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
+}
+
+.expense-manager-duplicate-merge-modal.is-tight .expense-manager-duplicate-merge-header,
+.expense-manager-duplicate-merge-modal.is-tight .expense-manager-duplicate-merge-row {
+	grid-template-columns: minmax(120px, 150px) minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1fr);
+}
+
+.expense-manager-duplicate-merge-modal.is-compact .expense-manager-duplicate-merge-layout {
+	grid-template-columns: 1fr;
+}
+
+.expense-manager-duplicate-merge-modal.is-compact .expense-manager-duplicate-merge-sidebar {
+	border-right: 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+	padding-right: 0;
+	padding-bottom: 14px;
+}
+
+.expense-manager-duplicate-merge-modal.is-narrow .expense-manager-duplicate-merge-header,
+.expense-manager-duplicate-merge-modal.is-narrow .expense-manager-duplicate-merge-row {
+	grid-template-columns: 1fr;
+}
+
+@media (max-width: 1100px) {
+	.expense-manager-duplicate-merge-layout {
+		grid-template-columns: 1fr;
+	}
+
+	.expense-manager-duplicate-merge-sidebar {
+		border-right: 0;
+		border-bottom: 1px solid var(--background-modifier-border);
+		padding-right: 0;
+		padding-bottom: 14px;
+	}
+
+	.expense-manager-duplicate-merge-header,
+	.expense-manager-duplicate-merge-row {
+		grid-template-columns: 1fr;
+	}
+}
