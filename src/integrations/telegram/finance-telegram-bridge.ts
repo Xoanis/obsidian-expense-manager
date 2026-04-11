@@ -1,5 +1,5 @@
 import { App, TFile } from 'obsidian';
-import { DuplicateTransactionError, ExpenseService } from '../../services/expense-service';
+import { DuplicateTransactionMatch, ExpenseService } from '../../services/expense-service';
 import { ReportSyncService } from '../../services/report-sync-service';
 import {
 	TelegramChartService,
@@ -1372,6 +1372,57 @@ export class FinanceTelegramBridge {
 		}
 	}
 
+	private async findDuplicateMatchForProposal(
+		data: TransactionData,
+		excludeFilePath?: string,
+	): Promise<DuplicateTransactionMatch | null> {
+		return this.expenseService.findDuplicateTransactionMatch({
+			fn: data.fn,
+			fd: data.fd,
+			fp: data.fp,
+			dateTime: data.dateTime,
+			amount: data.amount,
+			type: data.type,
+			excludeFilePath,
+		});
+	}
+
+	private buildDuplicateProposalTags(data: TransactionData): string[] {
+		return Array.from(new Set([
+			'finance',
+			data.type,
+			data.source,
+			'duplicate',
+			...(data.tags ?? []),
+		]));
+	}
+
+	private async persistProposalAsDuplicate(
+		proposal: PendingFinanceProposal,
+		match: DuplicateTransactionMatch,
+	): Promise<TFile> {
+		if (!proposal.sourceFilePath) {
+			return this.expenseService.createDuplicateTransaction(proposal.data, match);
+		}
+
+		const existingFile = this.app.vault.getAbstractFileByPath(proposal.sourceFilePath);
+		if (!(existingFile instanceof TFile)) {
+			throw new Error('Pending finance note was not found.');
+		}
+
+		const originalFile = match.transaction.file;
+		if (!(originalFile instanceof TFile)) {
+			throw new Error('Duplicate target note was not found.');
+		}
+
+		return this.expenseService.updateTransactionWithFileSync(existingFile, {
+			...proposal.data,
+			status: 'duplicate',
+			duplicateOf: this.toExactWikiLink(originalFile),
+			tags: this.buildDuplicateProposalTags(proposal.data),
+		});
+	}
+
 	private async confirmProposal(
 		proposalId: string,
 		messageId?: number,
@@ -1382,6 +1433,36 @@ export class FinanceTelegramBridge {
 		}
 
 		try {
+			const duplicateMatch = await this.findDuplicateMatchForProposal(
+				proposal.data,
+				proposal.sourceFilePath,
+			);
+
+			if (duplicateMatch) {
+				const file = await this.persistProposalAsDuplicate(proposal, duplicateMatch);
+				this.proposals.delete(proposalId);
+				if (typeof messageId === 'number' && this.api?.editMessage) {
+					await this.api.editMessage(
+						messageId,
+						this.formatProposalMessage(
+							{
+								...proposal,
+								sourceFilePath: file.path,
+							},
+							proposal.sourceFilePath
+								? 'Review item was marked as duplicate and kept in the vault for later merge.'
+								: 'Duplicate note was saved instead of creating a second transaction.',
+						),
+					);
+				}
+				return {
+					processed: true,
+					answer: proposal.sourceFilePath
+						? 'Finance review item marked as duplicate.'
+						: 'Duplicate finance note saved.',
+				};
+			}
+
 			if (proposal.sourceFilePath) {
 				const file = this.app.vault.getAbstractFileByPath(proposal.sourceFilePath);
 				if (!(file instanceof TFile)) {
@@ -1412,9 +1493,6 @@ export class FinanceTelegramBridge {
 				answer: proposal.sourceFilePath ? 'Finance review item confirmed.' : 'Finance transaction saved.',
 			};
 		} catch (error) {
-			if (error instanceof DuplicateTransactionError) {
-				return { processed: true, answer: 'Duplicate transaction found. Proposal was not saved.' };
-			}
 			return {
 				processed: true,
 				answer: `Error saving finance proposal: ${(error as Error).message}`,
@@ -1467,7 +1545,8 @@ export class FinanceTelegramBridge {
 		}
 
 		try {
-			let file: TFile | null = null;
+			let file: TFile;
+			let savedAsDuplicate = false;
 			if (proposal.sourceFilePath) {
 				const existing = this.app.vault.getAbstractFileByPath(proposal.sourceFilePath);
 				if (!(existing instanceof TFile)) {
@@ -1479,10 +1558,16 @@ export class FinanceTelegramBridge {
 					status: 'pending-approval',
 				});
 			} else {
-				file = await this.pendingProposalService.createPendingProposal({
-					...proposal.data,
-					status: 'pending-approval',
-				});
+				const duplicateMatch = await this.findDuplicateMatchForProposal(proposal.data);
+				if (duplicateMatch) {
+					file = await this.persistProposalAsDuplicate(proposal, duplicateMatch);
+					savedAsDuplicate = true;
+				} else {
+					file = await this.pendingProposalService.createPendingProposal({
+						...proposal.data,
+						status: 'pending-approval',
+					});
+				}
 			}
 
 			this.proposals.delete(proposalId);
@@ -1494,19 +1579,24 @@ export class FinanceTelegramBridge {
 							...proposal,
 							sourceFilePath: file.path,
 						},
-						'Draft saved with pending approval status. You can continue review later from /finance_review.',
+						savedAsDuplicate
+							? 'Duplicate note was saved instead of adding another pending approval item.'
+							: proposal.sourceFilePath
+							? 'Draft saved with pending approval status. You can continue review later from /finance_review.'
+							: 'Draft saved with pending approval status. You can continue review later from /finance_review.',
 					),
 				);
 			}
 
 			return {
 				processed: true,
-				answer: proposal.sourceFilePath ? 'Finance review item kept pending.' : 'Finance draft saved.',
+				answer: savedAsDuplicate
+					? 'Duplicate finance note saved.'
+					: proposal.sourceFilePath
+					? 'Finance review item kept pending.'
+					: 'Finance draft saved.',
 			};
 		} catch (error) {
-			if (error instanceof DuplicateTransactionError) {
-				return { processed: true, answer: 'Duplicate transaction found. Draft was not saved.' };
-			}
 			return {
 				processed: true,
 				answer: `Error saving finance draft: ${(error as Error).message}`,

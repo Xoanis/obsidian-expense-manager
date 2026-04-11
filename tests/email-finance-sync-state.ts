@@ -25,8 +25,8 @@ run('email sync summary mentions saved cursor when more pages remain', () => {
 		plannedUnits: 0,
 		createdPendingNotes: 0,
 		createdNeedsAttentionNotes: 2,
+		createdDuplicateNotes: 0,
 		failedUnits: 0,
-		skippedDuplicates: 0,
 		hasMore: true,
 		maxMessagesPerRun: 20,
 	});

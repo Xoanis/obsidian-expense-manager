@@ -23,6 +23,7 @@ import { registerSetCurrentMonthBudgetCommand } from './src/commands/set-current
 import { registerOpenFinanceReviewQueueCommand } from './src/commands/open-finance-review-queue';
 import { registerSyncCurrentTransactionNoteCommand } from './src/commands/sync-current-transaction-note';
 import { registerSyncFinanceEmailsCommand } from './src/email-finance/commands/sync-finance-emails';
+import { registerRebuildCurrentEmailTransactionCommand } from './src/email-finance/commands/rebuild-current-email-transaction';
 import { getParaCoreApi } from './src/integrations/para-core/para-core-client';
 import { registerFinanceDomain } from './src/integrations/para-core/register-finance-domain';
 import { registerFinanceMetadataContributions } from './src/integrations/para-core/register-metadata-contributions';
@@ -126,6 +127,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerOpenFinanceReviewQueueCommand(this);
 		registerSyncCurrentTransactionNoteCommand(this);
 		registerSyncFinanceEmailsCommand(this);
+		registerRebuildCurrentEmailTransactionCommand(this);
 		this.addCommand({
 			id: 'open-debug-log',
 			name: 'Open shared runtime log',
@@ -327,6 +329,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			() => this.settings,
 			syncStateStore,
 			this.financeIntakeService,
+			this.expenseService,
 			this.pendingFinanceProposalService,
 			{
 				logger: this.logger,
@@ -627,6 +630,36 @@ export default class ExpenseManagerPlugin extends Plugin {
 		}
 	}
 
+	async handleRebuildCurrentEmailTransaction() {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) {
+			new Notice('Open an email-derived finance transaction note first.');
+			return;
+		}
+		if (!this.expenseService.isTransactionFile(file)) {
+			new Notice('Open a managed finance transaction note first.');
+			return;
+		}
+
+		const previousPath = file.path;
+		try {
+			const rebuilt = await this.emailFinanceSyncService.rebuildTransactionFile(file);
+			this.expenseService.clearReportRenderCache();
+			this.reportSyncService.scheduleAutoSync(`transaction-rebuilt:${rebuilt.file.path}`);
+			if (rebuilt.file.path !== previousPath) {
+				await this.app.workspace.getLeaf(false).openFile(rebuilt.file);
+			}
+
+			new Notice(
+				`Rebuilt email transaction from message ${rebuilt.messageId}. Matched units: ${rebuilt.matchedUnitLabels.join(', ') || 'n/a'}.`,
+				6000,
+			);
+		} catch (error) {
+			new Notice(`Could not rebuild current email transaction: ${(error as Error).message}`);
+			this.logger.error('Failed to rebuild current email transaction', error);
+		}
+	}
+
 	/**
 	 * Save transaction to vault
 	 */
@@ -636,17 +669,26 @@ export default class ExpenseManagerPlugin extends Plugin {
 	) {
 		const mode = options?.mode ?? 'recorded';
 		try {
-			const isDuplicate = await this.expenseService.isDuplicateTransaction(
-				data.fn,
-				data.fd,
-				data.fp,
-				data.dateTime,
-				data.amount,
-				data.type,
-			);
-			if (isDuplicate) {
-				new Notice(`⚠️ Duplicate transaction detected! Skipping.`);
-				this.logger.info('Duplicate transaction prevented', data.description);
+			const duplicateMatch = await this.expenseService.findDuplicateTransactionMatch({
+				fn: data.fn,
+				fd: data.fd,
+				fp: data.fp,
+				dateTime: data.dateTime,
+				amount: data.amount,
+				type: data.type,
+			});
+			if (duplicateMatch) {
+				const duplicateFile = await this.expenseService.createDuplicateTransaction(data, duplicateMatch);
+				new Notice(
+					`Duplicate transaction saved: ${data.amount.toFixed(2)} ${data.currency} - ${data.description}`,
+					5000,
+				);
+				this.logger.info('Duplicate transaction stored for review', {
+					path: duplicateFile.path,
+					duplicateOf: duplicateMatch.transaction.file?.path ?? null,
+					mode,
+					source: data.source,
+				});
 				return;
 			}
 			

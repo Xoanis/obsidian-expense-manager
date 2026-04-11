@@ -7,8 +7,8 @@ export interface EmailFinanceSyncSummaryStats {
 	plannedUnits: number;
 	createdPendingNotes: number;
 	createdNeedsAttentionNotes: number;
+	createdDuplicateNotes: number;
 	failedUnits: number;
-	skippedDuplicates: number;
 	hasMore: boolean;
 	maxMessagesPerRun: number;
 }
@@ -18,7 +18,7 @@ export function hasMoreEmailFinanceSyncPages(nextCursor: string | null | undefin
 }
 
 export function buildEmailFinanceSyncSummaryText(stats: EmailFinanceSyncSummaryStats): string {
-	const summary = `Scanned ${stats.totalMessages} email(s): ${stats.passedCoarseFilter} passed coarse filter, ${stats.filteredOut} filtered out, ${stats.plannedUnits} unit(s) planned, ${stats.createdPendingNotes} pending note(s) created, ${stats.createdNeedsAttentionNotes} needs-attention note(s) created, ${stats.skippedDuplicates} duplicate note(s) skipped, ${stats.failedUnits} unit(s) failed.`;
+	const summary = `Scanned ${stats.totalMessages} email(s): ${stats.passedCoarseFilter} passed coarse filter, ${stats.filteredOut} filtered out, ${stats.plannedUnits} unit(s) planned, ${stats.createdPendingNotes} pending note(s) created, ${stats.createdNeedsAttentionNotes} needs-attention note(s) created, ${stats.createdDuplicateNotes} duplicate note(s) created, ${stats.failedUnits} unit(s) failed.`;
 	if (!stats.hasMore) {
 		return summary;
 	}

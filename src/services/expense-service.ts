@@ -39,6 +39,13 @@ export class DuplicateTransactionError extends Error {
 	}
 }
 
+export interface DuplicateTransactionMatch {
+	transaction: TransactionData;
+	reason: 'fiscal-identity' | 'same-amount-near-time';
+	matchedFields: Array<'fn' | 'fd' | 'fp' | 'amount-dateTime'>;
+	timeDiffMs?: number;
+}
+
 const MANAGED_REPORT_OWNER = 'expense-manager';
 const REPORT_ENGINE_DATAVIEWJS = 'dataviewjs';
 const DEFAULT_REPORT_TEMPLATE = 'default';
@@ -113,18 +120,23 @@ export class ExpenseService {
 	/**
 	 * Create a new transaction file
 	 */
-	async createTransaction(data: TransactionData): Promise<TFile> {
+	async createTransaction(
+		data: TransactionData,
+		options?: { skipDuplicateCheck?: boolean },
+	): Promise<TFile> {
 		await this.validateLinkedContext(data);
-		const isDuplicate = await this.isDuplicateTransaction(
-			data.fn,
-			data.fd,
-			data.fp,
-			data.dateTime,
-			data.amount,
-			data.type,
-		);
-		if (isDuplicate) {
-			throw new DuplicateTransactionError();
+		if (!options?.skipDuplicateCheck) {
+			const duplicateMatch = await this.findDuplicateTransactionMatch({
+				fn: data.fn,
+				fd: data.fd,
+				fp: data.fp,
+				dateTime: data.dateTime,
+				amount: data.amount,
+				type: data.type,
+			});
+			if (duplicateMatch) {
+				throw new DuplicateTransactionError();
+			}
 		}
 		const dataWithArtifact = await this.attachArtifactIfNeeded(data);
 
@@ -138,7 +150,7 @@ export class ExpenseService {
 		// Generate filename and content
 		const filename = generateFilename(dataWithArtifact);
 		const folderPath = await this.ensureFolderPath(this.getTransactionFolderPath(dataWithArtifact.dateTime));
-		const filepath = `${folderPath}/${filename}`;
+		const filepath = this.getAvailablePath(folderPath, filename);
 		
 		const frontmatter = generateFrontmatter(dataWithArtifact);
 		const contentBody = generateContentBody(dataWithArtifact);
@@ -365,8 +377,9 @@ export class ExpenseService {
 
 		const updated = { ...current, ...data };
 		await this.validateLinkedContext(updated);
-		const frontmatter = generateFrontmatter(updated);
-		const contentBody = generateContentBody(updated);
+		const updatedWithArtifact = await this.attachArtifactIfNeeded(updated);
+		const frontmatter = generateFrontmatter(updatedWithArtifact);
+		const contentBody = generateContentBody(updatedWithArtifact);
 		const fullContent = frontmatter + contentBody;
 
 		await this.app.vault.modify(file, fullContent);
@@ -437,29 +450,101 @@ export class ExpenseService {
 		amount: number,
 		type: TransactionData['type'],
 	): Promise<boolean> {
+		return Boolean(await this.findDuplicateTransactionMatch({
+			fn,
+			fd,
+			fp,
+			dateTime,
+			amount,
+			type,
+		}));
+	}
+
+	async findDuplicateTransactionMatch(params: {
+		fn?: string;
+		fd?: string;
+		fp?: string;
+		dateTime: string;
+		amount: number;
+		type: TransactionData['type'];
+		excludeFilePath?: string;
+	}): Promise<DuplicateTransactionMatch | null> {
 		const allTransactions = await this.getAllTransactions({ statuses: ['recorded', 'pending-approval'] });
-		const transactionTime = new Date(dateTime).getTime();
+		const transactionTime = new Date(params.dateTime).getTime();
+		let bestMatch: DuplicateTransactionMatch | null = null;
 
-		for (const t of allTransactions) {
-			const fnMatch = fn && t.fn && t.fn === fn;
-			const fdMatch = fd && t.fd && t.fd === fd;
-			const fpMatch = fp && t.fp && t.fp === fp;
-			if (fnMatch && fdMatch && fpMatch) {
-				return true;
-			}
-
-			if (t.type !== type || Math.abs(t.amount - amount) > 0.0001) {
+		for (const transaction of allTransactions) {
+			if (params.excludeFilePath && transaction.file?.path === params.excludeFilePath) {
 				continue;
 			}
 
-			const existingTime = new Date(t.dateTime).getTime();
-			const timeDiffMs = Math.abs(existingTime - transactionTime);
-			if (timeDiffMs <= 60 * 1000) {
-				return true;
+			const matchedFiscalFields = [
+				params.fn && transaction.fn && transaction.fn === params.fn ? 'fn' : null,
+				params.fd && transaction.fd && transaction.fd === params.fd ? 'fd' : null,
+				params.fp && transaction.fp && transaction.fp === params.fp ? 'fp' : null,
+			].filter((value): value is 'fn' | 'fd' | 'fp' => Boolean(value));
+
+			let candidate: DuplicateTransactionMatch | null = null;
+			if (matchedFiscalFields.length === 3) {
+				candidate = {
+					transaction,
+					reason: 'fiscal-identity',
+					matchedFields: matchedFiscalFields,
+				};
+			} else if (transaction.type === params.type && Math.abs(transaction.amount - params.amount) <= 0.0001) {
+				const existingTime = new Date(transaction.dateTime).getTime();
+				const timeDiffMs = Math.abs(existingTime - transactionTime);
+				if (!Number.isNaN(existingTime) && !Number.isNaN(transactionTime) && timeDiffMs <= 60 * 1000) {
+					candidate = {
+						transaction,
+						reason: 'same-amount-near-time',
+						matchedFields: ['amount-dateTime'],
+						timeDiffMs,
+					};
+				}
+			}
+
+			if (candidate && this.isBetterDuplicateMatch(candidate, bestMatch)) {
+				bestMatch = candidate;
 			}
 		}
 
-		return false;
+		return bestMatch;
+	}
+
+	private isBetterDuplicateMatch(
+		candidate: DuplicateTransactionMatch,
+		current: DuplicateTransactionMatch | null,
+	): boolean {
+		if (!current) {
+			return true;
+		}
+
+		const candidateScore = this.scoreDuplicateMatch(candidate);
+		const currentScore = this.scoreDuplicateMatch(current);
+		if (candidateScore !== currentScore) {
+			return candidateScore > currentScore;
+		}
+
+		const candidateTime = new Date(candidate.transaction.dateTime).getTime();
+		const currentTime = new Date(current.transaction.dateTime).getTime();
+		if (!Number.isNaN(candidateTime) && !Number.isNaN(currentTime) && candidateTime !== currentTime) {
+			return candidateTime < currentTime;
+		}
+
+		return (candidate.transaction.file?.path ?? '') < (current.transaction.file?.path ?? '');
+	}
+
+	private scoreDuplicateMatch(match: DuplicateTransactionMatch): number {
+		let score = match.reason === 'fiscal-identity' ? 10_000 : 1_000;
+		score += match.matchedFields.length * 100;
+		if (match.transaction.status === 'recorded') {
+			score += 25;
+		}
+		if (match.reason === 'same-amount-near-time' && typeof match.timeDiffMs === 'number') {
+			score += Math.max(0, 60_000 - match.timeDiffMs);
+		}
+		return score;
 	}
 
 	/**
@@ -1839,6 +1924,38 @@ export class ExpenseService {
 
 		await this.app.fileManager.renameFile(file, availablePath);
 		return file;
+	}
+
+	async createDuplicateTransaction(
+		data: TransactionData,
+		match: DuplicateTransactionMatch,
+	): Promise<TFile> {
+		const originalFile = match.transaction.file;
+		if (!(originalFile instanceof TFile)) {
+			throw new Error('Duplicate target file is unavailable.');
+		}
+
+		const tags = Array.from(new Set([
+			'finance',
+			data.type,
+			data.source,
+			'duplicate',
+			...(data.tags ?? []),
+		]));
+
+		return this.createTransaction(
+			{
+				...data,
+				status: 'duplicate',
+				duplicateOf: this.toWikiLink(originalFile),
+				tags,
+			},
+			{ skipDuplicateCheck: true },
+		);
+	}
+
+	private toWikiLink(file: TFile): string {
+		return `[[${file.path.replace(/\.md$/i, '')}]]`;
 	}
 
 	private async renameAndRelocateTransactionFile(

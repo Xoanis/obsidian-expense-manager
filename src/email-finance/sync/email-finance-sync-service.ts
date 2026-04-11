@@ -1,10 +1,10 @@
-import { requestUrl } from 'obsidian';
+import { requestUrl, TFile } from 'obsidian';
 import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib';
 import type { ExpenseManagerSettings } from '../../settings';
-import type { TransactionData } from '../../types';
-import { DuplicateTransactionError } from '../../services/expense-service';
+import type { TransactionData, TransactionStatus } from '../../types';
+import { ExpenseService } from '../../services/expense-service';
 import type { PluginLogger } from '../../utils/plugin-debug-log';
 import { toSearchablePlainText } from '../utils/email-content-normalizer';
 import { EmailFinanceCoarseFilter } from './email-finance-coarse-filter';
@@ -32,10 +32,17 @@ export interface EmailFinanceSyncSummary {
 	plannedUnits: number;
 	createdPendingNotes: number;
 	createdNeedsAttentionNotes: number;
+	createdDuplicateNotes: number;
 	failedUnits: number;
-	skippedDuplicates: number;
 	nextCursor: string | null;
 	summaryText: string;
+}
+
+export interface EmailFinanceRebuildResult {
+	file: TFile;
+	messageId: string;
+	matchedUnitLabels: string[];
+	proposal: TransactionData;
 }
 
 interface ExtractedEmailFinanceProposal {
@@ -62,8 +69,15 @@ interface ProcessedMessageOutcome {
 	plannedUnits: number;
 	createdPendingNotes: number;
 	createdNeedsAttentionNotes: number;
+	createdDuplicateNotes: number;
 	failedUnits: number;
-	skippedDuplicates: number;
+}
+
+interface AnalyzedMessageOutcome {
+	units: PlannedEmailFinanceUnit[];
+	failureMessages: string[];
+	failedUnits: number;
+	resolvedProposals: ResolvedEmailFinanceProposals;
 }
 
 interface RemoteArtifactFetchResponse {
@@ -95,6 +109,7 @@ export class EmailFinanceSyncService {
 		private readonly getSettings: () => ExpenseManagerSettings,
 		private readonly syncStateStore: EmailFinanceSyncStateStore,
 		private readonly financeIntakeService: FinanceIntakeService,
+		private readonly expenseService: ExpenseService,
 		private readonly pendingProposalService: PendingFinanceProposalService,
 		options?: EmailFinanceSyncServiceOptions,
 	) {
@@ -102,6 +117,10 @@ export class EmailFinanceSyncService {
 		this.coarseFilter = options?.coarseFilter ?? new EmailFinanceCoarseFilter();
 		this.logger = options?.logger;
 		this.planner = options?.planner ?? new EmailFinanceMessagePlanner(undefined, this.logger);
+	}
+
+	private resolveProvider(settings: ExpenseManagerSettings): FinanceMailProvider {
+		return this.provider ?? createFinanceMailProvider(settings, this.logger);
 	}
 
 	async syncNewMessages(): Promise<EmailFinanceSyncSummary> {
@@ -115,14 +134,14 @@ export class EmailFinanceSyncService {
 				plannedUnits: 0,
 				createdPendingNotes: 0,
 				createdNeedsAttentionNotes: 0,
+				createdDuplicateNotes: 0,
 				failedUnits: 0,
-				skippedDuplicates: 0,
 				nextCursor: this.syncStateStore.getState().cursor,
 				summaryText: 'Email finance intake is disabled in settings.',
 			};
 		}
 
-		const provider = this.provider ?? createFinanceMailProvider(settings, this.logger);
+		const provider = this.resolveProvider(settings);
 		if (provider.kind === 'none') {
 			const state = await this.syncStateStore.update({
 				lastAttemptAt: new Date().toISOString(),
@@ -137,8 +156,8 @@ export class EmailFinanceSyncService {
 				plannedUnits: 0,
 				createdPendingNotes: 0,
 				createdNeedsAttentionNotes: 0,
+				createdDuplicateNotes: 0,
 				failedUnits: 0,
-				skippedDuplicates: 0,
 				nextCursor: state.cursor,
 				summaryText: 'No mail provider is configured yet. Configure a provider-compatible endpoint first.',
 			};
@@ -163,8 +182,8 @@ export class EmailFinanceSyncService {
 			let plannedUnits = 0;
 			let createdPendingNotes = 0;
 			let createdNeedsAttentionNotes = 0;
+			let createdDuplicateNotes = 0;
 			let failedUnits = 0;
-			let skippedDuplicates = 0;
 			for (const message of batch.messages) {
 				const filterResult = this.coarseFilter.evaluate(message, settings.emailFinanceCoarseFilterRules);
 				if (filterResult.passed) {
@@ -173,8 +192,8 @@ export class EmailFinanceSyncService {
 					plannedUnits += outcome.plannedUnits;
 					createdPendingNotes += outcome.createdPendingNotes;
 					createdNeedsAttentionNotes += outcome.createdNeedsAttentionNotes;
+					createdDuplicateNotes += outcome.createdDuplicateNotes;
 					failedUnits += outcome.failedUnits;
-					skippedDuplicates += outcome.skippedDuplicates;
 				} else {
 					filteredOut += 1;
 				}
@@ -188,8 +207,8 @@ export class EmailFinanceSyncService {
 				plannedUnits,
 				createdPendingNotes,
 				createdNeedsAttentionNotes,
+				createdDuplicateNotes,
 				failedUnits,
-				skippedDuplicates,
 				hasMore,
 				maxMessagesPerRun: settings.emailFinanceMaxMessagesPerRun,
 			});
@@ -208,8 +227,8 @@ export class EmailFinanceSyncService {
 				plannedUnits,
 				createdPendingNotes,
 				createdNeedsAttentionNotes,
+				createdDuplicateNotes,
 				failedUnits,
-				skippedDuplicates,
 				nextCursor: nextState.cursor,
 				hasMore,
 				maxMessagesPerRun: settings.emailFinanceMaxMessagesPerRun,
@@ -223,8 +242,8 @@ export class EmailFinanceSyncService {
 				plannedUnits,
 				createdPendingNotes,
 				createdNeedsAttentionNotes,
+				createdDuplicateNotes,
 				failedUnits,
-				skippedDuplicates,
 				nextCursor: nextState.cursor,
 				summaryText,
 			};
@@ -239,7 +258,254 @@ export class EmailFinanceSyncService {
 		}
 	}
 
+	async rebuildTransactionFile(file: TFile): Promise<EmailFinanceRebuildResult> {
+		const current = await this.expenseService.parseTransactionFile(file);
+		if (!current) {
+			throw new Error('Could not parse the current finance note.');
+		}
+		if (current.source !== 'email') {
+			throw new Error('The current finance note is not email-derived.');
+		}
+
+		const settings = this.getSettings();
+		const provider = this.resolveProvider(settings);
+		if (provider.kind === 'none') {
+			throw new Error('No email provider is configured for rebuild.');
+		}
+
+		if (
+			current.emailProvider?.trim()
+			&& current.emailProvider.trim() !== provider.kind
+		) {
+			throw new Error(
+				`The note expects email provider "${current.emailProvider}", but the current settings use "${provider.kind}".`,
+			);
+		}
+
+		const messageId = this.resolveEmailMessageId(current);
+		if (!messageId) {
+			throw new Error('This email note does not contain a structured or recoverable message id yet.');
+		}
+
+		const mailboxScope = current.emailMailboxScope?.trim() || settings.emailFinanceMailboxScope.trim() || undefined;
+		const message = await provider.getMessage(messageId, {
+			mailboxScope,
+		});
+		if (!message) {
+			throw new Error(
+				`Email message ${messageId} was not found in ${mailboxScope ?? 'the configured mailbox'}.`,
+			);
+		}
+
+		const analysis = await this.analyzeMessage(message);
+		const selected = this.selectAcceptedProposalForExistingTransaction(
+			current,
+			analysis.resolvedProposals.accepted,
+		);
+		if (!selected) {
+			if (analysis.resolvedProposals.accepted.length > 1) {
+				throw new Error(
+					`Rebuild produced ${analysis.resolvedProposals.accepted.length} candidate transactions and none matched the current note uniquely.`,
+				);
+			}
+			if (analysis.resolvedProposals.conflicts.length > 0) {
+				throw new Error('Rebuild produced conflicting candidate transactions and the current note was left unchanged.');
+			}
+			throw new Error('Rebuild did not produce a valid replacement transaction for this email.');
+		}
+
+		const status = current.status ?? 'recorded';
+		const sourceContext = this.buildSourceContext(message, analysis.units, analysis.failureMessages, {
+			kind: status,
+			unitLabels: selected.unitLabels,
+		});
+		const rebuiltProposal = this.attachBestMessageArtifact(
+			{
+				type: selected.proposal.type,
+				amount: selected.proposal.amount,
+				currency: selected.proposal.currency,
+				dateTime: selected.proposal.dateTime,
+				description: selected.proposal.description,
+				status,
+				area: selected.proposal.area,
+				project: selected.proposal.project,
+				tags: selected.proposal.tags,
+				category: selected.proposal.category,
+				details: selected.proposal.details,
+				artifact: undefined,
+				sourceContext,
+				source: 'email',
+				emailMessageId: messageId,
+				emailProvider: provider.kind,
+				emailMailboxScope: mailboxScope,
+				duplicateOf: current.duplicateOf,
+				fn: selected.proposal.fn,
+				fd: selected.proposal.fd,
+				fp: selected.proposal.fp,
+				receiptOperationType: selected.proposal.receiptOperationType,
+				proverkaCheka: selected.proposal.proverkaCheka,
+				artifactBytes: selected.proposal.artifactBytes,
+				artifactFileName: selected.proposal.artifactFileName,
+				artifactMimeType: selected.proposal.artifactMimeType,
+			},
+			message,
+		);
+
+		const updatedFile = await this.expenseService.updateTransactionWithFileSync(file, {
+			type: rebuiltProposal.type,
+			amount: rebuiltProposal.amount,
+			currency: rebuiltProposal.currency,
+			dateTime: rebuiltProposal.dateTime,
+			description: rebuiltProposal.description,
+			status: rebuiltProposal.status,
+			area: rebuiltProposal.area,
+			project: rebuiltProposal.project,
+			tags: rebuiltProposal.tags,
+			category: rebuiltProposal.category,
+			details: rebuiltProposal.details,
+			artifact: undefined,
+			sourceContext: rebuiltProposal.sourceContext,
+			source: rebuiltProposal.source,
+			emailMessageId: rebuiltProposal.emailMessageId,
+			emailProvider: rebuiltProposal.emailProvider,
+			emailMailboxScope: rebuiltProposal.emailMailboxScope,
+			duplicateOf: rebuiltProposal.duplicateOf,
+			fn: rebuiltProposal.fn,
+			fd: rebuiltProposal.fd,
+			fp: rebuiltProposal.fp,
+			receiptOperationType: rebuiltProposal.receiptOperationType,
+			proverkaCheka: rebuiltProposal.proverkaCheka,
+			artifactBytes: rebuiltProposal.artifactBytes,
+			artifactFileName: rebuiltProposal.artifactFileName,
+			artifactMimeType: rebuiltProposal.artifactMimeType,
+		});
+
+		return {
+			file: updatedFile,
+			messageId,
+			matchedUnitLabels: selected.unitLabels,
+			proposal: rebuiltProposal,
+		};
+	}
+
 	private async processMessage(message: FinanceMailMessage): Promise<ProcessedMessageOutcome> {
+		const analysis = await this.analyzeMessage(message);
+		const { units, failureMessages, resolvedProposals } = analysis;
+		let failedUnits = analysis.failedUnits;
+		let createdPendingNotes = 0;
+		let createdNeedsAttentionNotes = 0;
+		let createdDuplicateNotes = 0;
+		for (const conflict of resolvedProposals.conflicts) {
+			try {
+				this.logger?.warn('Email finance message has conflicting proposals', {
+					messageId: message.id,
+					subject: message.subject,
+					candidateCount: conflict.proposals.length,
+					candidates: conflict.proposals.map((candidate) => this.summarizeProposal(candidate.proposal)),
+				});
+				const sourceContext = this.buildSourceContext(message, units, failureMessages, {
+					kind: 'needs-attention',
+					unitLabels: conflict.unitLabels,
+					candidateProposals: conflict.proposals,
+				});
+				await this.pendingProposalService.createNeedsAttentionProposal({
+					message,
+					reason: this.buildConflictingProposalsReason(conflict),
+					sourceContext,
+					...this.buildEmailSourceMetadata(message),
+					...this.getBestMessageArtifactFields(message, sourceContext),
+				});
+				createdNeedsAttentionNotes += 1;
+			} catch (error) {
+				failedUnits += 1;
+				this.logger?.warn('Email finance conflicting proposals note failed', {
+					messageId: message.id,
+					error: (error as Error).message,
+				});
+			}
+		}
+
+		for (const mergedProposal of resolvedProposals.accepted) {
+			try {
+				const duplicateMatch = await this.expenseService.findDuplicateTransactionMatch({
+					fn: mergedProposal.proposal.fn,
+					fd: mergedProposal.proposal.fd,
+					fp: mergedProposal.proposal.fp,
+					dateTime: mergedProposal.proposal.dateTime,
+					amount: mergedProposal.proposal.amount,
+					type: mergedProposal.proposal.type,
+				});
+				const reviewStatus: TransactionStatus = duplicateMatch ? 'duplicate' : 'pending-approval';
+				const sourceContext = this.buildSourceContext(message, units, failureMessages, {
+					kind: reviewStatus,
+					unitLabels: mergedProposal.unitLabels,
+				});
+				const preparedProposal = this.attachBestMessageArtifact(
+					{
+						...mergedProposal.proposal,
+						source: 'email',
+						sourceContext,
+					},
+					message,
+				);
+				if (duplicateMatch) {
+					await this.expenseService.createDuplicateTransaction(preparedProposal, duplicateMatch);
+					createdDuplicateNotes += 1;
+					this.logger?.info('Email finance sync stored duplicate proposal', {
+						messageId: message.id,
+						unitLabels: mergedProposal.unitLabels,
+						duplicateOf: duplicateMatch.transaction.file?.path ?? null,
+					});
+					continue;
+				}
+
+				await this.pendingProposalService.createPendingProposal(preparedProposal);
+				createdPendingNotes += 1;
+			} catch (error) {
+				failedUnits += 1;
+				const errorMessage = (error as Error).message;
+				failureMessages.push(`pending:${mergedProposal.unitLabels.join(', ')} -> ${errorMessage}`);
+				this.logger?.warn('Email finance pending proposal persistence failed', {
+					messageId: message.id,
+					unitLabels: mergedProposal.unitLabels,
+					error: errorMessage,
+				});
+			}
+		}
+
+		if (resolvedProposals.accepted.length === 0 && resolvedProposals.conflicts.length === 0) {
+			try {
+				const sourceContext = this.buildSourceContext(message, units, failureMessages, {
+					kind: 'needs-attention',
+					unitLabels: [],
+				});
+				await this.pendingProposalService.createNeedsAttentionProposal({
+					message,
+					reason: this.buildNeedsAttentionReason(units, failureMessages),
+					sourceContext,
+					...this.buildEmailSourceMetadata(message),
+					...this.getBestMessageArtifactFields(message, sourceContext),
+				});
+				createdNeedsAttentionNotes += 1;
+			} catch (error) {
+				failedUnits += 1;
+				this.logger?.warn('Email finance needs-attention note failed', {
+					messageId: message.id,
+					error: (error as Error).message,
+				});
+			}
+		}
+
+		return {
+			plannedUnits: units.length,
+			createdPendingNotes,
+			createdNeedsAttentionNotes,
+			createdDuplicateNotes,
+			failedUnits,
+		};
+	}
+
+	private async analyzeMessage(message: FinanceMailMessage): Promise<AnalyzedMessageOutcome> {
 		const planningResult = this.planner.planMessageDetailed(message);
 		const units = planningResult.units;
 		const remoteReceiptCache = new Map<string, Promise<RemoteReceiptMaterializationResult>>();
@@ -263,6 +529,7 @@ export class EmailFinanceSyncService {
 				plannerSourceId: unit.plannerSourceId ?? 'unknown',
 			})),
 		});
+
 		const extractedProposals: ExtractedEmailFinanceProposal[] = [];
 		const failureMessages: string[] = [];
 		let failedUnits = 0;
@@ -305,106 +572,11 @@ export class EmailFinanceSyncService {
 			}
 		}
 
-		const mergedProposals = this.mergeEquivalentProposals(extractedProposals);
-		const resolvedProposals = this.resolveMergedProposals(mergedProposals);
-		let createdPendingNotes = 0;
-		let createdNeedsAttentionNotes = 0;
-		let skippedDuplicates = 0;
-		for (const conflict of resolvedProposals.conflicts) {
-			try {
-				this.logger?.warn('Email finance message has conflicting proposals', {
-					messageId: message.id,
-					subject: message.subject,
-					candidateCount: conflict.proposals.length,
-					candidates: conflict.proposals.map((candidate) => this.summarizeProposal(candidate.proposal)),
-				});
-				const sourceContext = this.buildSourceContext(message, units, failureMessages, {
-					kind: 'needs-attention',
-					unitLabels: conflict.unitLabels,
-					candidateProposals: conflict.proposals,
-				});
-				await this.pendingProposalService.createNeedsAttentionProposal({
-					message,
-					reason: this.buildConflictingProposalsReason(conflict),
-					sourceContext,
-					...this.buildEmailSourceMetadata(message),
-					...this.getBestMessageArtifactFields(message, sourceContext),
-				});
-				createdNeedsAttentionNotes += 1;
-			} catch (error) {
-				failedUnits += 1;
-				this.logger?.warn('Email finance conflicting proposals note failed', {
-					messageId: message.id,
-					error: (error as Error).message,
-				});
-			}
-		}
-
-		for (const mergedProposal of resolvedProposals.accepted) {
-			try {
-				const sourceContext = this.buildSourceContext(message, units, failureMessages, {
-					kind: 'pending-approval',
-					unitLabels: mergedProposal.unitLabels,
-				});
-				await this.pendingProposalService.createPendingProposal(this.attachBestMessageArtifact(
-					{
-						...mergedProposal.proposal,
-						source: 'email',
-						sourceContext,
-					},
-					message,
-				));
-				createdPendingNotes += 1;
-			} catch (error) {
-				if (error instanceof DuplicateTransactionError) {
-					skippedDuplicates += 1;
-					this.logger?.info('Email finance sync skipped duplicate proposal', {
-						messageId: message.id,
-						unitLabels: mergedProposal.unitLabels,
-					});
-					continue;
-				}
-
-				failedUnits += 1;
-				const errorMessage = (error as Error).message;
-				failureMessages.push(`pending:${mergedProposal.unitLabels.join(', ')} -> ${errorMessage}`);
-				this.logger?.warn('Email finance pending proposal persistence failed', {
-					messageId: message.id,
-					unitLabels: mergedProposal.unitLabels,
-					error: errorMessage,
-				});
-			}
-		}
-
-		if (resolvedProposals.accepted.length === 0 && resolvedProposals.conflicts.length === 0) {
-			try {
-				const sourceContext = this.buildSourceContext(message, units, failureMessages, {
-					kind: 'needs-attention',
-					unitLabels: [],
-				});
-				await this.pendingProposalService.createNeedsAttentionProposal({
-					message,
-					reason: this.buildNeedsAttentionReason(units, failureMessages),
-					sourceContext,
-					...this.buildEmailSourceMetadata(message),
-					...this.getBestMessageArtifactFields(message, sourceContext),
-				});
-				createdNeedsAttentionNotes += 1;
-			} catch (error) {
-				failedUnits += 1;
-				this.logger?.warn('Email finance needs-attention note failed', {
-					messageId: message.id,
-					error: (error as Error).message,
-				});
-			}
-		}
-
 		return {
-			plannedUnits: units.length,
-			createdPendingNotes,
-			createdNeedsAttentionNotes,
+			units,
+			failureMessages,
 			failedUnits,
-			skippedDuplicates,
+			resolvedProposals: this.resolveMergedProposals(this.mergeEquivalentProposals(extractedProposals)),
 		};
 	}
 
@@ -1152,7 +1324,7 @@ export class EmailFinanceSyncService {
 		units: PlannedEmailFinanceUnit[],
 		failureMessages: string[],
 		options: {
-			kind: 'pending-approval' | 'needs-attention';
+			kind: TransactionStatus;
 			unitLabels: string[];
 			candidateProposals?: MergedEmailFinanceProposal[];
 		},
@@ -1238,6 +1410,93 @@ export class EmailFinanceSyncService {
 			emailProvider: settings.emailFinanceProvider,
 			emailMailboxScope: mailboxScope || undefined,
 		};
+	}
+
+	private resolveEmailMessageId(transaction: TransactionData): string | null {
+		const explicitId = transaction.emailMessageId?.trim();
+		if (explicitId) {
+			return explicitId;
+		}
+
+		const sourceContextMatch = transaction.sourceContext?.match(/^- Message ID:\s*(.+)$/m)?.[1]?.trim();
+		return sourceContextMatch || null;
+	}
+
+	private selectAcceptedProposalForExistingTransaction(
+		current: TransactionData,
+		candidates: MergedEmailFinanceProposal[],
+	): MergedEmailFinanceProposal | null {
+		if (candidates.length === 0) {
+			return null;
+		}
+		if (candidates.length === 1) {
+			return candidates[0] ?? null;
+		}
+
+		const scored = candidates
+			.map((candidate) => ({
+				candidate,
+				score: this.scoreProposalMatch(current, candidate.proposal),
+			}))
+			.sort((left, right) => right.score - left.score);
+		const best = scored[0];
+		const second = scored[1];
+		if (!best || best.score <= 0) {
+			return null;
+		}
+		if (second && second.score === best.score) {
+			return null;
+		}
+
+		return best.candidate;
+	}
+
+	private scoreProposalMatch(current: TransactionData, candidate: TransactionData): number {
+		let score = 0;
+		if (current.type === candidate.type) {
+			score += 2;
+		}
+		if ((current.currency || '').trim().toUpperCase() === (candidate.currency || '').trim().toUpperCase()) {
+			score += 1;
+		}
+		if (Math.abs(current.amount - candidate.amount) <= 0.01) {
+			score += 3;
+		}
+		if (current.fn && candidate.fn && current.fn === candidate.fn) {
+			score += 6;
+		}
+		if (current.fd && candidate.fd && current.fd === candidate.fd) {
+			score += 5;
+		}
+		if (current.fp && candidate.fp && current.fp === candidate.fp) {
+			score += 5;
+		}
+
+		const currentTime = new Date(current.dateTime).getTime();
+		const candidateTime = new Date(candidate.dateTime).getTime();
+		if (!Number.isNaN(currentTime) && !Number.isNaN(candidateTime)) {
+			const diffMs = Math.abs(currentTime - candidateTime);
+			if (diffMs <= 60 * 1000) {
+				score += 3;
+			} else if (diffMs <= 15 * 60 * 1000) {
+				score += 2;
+			}
+		}
+
+		const currentDescription = current.description?.trim().toLowerCase() ?? '';
+		const candidateDescription = candidate.description?.trim().toLowerCase() ?? '';
+		if (currentDescription && candidateDescription) {
+			if (currentDescription === candidateDescription) {
+				score += 2;
+			} else if (
+				currentDescription.includes(candidateDescription)
+				|| candidateDescription.includes(currentDescription)
+			) {
+				score += 1;
+			}
+		}
+
+		return score;
 	}
 
 	private getBodyPreview(message: FinanceMailMessage): string {

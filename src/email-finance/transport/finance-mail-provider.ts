@@ -37,9 +37,14 @@ export interface FinanceMailProviderListOptions {
 	limit?: number;
 }
 
+export interface FinanceMailProviderGetOptions {
+	mailboxScope?: string;
+}
+
 export interface FinanceMailProvider {
 	readonly kind: EmailFinanceProviderKind;
 	listMessages(options: FinanceMailProviderListOptions): Promise<FinanceMailSyncBatch>;
+	getMessage(messageId: string, options?: FinanceMailProviderGetOptions): Promise<FinanceMailMessage | null>;
 }
 
 class NoopFinanceMailProvider implements FinanceMailProvider {
@@ -54,11 +59,19 @@ class NoopFinanceMailProvider implements FinanceMailProvider {
 			nextCursor: null,
 		};
 	}
+
+	async getMessage(_messageId: string, _options?: FinanceMailProviderGetOptions): Promise<FinanceMailMessage | null> {
+		return null;
+	}
 }
 
 interface HttpJsonFinanceMailApiResponse {
 	messages?: FinanceMailMessage[];
 	nextCursor?: string | null;
+}
+
+interface HttpJsonFinanceMailSingleMessageResponse {
+	message?: FinanceMailMessage | null;
 }
 
 class HttpJsonFinanceMailProvider implements FinanceMailProvider {
@@ -105,18 +118,68 @@ class HttpJsonFinanceMailProvider implements FinanceMailProvider {
 		const payload = JSON.parse(response.text) as HttpJsonFinanceMailApiResponse;
 		const messages = Array.isArray(payload.messages) ? payload.messages : [];
 		return {
-			messages: messages.map((message) => ({
-				...message,
-				attachmentNames: Array.isArray(message.attachmentNames)
-					? message.attachmentNames
-					: Array.isArray(message.attachments)
-						? message.attachments.map((attachment) => attachment.fileName).filter(Boolean)
-						: [],
-				attachments: Array.isArray(message.attachments) ? message.attachments : [],
-			})),
+			messages: messages.map((message) => this.normalizeMessage(message)),
 			nextCursor: typeof payload.nextCursor === 'string' || payload.nextCursor === null
 				? payload.nextCursor
 				: null,
+		};
+	}
+
+	async getMessage(messageId: string, options?: FinanceMailProviderGetOptions): Promise<FinanceMailMessage | null> {
+		const baseUrl = this.settings.emailFinanceProviderBaseUrl.trim().replace(/\/+$/, '');
+		if (!baseUrl) {
+			throw new Error('Email finance provider base URL is empty.');
+		}
+
+		const url = new URL(`${baseUrl}/messages/${encodeURIComponent(messageId)}`);
+		if (options?.mailboxScope?.trim()) {
+			url.searchParams.set('mailboxScope', options.mailboxScope.trim());
+		}
+
+		this.logger?.info('Email finance provider single-message request', {
+			providerKind: this.kind,
+			messageId,
+			url: url.toString(),
+		});
+
+		const response = await requestUrl({
+			url: url.toString(),
+			method: 'GET',
+			throw: false,
+			headers: this.settings.emailFinanceProviderAuthToken.trim()
+				? {
+					Authorization: `Bearer ${this.settings.emailFinanceProviderAuthToken.trim()}`,
+				}
+				: undefined,
+		});
+
+		if (response.status === 404) {
+			return null;
+		}
+		if (response.status >= 400) {
+			throw new Error(`Email finance provider returned ${response.status} while fetching message ${messageId}.`);
+		}
+
+		const payload = JSON.parse(response.text) as HttpJsonFinanceMailSingleMessageResponse | FinanceMailMessage | null;
+		const rawMessage: FinanceMailMessage | null = payload && typeof payload === 'object' && 'message' in payload
+			? (payload as HttpJsonFinanceMailSingleMessageResponse).message ?? null
+			: (payload as FinanceMailMessage | null);
+		if (!rawMessage || typeof rawMessage.id !== 'string') {
+			return null;
+		}
+
+		return this.normalizeMessage(rawMessage);
+	}
+
+	private normalizeMessage(message: FinanceMailMessage): FinanceMailMessage {
+		return {
+			...message,
+			attachmentNames: Array.isArray(message.attachmentNames)
+				? message.attachmentNames
+				: Array.isArray(message.attachments)
+					? message.attachments.map((attachment) => attachment.fileName).filter(Boolean)
+					: [],
+			attachments: Array.isArray(message.attachments) ? message.attachments : [],
 		};
 	}
 }
@@ -319,6 +382,95 @@ class ImapFinanceMailProvider implements FinanceMailProvider {
 				stage,
 			});
 			this.logger?.error('IMAP finance provider failed', normalizedError);
+			throw normalizedError;
+		} finally {
+			try {
+				lock?.release();
+			} catch {
+				// no-op
+			}
+
+			try {
+				await client.logout();
+			} catch {
+				// no-op
+			}
+		}
+	}
+
+	async getMessage(messageId: string, options?: FinanceMailProviderGetOptions): Promise<FinanceMailMessage | null> {
+		const host = this.settings.emailFinanceImapHost.trim();
+		const user = this.settings.emailFinanceImapUser.trim();
+		const pass = this.settings.emailFinanceImapPassword.trim();
+		const mailboxScope = options?.mailboxScope?.trim() || 'INBOX';
+		if (!host || !user || !pass) {
+			throw new Error('IMAP host, username, and app password are required.');
+		}
+
+		const uid = Number(messageId);
+		if (!Number.isFinite(uid) || uid <= 0) {
+			throw new Error(`IMAP message id must be a positive numeric UID, got "${messageId}".`);
+		}
+
+		const client = new ImapFlow({
+			host,
+			port: this.settings.emailFinanceImapPort,
+			secure: this.settings.emailFinanceImapSecure,
+			auth: {
+				user,
+				pass,
+			},
+			disableAutoIdle: true,
+			connectionTimeout: ImapFinanceMailProvider.CONNECT_TIMEOUT_MS,
+			greetingTimeout: 15_000,
+			socketTimeout: 60_000,
+			logger: false,
+		});
+
+		let lock: { release(): void } | null = null;
+		let stage = 'connect';
+		try {
+			await this.withTimeout(
+				client.connect(),
+				ImapFinanceMailProvider.CONNECT_TIMEOUT_MS,
+				'connect',
+			);
+			stage = 'open-mailbox';
+			lock = await this.withTimeout(
+				client.getMailboxLock(mailboxScope, {
+					readOnly: true,
+				}),
+				ImapFinanceMailProvider.MAILBOX_TIMEOUT_MS,
+				stage,
+			);
+
+			stage = 'fetch-single-message';
+			const single = await this.withTimeout(
+				client.fetchOne(uid, {
+					uid: true,
+					envelope: true,
+					internalDate: true,
+					bodyStructure: true,
+				}, { uid: true }),
+				ImapFinanceMailProvider.FETCH_MESSAGE_TIMEOUT_MS,
+				`${stage} [uid=${uid}]`,
+			);
+
+			if (!single) {
+				return null;
+			}
+
+			return await this.buildMessage(client, single, null);
+		} catch (error) {
+			const normalizedError = this.createImapOperationError(error, {
+				host,
+				port: this.settings.emailFinanceImapPort,
+				secure: this.settings.emailFinanceImapSecure,
+				user,
+				mailboxScope,
+				stage,
+			});
+			this.logger?.error('IMAP finance provider single-message fetch failed', normalizedError);
 			throw normalizedError;
 		} finally {
 			try {

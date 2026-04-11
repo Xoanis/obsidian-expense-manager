@@ -9,8 +9,8 @@ export function formatEmailSyncTelegramNotification(
 		EmailFinanceSyncSummary,
 		| 'createdPendingNotes'
 		| 'createdNeedsAttentionNotes'
+		| 'createdDuplicateNotes'
 		| 'totalMessages'
-		| 'skippedDuplicates'
 		| 'nextCursor'
 	>,
 	options: TelegramEmailSyncNotificationOptions,
@@ -25,8 +25,8 @@ export function formatEmailSyncTelegramNotification(
 	if (summary.createdNeedsAttentionNotes > 0) {
 		lines.push(`Needs attention: ${summary.createdNeedsAttentionNotes}.`);
 	}
-	if (summary.skippedDuplicates > 0) {
-		lines.push(`Duplicates skipped: ${summary.skippedDuplicates}.`);
+	if (summary.createdDuplicateNotes > 0) {
+		lines.push(`Duplicate notes: ${summary.createdDuplicateNotes}.`);
 	}
 	if (summary.nextCursor) {
 		lines.push('More emails are waiting in the saved sync cursor.');
