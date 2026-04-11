@@ -6,7 +6,7 @@ Status:
 
 Last updated:
 
-- 2026-04-09
+- 2026-04-11
 
 ## Summary
 
@@ -33,6 +33,7 @@ Implementation note:
 - this RFC is no longer purely theoretical
 - the feature is partially implemented and validated on live mailbox data
 - the main outcome of the current iteration is that a generic receipt-evidence layer now resolves a meaningful share of real receipts without requiring a dedicated parser for every sender
+- the latest stabilization pass also tightened manual review ergonomics and timestamp extraction quality for older receipts
 
 ## Why This Matters
 
@@ -71,9 +72,12 @@ Success looks like this:
 The target architecture should support both:
 
 - explicit manual sync
-- scheduled sync in later iterations
+- scheduled sync while Obsidian is open
 
-The first implementation does not need to ship scheduling immediately, but the model should be built so scheduled sync is a natural extension rather than a redesign.
+Current implementation note:
+
+- scheduled sync now exists and reuses the same proposal-creation pipeline as manual sync
+- the remaining scheduling question is whether sync should later survive beyond the running Obsidian session
 
 ## Non-Goals For The First Iteration
 
@@ -118,18 +122,20 @@ Boundary strategy:
 1. prefer a provider cursor when the mail source supports one
 2. otherwise store a `lastSuccessfulSyncAt` watermark
 3. optionally keep the last processed message ids around the boundary to reduce edge-case duplication
+4. for large backfills, cap one run to a configured number of messages and continue from the saved cursor on the next run
 
 Why this matters:
 
 - it keeps sync fast
-- it makes scheduling realistic later
+- it makes unattended scheduling practical now
 - it avoids rescanning the whole mailbox on every run
 
-Future scheduling model:
+Current scheduling model:
 
 - manual sync remains available
-- a periodic background sync can later run on a configurable interval
-- scheduled sync should reuse the same delta-sync boundary and the same proposal creation flow
+- a periodic sync can run on a configurable interval while Obsidian stays open
+- scheduled sync reuses the same delta-sync boundary and the same proposal creation flow
+- optional Telegram notifications can announce newly created `pending-approval` items after a successful sync
 
 ## Two-Stage Filtering And Routing
 
@@ -308,7 +314,7 @@ Suggested interface shape:
 
 ```ts
 interface FinanceMailProvider {
-  listMessages(options: { cursor?: string; since?: string }): Promise<MailSyncBatch>;
+  listMessages(options: { cursor?: string; since?: string; limit?: number }): Promise<MailSyncBatch>;
   getMessage(messageId: string): Promise<FinanceMailMessage>;
   markProcessed?(messageId: string, result: "pending" | "recorded" | "rejected" | "skipped"): Promise<void>;
 }
@@ -321,7 +327,7 @@ Stores the incremental sync boundary.
 Responsibilities:
 
 - last successful sync timestamp
-- provider cursor when available
+- provider cursor when available, including partially consumed backlog pagination
 - recent processed message ids around the boundary
 - mailbox/folder scope metadata
 
@@ -470,15 +476,15 @@ Responsibilities:
 The same pending proposal notes should be reviewable through:
 
 - Obsidian directly
-- a dedicated Telegram review command
+- Telegram review through `/finance_review`
 
-Suggested Telegram responsibility:
+Current Telegram responsibility:
 
 - list notes with status `pending-approval`
 - present proposal questions to the user
 - allow approve, reject, and targeted edits
-
-Command naming is still open, but the workflow itself should be treated as part of the design, not as an afterthought.
+- allow previewing the saved pending note before confirmation
+- notify the user when email sync created new pending review items, when that notification setting is enabled
 
 ## Message And Proposal State Model
 
@@ -630,14 +636,13 @@ Target behavior:
 
 This is especially valuable because email sync can run unattended later, while Telegram remains the lightweight review surface.
 
-The exact command name is open.
+Current implemented command surface:
 
-Working examples:
+- `/finance_review`
+- `/finance_review pending`
+- `/finance_review attention`
 
-- `/finance_pending_approval`
-- `/finance_review_pending`
-
-The important part is not the name, but that the Telegram review flow reads from the same pending notes that Obsidian shows.
+The important part remains that the Telegram review flow reads from the same pending notes that Obsidian shows.
 
 ## MVP Scope
 
@@ -647,6 +652,7 @@ The recommended first delivery should already align with the long-term model.
 
 - one mailbox source behind a provider abstraction
 - delta sync using a previous successful sync boundary
+- per-run message limits with saved-cursor resume for large mailbox backfills
 - user-editable coarse filter rules
 - evidence routing by attachment and text type
 - image attachments routed QR-first
@@ -656,12 +662,15 @@ The recommended first delivery should already align with the long-term model.
 - persisted `pending-approval` transaction notes
 - analytics explicitly ignoring `pending-approval`
 - manual review in Obsidian
+- Telegram review of pending proposals through `/finance_review`
+- scheduled sync while Obsidian is open
+- optional Telegram notifications for newly created pending email review items
 - first vendor-specific parsers, with confirmed live coverage for Yandex, Lenta, and Magnit
 - generic resolved-evidence coverage for multiple non-trivial receipt families
 
 ### Deferred
 
-- scheduled background sync
+- sync outside the running Obsidian session
 - advanced regex UX polish
 - sophisticated multi-operation splitting from one free-form text body
 - server-side mailbox labeling policies
@@ -704,8 +713,8 @@ The recommended first delivery should already align with the long-term model.
 
 ### Phase 6. Scheduled sync
 
-- add configurable background polling
-- reuse the same delta boundary and proposal creation logic
+- extend the existing in-app scheduler beyond the running Obsidian session when needed
+- keep reusing the same delta boundary and proposal creation logic
 
 ## Security And Privacy
 
@@ -725,8 +734,8 @@ Minimum rules:
 - Should regex support be enabled from the start or hidden behind an advanced toggle?
 - How should rejected pending notes be handled by default: delete, archive, or keep with a terminal status?
 - How aggressive should multi-operation splitting be for plain-text emails?
-- Should scheduled sync run only while Obsidian is open, or should it integrate with broader automation later?
-- What should the final Telegram command naming be for pending proposal review?
+- Should scheduled sync remain app-bound, or should it integrate with broader automation later?
+- Should Telegram notifications eventually deep-link to exact pending notes rather than only pointing to the review queue?
 
 ## Recommendation
 
@@ -739,13 +748,14 @@ Proceed with email intake as the next finance-productization slice, but with the
 - canonical fiscal field extraction when available
 - support for many proposals from one email
 - persisted `pending-approval` notes as the review substrate
-- later scheduled sync and Telegram review on top of the same note state
+- scheduled sync and Telegram review on top of the same note state
+- optional Telegram notifications for new pending review items
 
 That keeps the feature practical for real usage while staying aligned with the architecture the project already has.
 
 ## Iteration Outcome Snapshot
 
-As of 2026-04-09, the implementation has reached this practical state:
+As of 2026-04-11, the implementation has reached this practical state:
 
 - live mailbox runs now validate deterministic receipt extraction for:
   - Yandex
@@ -753,6 +763,13 @@ As of 2026-04-09, the implementation has reached this practical state:
   - Magnit
   - several OFD-style and QR-link-driven generic families through resolved evidence
 - text-based PDF receipts can now succeed without AI when fiscal text is extractable locally
+- receipt timestamp extraction is now more resilient when the authoritative timestamp is found in:
+  - raw HTML attributes such as `<time datetime="...">`
+  - text-based PDF receipts with labeled timestamps or timestamps that include seconds
+- pending review ergonomics are now better aligned across Obsidian and Telegram:
+  - saved pending notes can be previewed directly from Telegram review
+  - a dedicated command can re-sync note file name and dated folder placement after manual edits
+  - Telegram confirmation of edited pending notes now reuses the same storage-sync path
 - the most significant known unresolved family is still Ozon, because receipt download is auth-gated
 
 That means the next phase should focus less on adding many new sender-specific parsers and more on:
@@ -760,3 +777,9 @@ That means the next phase should focus less on adding many new sender-specific p
 - strengthening the generic evidence layer
 - adding thin adapters only where wrappers or transport quirks demand them
 - improving operator visibility and review ergonomics around the remaining `needs-attention` notes
+
+## Backlog From The 2026-04-11 Stabilization Pass
+
+- suggest or automate note file-name and folder re-sync immediately after manual pending-note edits, instead of requiring an explicit command
+- make Telegram pending-note preview richer by separating note body, source context, and artifact details more clearly
+- eventually deep-link Telegram notifications or review actions to exact pending notes rather than only to the queue surface

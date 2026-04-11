@@ -112,6 +112,7 @@ It also moves legacy flat transaction notes into the dated `YYYY/MM` layout.
 |---|---|
 | `Add finance record` | Create a finance record from text, signed input, QR text, or receipt image |
 | `Sync finance emails` | Run the email finance sync pipeline and create pending-approval notes from provider messages |
+| `Sync current finance note filename and folder` | Rebuild the current finance note file name and dated folder placement from its frontmatter |
 | `Open current month finance report` | Open the current month report in a modal |
 | `Save current month finance report` | Save the current month report note to the vault |
 | `Generate finance report for custom period` | Build a report for any date range |
@@ -144,8 +145,9 @@ You can also start an explicit finance capture without inline args:
 Current Telegram finance intake is `proposal-first`:
 - the explicit command opens finance mode
 - the next text, QR receipt image, or text-based PDF finance document is parsed into a proposed transaction
-- the bot shows `Confirm`, `Reject`, `Set project`, and `Set area`
+- the bot shows `Confirm`, `Reject`, `Set category`, `Edit date`, `Edit description`, `Set project`, and `Set area`
 - the transaction is written to the vault only after `Confirm`
+- when the proposal already comes from a saved pending note, Telegram also shows `View note` so you can inspect the current note body and linked artifact before confirming
 
 `/finance_record` is the single transaction intake mode:
 - for text, use `expense 500 Lunch`, `income 50000 Salary`, `-500 Lunch`, or `+5000 Bonus`
@@ -265,7 +267,19 @@ Current behavior:
 - text-only emails go through the text AI route
 - created notes are saved with status `pending-approval`
 - pending notes do not affect reports or analytics until approved
+- receipt date/time extraction is now more robust for:
+  - raw HTML markup that carries a timestamp in attributes such as `<time datetime="...">`
+  - text-based PDF receipts that expose labeled timestamps or timestamps with seconds
 - optional Telegram notifications can announce newly created pending email review items
+
+### Email review ergonomics
+
+Current manual review helpers:
+
+- review pending and needs-attention queues in Obsidian or through `/finance_review`
+- use `Sync current finance note filename and folder` after editing `dateTime`, type, amount, or description in a saved note
+- confirm edited pending notes from Telegram and keep note placement synced with the updated transaction metadata
+- use Telegram `View note` on pending proposals to inspect the saved note body and linked artifact before confirming
 
 ## Data model
 
@@ -537,6 +551,13 @@ Not implemented yet:
 - proactive budget alert push messages in Telegram
 - dedicated budget management UX beyond frontmatter editing
 - PDF export for Telegram finance reports
+
+## Backlog
+
+Captured follow-up ideas from the 2026-04-11 stabilization iteration:
+
+- suggest or automate file-name and folder sync immediately after manual pending-note edits, so the user does not need to run the sync command separately
+- make Telegram pending-note preview richer by splitting note body, source context, and artifact references into clearer sections and eventually deep-linking to the exact note
 
 ## License
 

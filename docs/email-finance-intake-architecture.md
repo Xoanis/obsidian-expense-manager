@@ -11,11 +11,15 @@ The current implementation supports:
 - `IMAP (login + app password)`
 - `HTTP JSON bridge`
 - manual sync command
+- scheduled sync on a configurable interval while Obsidian is open
+- per-run message cap with saved cursor resume for large initial backfills
 - persisted delta-sync boundary
 - generic `evidence -> resolution -> proposal` receipt layer
 - deterministic text-based PDF preflight before AI fallback
 - `pending-approval` transaction notes that stay out of analytics until approval
 - `needs-attention` transaction notes for emails that looked finance-related but did not yield a valid proposal
+- Telegram review of pending email proposals through `/finance_review`
+- optional Telegram notifications when sync creates new pending-approval notes
 - parser-attempt diagnostics in runtime logs
 
 ## 0. Current Iteration Summary
@@ -23,12 +27,18 @@ The current implementation supports:
 Current state after the latest live mailbox iteration:
 
 - generic `ResolvedReceiptEvidenceEmailParser` is no longer experimental-only; it now closes a meaningful share of real receipt emails before vendor-specific logic is needed
+- scheduled sync, bounded backfill batches, and Telegram email-sync notifications now exist as first-class operator controls rather than placeholders in settings
 - confirmed live deterministic coverage now includes:
   - Yandex receipt emails
   - multiple Lenta families
   - Magnit receipt emails
   - several OFD / receipt-link families that resolve through the generic evidence layer
 - text-based PDF receipts can now succeed without AI when local PDF extraction yields enough fiscal text
+- timestamp extraction is now more resilient when the authoritative receipt time lives in raw HTML attributes or in text-based PDF timestamps with seconds
+- manual review ergonomics improved:
+  - pending notes can be previewed from Telegram review before confirmation
+  - note filename and dated folder placement can be re-synced from frontmatter after manual edits
+  - Telegram confirmation of edited pending notes uses the same storage-sync path
 - the main intentionally open gap remains auth-gated Ozon receipt retrieval
 
 The biggest architectural lesson from this iteration is:
@@ -41,6 +51,7 @@ The biggest architectural lesson from this iteration is:
 flowchart TD
     User["User"]
     Cmd["Command: Sync finance emails"]
+    Scheduler["Scheduled sync interval"]
     Plugin["ExpenseManagerPlugin"]
     Sync["EmailFinanceSyncService"]
     State["EmailFinanceSyncStateStore"]
@@ -52,11 +63,14 @@ flowchart TD
     Planner["EmailFinanceMessagePlanner"]
     Intake["FinanceIntakeService"]
     Pending["PendingFinanceProposalService"]
+    Notify["TelegramEmailSyncNotificationService"]
     Expense["ExpenseService"]
     Vault["Obsidian Vault"]
+    Telegram["Telegram Bot Plugin"]
     Reports["Analytics / Reports"]
 
     User --> Cmd
+    Scheduler --> Plugin
     Cmd --> Plugin
     Plugin --> Sync
     Sync <--> State
@@ -68,6 +82,8 @@ flowchart TD
     ParserChain --> CustomParsers
     Sync --> Intake
     Sync --> Pending
+    Plugin --> Notify
+    Notify --> Telegram
     Pending --> Expense
     Expense --> Vault
     Reports --> Expense
@@ -77,7 +93,7 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-    participant User
+    participant Trigger as Manual command or scheduled interval
     participant Plugin as ExpenseManagerPlugin
     participant Sync as EmailFinanceSyncService
     participant State as EmailFinanceSyncStateStore
@@ -87,14 +103,16 @@ sequenceDiagram
     participant Parsers as Email Parser Chain
     participant Intake as FinanceIntakeService
     participant Pending as PendingFinanceProposalService
+    participant Notify as TelegramEmailSyncNotificationService
+    participant Telegram as Telegram Bot Plugin
     participant Expense as ExpenseService
     participant Vault as Obsidian Vault
 
-    User->>Plugin: Run "Sync finance emails"
+    Trigger->>Plugin: Start email sync
     Plugin->>Sync: syncNewMessages()
     Sync->>State: getState()
     Sync->>State: update(lastAttemptAt)
-    Sync->>Provider: listMessages(cursor, since, mailboxScope)
+    Sync->>Provider: listMessages(cursor, since, mailboxScope, limit)
     Provider-->>Sync: FinanceMailSyncBatch
 
     loop each message
@@ -131,9 +149,13 @@ sequenceDiagram
         end
     end
 
-    Sync->>State: update(lastSuccessfulSyncAt, cursor, status, summary)
+    Sync->>State: update(cursor, status, summary)
     Sync-->>Plugin: EmailFinanceSyncSummary
-    Plugin-->>User: Notice(summaryText)
+    alt new pending notes and Telegram notifications enabled
+        Plugin->>Notify: sendEmailSyncNotification(summary, trigger)
+        Notify->>Telegram: sendMessage(...)
+    end
+    Plugin-->>Trigger: Notice(summaryText) for manual runs
 ```
 
 ## 3. Provider Selection
@@ -162,19 +184,28 @@ flowchart TD
     F["getMailboxLock(mailboxScope or INBOX, readOnly=true)"]
     G["Build search query from since"]
     H["search(..., uid=true)"]
-    I["fetch(uid, envelope, internalDate, bodyStructure)"]
-    J["collectMessageParts(bodyStructure)"]
-    K["downloadMany(text, html, attachments)"]
-    L["Normalize message summary"]
-    M["Append FinanceMailMessage"]
-    N["release mailbox lock"]
-    O["logout()"]
-    P["Return FinanceMailSyncBatch"]
+    I["Sort UIDs, apply cursor resume, apply limit"]
+    J["fetch(uid, envelope, internalDate, bodyStructure)"]
+    K["collectMessageParts(bodyStructure)"]
+    L["downloadMany(text, html, attachments)"]
+    M["Normalize message summary"]
+    N["Append FinanceMailMessage"]
+    O["Compute nextCursor when more UIDs remain"]
+    P["release mailbox lock"]
+    Q["logout()"]
+    R["Return FinanceMailSyncBatch"]
 
     A --> B --> C
     C -->|"Yes"| X["Throw configuration error"]
-    C -->|"No"| D --> E --> F --> G --> H --> I --> J --> K --> L --> M --> N --> O --> P
+    C -->|"No"| D --> E --> F --> G --> H --> I --> J --> K --> L --> M --> N --> O --> P --> Q --> R
 ```
+
+Current IMAP pagination behavior:
+
+- mailbox search still starts from `since`, but the provider now resumes after the saved numeric UID cursor when one exists
+- the configured per-run limit is applied before body and attachment downloads, so large backfills do not eagerly materialize the whole mailbox
+- when more matching UIDs remain after the selected batch, the provider returns `nextCursor`
+- `nextCursor` is cleared only after the current backlog slice is exhausted
 
 ### IMAP extraction details
 
@@ -606,10 +637,10 @@ stateDiagram-v2
     [*] --> NeedsAttention : email passed filter but no valid proposal extracted
     Pending : status = pending-approval
     NeedsAttention : status = needs-attention
-    Pending --> Recorded : future approval flow
-    Pending --> Deleted : user rejects / deletes note
+    Pending --> Recorded : confirmed in Obsidian or /finance_review
+    Pending --> Archived : rejected / archived in review flow
     NeedsAttention --> Pending : user or future parser resolves candidate
-    NeedsAttention --> Deleted : user rejects / deletes note
+    NeedsAttention --> Archived : user archives note
     Recorded : status = recorded
     Recorded --> Archived : future archive flow
     Archived : status = archived
@@ -634,9 +665,21 @@ flowchart LR
 
 Current usage:
 
-- `lastSuccessfulSyncAt` is used as the delta-sync boundary
-- `cursor` is preserved for providers that support cursor-based pagination
+- `lastSuccessfulSyncAt` is the stable delta-sync boundary for completed batches
+- `cursor` is the active continuation boundary for partially consumed paginated backfills
+- when `cursor` is non-null, sync resumes from that cursor before advancing `lastSuccessfulSyncAt`
+- `lastSuccessfulSyncAt` advances only after the current cursor-backed backlog slice is exhausted
 - `lastAttemptAt`, `lastSyncStatus`, and `lastSyncSummary` are used for operator visibility in settings
+
+## 12a. Scheduled Sync And Notification Hooks
+
+Current orchestration around sync triggers:
+
+- `ExpenseManagerPlugin` can run email sync manually or on a configured interval
+- scheduled sync runs only while Obsidian is open
+- an in-flight guard prevents overlapping sync runs
+- Telegram notification delivery is optional and happens only after a successful sync that created at least one new `pending-approval` note
+- notification delivery failure is logged, but does not fail the sync itself
 
 ## 13. HTML Receipt Caveat: "QR As Grid"
 
@@ -677,6 +720,8 @@ Architectural implication:
   - proposal extraction routing and text-based PDF deterministic preflight
 - [pending-finance-proposal-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/review/pending-finance-proposal-service.ts)
   - conversion from proposal to pending transaction note
+- [telegram-email-sync-notification-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/telegram-email-sync-notification-service.ts)
+  - optional Telegram notification delivery after successful syncs that created new pending review items
 - [expense-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/expense-service.ts)
   - persistence, duplicate checks, transaction reads
 
@@ -734,7 +779,7 @@ Practical recommendation:
 
 ## 16. Known Gaps In The Current Design
 
-- no scheduler yet, only manual sync
+- no scheduler outside the running Obsidian session; sync does not continue while the app is closed
 - IMAP provider does not yet mark messages as processed server-side
 - parser registry is still intentionally small; current concrete parsers are resolved-evidence, Magnit, Lenta, fiscal-field, Yandex receipt, Ozon receipt, generic receipt-link, and generic receipt-summary
 - confirmed live coverage is now strongest for Yandex, Lenta, Magnit, and generic evidence-resolved receipt families
@@ -745,5 +790,10 @@ Practical recommendation:
 - auth-gated receipt families such as Ozon still need either browser-assisted flow or an authenticated bridge
 - merge heuristics are intentionally simple for now: type + currency + amount + near dateTime
 - one message can produce many pending notes, but there is not yet a dedicated review UI for them
-- Telegram approval flow for `pending-approval` notes is still a future phase
+- Telegram review exists through `/finance_review`, but email-sync notifications still point to the queue rather than to exact proposal note ids
 - parser diagnostics are now much better, but some vendor-specific failures still require reading raw message artifacts and runtime trace together
+
+Captured follow-up backlog from the latest stabilization pass:
+
+- suggest or automate note path/file-name sync immediately after manual pending-note edits
+- make Telegram pending-note preview richer by separating note body, source context, and artifact references more clearly
