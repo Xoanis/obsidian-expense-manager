@@ -159,6 +159,9 @@ export interface ExpenseManagerSettings {
 	/** Send proactive Telegram budget alerts for current monthly report */
 	sendProactiveTelegramBudgetAlerts: boolean;
 
+	/** Send Telegram notifications when email sync creates new pending-approval notes */
+	sendTelegramEmailSyncNotifications: boolean;
+
 	/** Enable AI-backed finance text intake for free-form inputs */
 	enableAiFinanceTextIntake: boolean;
 
@@ -206,6 +209,9 @@ export interface ExpenseManagerSettings {
 
 	/** Interval for scheduled email sync, in minutes */
 	emailFinanceSyncIntervalMinutes: number;
+
+	/** Maximum number of email messages processed in one sync run */
+	emailFinanceMaxMessagesPerRun: number;
 
 	/** User-editable coarse filter rules */
 	emailFinanceCoarseFilterRules: EmailFinanceCoarseFilterRule[];
@@ -255,6 +261,7 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	budgetForecastStartDay: 5,
 	dashboardContributionMode: 'interactive',
 	sendProactiveTelegramBudgetAlerts: false,
+	sendTelegramEmailSyncNotifications: false,
 	enableAiFinanceTextIntake: false,
 	aiFinanceApiBaseUrl: 'https://api.openai.com/v1',
 	aiFinanceApiKey: '',
@@ -271,6 +278,7 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	emailFinanceProviderAuthToken: '',
 	enableScheduledEmailFinanceSync: false,
 	emailFinanceSyncIntervalMinutes: 15,
+	emailFinanceMaxMessagesPerRun: 20,
 	emailFinanceCoarseFilterRules: createDefaultEmailFinanceCoarseFilterRules(),
 	emailFinanceSyncState: createDefaultEmailFinanceSyncState(),
 };

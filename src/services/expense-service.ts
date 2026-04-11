@@ -368,6 +368,11 @@ export class ExpenseService {
 		await this.app.vault.modify(file, fullContent);
 	}
 
+	async updateTransactionWithFileSync(file: TFile, data: Partial<TransactionData>): Promise<TFile> {
+		await this.updateTransaction(file, data);
+		return this.syncTransactionFileStorage(file);
+	}
+
 	/**
 	 * Delete a transaction
 	 */
@@ -1795,6 +1800,19 @@ export class ExpenseService {
 		return this.getReportFiles();
 	}
 
+	async syncTransactionFileStorage(file: TFile): Promise<TFile> {
+		if (!this.isTransactionFile(file)) {
+			throw new Error('The active file is not a managed finance transaction note.');
+		}
+
+		const transaction = await this.parseTransactionFile(file);
+		if (!transaction) {
+			throw new Error('Could not parse transaction frontmatter from the active note.');
+		}
+
+		return this.renameAndRelocateTransactionFile(file, transaction);
+	}
+
 	async relocateTransactionFile(file: TFile, dateTime: string | undefined): Promise<TFile> {
 		if (!this.isTransactionFile(file)) {
 			return file;
@@ -1812,6 +1830,29 @@ export class ExpenseService {
 		}
 
 		await this.app.fileManager.renameFile(file, availablePath);
+		return file;
+	}
+
+	private async renameAndRelocateTransactionFile(
+		file: TFile,
+		data: Pick<TransactionData, 'dateTime' | 'type' | 'amount' | 'description'>,
+	): Promise<TFile> {
+		const targetFolder = await this.ensureFolderPath(this.getTransactionFolderPath(data.dateTime));
+		const desiredName = generateFilename(data);
+		const desiredPath = normalizePath(`${targetFolder}/${desiredName}`);
+		const currentPath = normalizePath(file.path);
+		if (currentPath === desiredPath) {
+			return file;
+		}
+
+		const targetPath = this.app.vault.getAbstractFileByPath(desiredPath)
+			? this.getAvailablePath(targetFolder, desiredName)
+			: desiredPath;
+		if (currentPath === normalizePath(targetPath)) {
+			return file;
+		}
+
+		await this.app.fileManager.renameFile(file, targetPath);
 		return file;
 	}
 

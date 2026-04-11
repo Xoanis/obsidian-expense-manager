@@ -230,7 +230,7 @@ export function formatDateTime(isoString: string, format = 'YYYY-MM-DD HH:mm'): 
 /**
  * Generate filename from transaction data
  */
-export function generateFilename(data: TransactionData): string {
+export function generateFilename(data: Pick<TransactionData, 'dateTime' | 'type' | 'amount' | 'description'>): string {
 	const date = new Date(data.dateTime);
 	const dateStr = formatLocalDate(date);
 	const timeStr = date.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-mm-ss

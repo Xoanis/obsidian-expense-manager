@@ -11,6 +11,11 @@ import { EmailFinanceCoarseFilter } from './email-finance-coarse-filter';
 import { EmailFinanceMessagePlanner, type PlannedEmailFinanceUnit } from '../planning/email-finance-message-planner';
 import { EmailFinanceSyncStateStore } from './email-finance-sync-state-store';
 import {
+	buildEmailFinanceSyncSummaryText,
+	buildSuccessfulEmailFinanceSyncState,
+	hasMoreEmailFinanceSyncPages,
+} from './email-finance-sync-progress';
+import {
 	createFinanceMailProvider,
 	FinanceMailProvider,
 	type FinanceMailAttachment,
@@ -141,71 +146,97 @@ export class EmailFinanceSyncService {
 
 		const previousState = this.syncStateStore.getState();
 		const now = new Date().toISOString();
-		await this.syncStateStore.update({
-			lastAttemptAt: now,
-		});
+		try {
+			await this.syncStateStore.update({
+				lastAttemptAt: now,
+			});
 
-		const batch = await provider.listMessages({
-			cursor: previousState.cursor,
-			since: previousState.lastSuccessfulSyncAt,
-			mailboxScope: settings.emailFinanceMailboxScope,
-		});
+			const batch = await provider.listMessages({
+				cursor: previousState.cursor,
+				since: previousState.lastSuccessfulSyncAt,
+				mailboxScope: settings.emailFinanceMailboxScope,
+				limit: settings.emailFinanceMaxMessagesPerRun,
+			});
 
-		let passedCoarseFilter = 0;
-		let filteredOut = 0;
-		let plannedUnits = 0;
-		let createdPendingNotes = 0;
-		let createdNeedsAttentionNotes = 0;
-		let failedUnits = 0;
-		let skippedDuplicates = 0;
-		for (const message of batch.messages) {
-			const filterResult = this.coarseFilter.evaluate(message, settings.emailFinanceCoarseFilterRules);
-			if (filterResult.passed) {
-				passedCoarseFilter += 1;
-				const outcome = await this.processMessage(message);
-				plannedUnits += outcome.plannedUnits;
-				createdPendingNotes += outcome.createdPendingNotes;
-				createdNeedsAttentionNotes += outcome.createdNeedsAttentionNotes;
-				failedUnits += outcome.failedUnits;
-				skippedDuplicates += outcome.skippedDuplicates;
-			} else {
-				filteredOut += 1;
+			let passedCoarseFilter = 0;
+			let filteredOut = 0;
+			let plannedUnits = 0;
+			let createdPendingNotes = 0;
+			let createdNeedsAttentionNotes = 0;
+			let failedUnits = 0;
+			let skippedDuplicates = 0;
+			for (const message of batch.messages) {
+				const filterResult = this.coarseFilter.evaluate(message, settings.emailFinanceCoarseFilterRules);
+				if (filterResult.passed) {
+					passedCoarseFilter += 1;
+					const outcome = await this.processMessage(message);
+					plannedUnits += outcome.plannedUnits;
+					createdPendingNotes += outcome.createdPendingNotes;
+					createdNeedsAttentionNotes += outcome.createdNeedsAttentionNotes;
+					failedUnits += outcome.failedUnits;
+					skippedDuplicates += outcome.skippedDuplicates;
+				} else {
+					filteredOut += 1;
+				}
 			}
+
+			const hasMore = hasMoreEmailFinanceSyncPages(batch.nextCursor);
+			const summaryText = buildEmailFinanceSyncSummaryText({
+				totalMessages: batch.messages.length,
+				passedCoarseFilter,
+				filteredOut,
+				plannedUnits,
+				createdPendingNotes,
+				createdNeedsAttentionNotes,
+				failedUnits,
+				skippedDuplicates,
+				hasMore,
+				maxMessagesPerRun: settings.emailFinanceMaxMessagesPerRun,
+			});
+			const nextState = await this.syncStateStore.update(
+				buildSuccessfulEmailFinanceSyncState({
+					previousState,
+					startedAt: now,
+					nextCursor: batch.nextCursor,
+					summaryText,
+				}),
+			);
+			this.logger?.info('Email finance sync completed', {
+				totalMessages: batch.messages.length,
+				passedCoarseFilter,
+				filteredOut,
+				plannedUnits,
+				createdPendingNotes,
+				createdNeedsAttentionNotes,
+				failedUnits,
+				skippedDuplicates,
+				nextCursor: nextState.cursor,
+				hasMore,
+				maxMessagesPerRun: settings.emailFinanceMaxMessagesPerRun,
+			});
+
+			return {
+				status: 'success',
+				totalMessages: batch.messages.length,
+				passedCoarseFilter,
+				filteredOut,
+				plannedUnits,
+				createdPendingNotes,
+				createdNeedsAttentionNotes,
+				failedUnits,
+				skippedDuplicates,
+				nextCursor: nextState.cursor,
+				summaryText,
+			};
+		} catch (error) {
+			const errorMessage = (error as Error).message;
+			await this.syncStateStore.update({
+				lastAttemptAt: now,
+				lastSyncStatus: 'failed',
+				lastSyncSummary: errorMessage,
+			});
+			throw error;
 		}
-
-		const summaryText = `Scanned ${batch.messages.length} email(s): ${passedCoarseFilter} passed coarse filter, ${filteredOut} filtered out, ${plannedUnits} unit(s) planned, ${createdPendingNotes} pending note(s) created, ${createdNeedsAttentionNotes} needs-attention note(s) created, ${skippedDuplicates} duplicate note(s) skipped, ${failedUnits} unit(s) failed.`;
-		const nextState = await this.syncStateStore.update({
-			lastAttemptAt: now,
-			lastSuccessfulSyncAt: now,
-			cursor: batch.nextCursor ?? previousState.cursor,
-			lastSyncStatus: 'success',
-			lastSyncSummary: summaryText,
-		});
-		this.logger?.info('Email finance sync completed', {
-			totalMessages: batch.messages.length,
-			passedCoarseFilter,
-			filteredOut,
-			plannedUnits,
-			createdPendingNotes,
-			createdNeedsAttentionNotes,
-			failedUnits,
-			skippedDuplicates,
-			nextCursor: nextState.cursor,
-		});
-
-		return {
-			status: 'success',
-			totalMessages: batch.messages.length,
-			passedCoarseFilter,
-			filteredOut,
-			plannedUnits,
-			createdPendingNotes,
-			createdNeedsAttentionNotes,
-			failedUnits,
-			skippedDuplicates,
-			nextCursor: nextState.cursor,
-			summaryText,
-		};
 	}
 
 	private async processMessage(message: FinanceMailMessage): Promise<ProcessedMessageOutcome> {

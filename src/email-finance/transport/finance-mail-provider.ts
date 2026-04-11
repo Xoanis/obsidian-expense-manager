@@ -34,6 +34,7 @@ export interface FinanceMailProviderListOptions {
 	cursor?: string | null;
 	since?: string | null;
 	mailboxScope?: string;
+	limit?: number;
 }
 
 export interface FinanceMailProvider {
@@ -83,6 +84,9 @@ class HttpJsonFinanceMailProvider implements FinanceMailProvider {
 		}
 		if (options.mailboxScope) {
 			url.searchParams.set('mailboxScope', options.mailboxScope);
+		}
+		if (typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0) {
+			url.searchParams.set('limit', String(Math.max(1, Math.round(options.limit))));
 		}
 
 		this.logger?.info('Email finance provider request', {
@@ -216,8 +220,34 @@ class ImapFinanceMailProvider implements FinanceMailProvider {
 				isInitialSync: !sinceDate,
 			});
 
+			const numericCursor = this.parseCursorUid(options.cursor);
+			const filteredUids = uids
+				.slice()
+				.sort((left, right) => left - right)
+				.filter((uid) => numericCursor === null || uid > numericCursor);
+			if (filteredUids.length === 0) {
+				return {
+					messages: [],
+					nextCursor: null,
+				};
+			}
+
+			const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
+				? Math.max(1, Math.round(options.limit))
+				: null;
+			const selectedUids = limit ? filteredUids.slice(0, limit) : filteredUids;
+			const nextCursor = limit && filteredUids.length > selectedUids.length
+				? String(selectedUids[selectedUids.length - 1])
+				: null;
+			this.logger?.warn('IMAP sync selection prepared', {
+				cursor: options.cursor ?? null,
+				limit,
+				selectedUidCount: selectedUids.length,
+				hasMore: Boolean(nextCursor),
+			});
+
 			const messages: FinanceMailMessage[] = [];
-			for (const uidChunk of this.chunkNumbers(uids, ImapFinanceMailProvider.FETCH_UID_CHUNK_SIZE)) {
+			for (const uidChunk of this.chunkNumbers(selectedUids, ImapFinanceMailProvider.FETCH_UID_CHUNK_SIZE)) {
 				stage = 'fetch-metadata';
 				try {
 					const chunkMessagesDescription = await this.withTimeout(
@@ -277,7 +307,7 @@ class ImapFinanceMailProvider implements FinanceMailProvider {
 
 			return {
 				messages,
-				nextCursor: null,
+				nextCursor,
 			};
 		} catch (error) {
 			const normalizedError = this.createImapOperationError(error, {
@@ -337,7 +367,7 @@ class ImapFinanceMailProvider implements FinanceMailProvider {
 
 	private async buildMessage(
 		client: ImapFlow,
-		message: {
+		message_description: {
 			uid: number;
 			threadId?: string;
 			envelope?: { from?: MessageAddressObject[]; subject?: string };
@@ -346,13 +376,13 @@ class ImapFinanceMailProvider implements FinanceMailProvider {
 		},
 		sinceDate: Date | null,
 	): Promise<FinanceMailMessage | null> {
-		const receivedAt = this.normalizeReceivedAt(message.internalDate);
+		const receivedAt = this.normalizeReceivedAt(message_description.internalDate);
 		if (sinceDate && new Date(receivedAt).getTime() <= sinceDate.getTime()) {
 			return null;
 		}
 
-		const parts = this.collectMessageParts(message.bodyStructure);
-		const downloads = await this.downloadMessageParts(client, message.uid, parts);
+		const parts = this.collectMessageParts(message_description.bodyStructure);
+		const downloads = await this.downloadMessageParts(client, message_description.uid, parts);
 		const textBody = parts.textPartIds
 			.map((partId) => downloads[partId]?.content?.toString('utf8') ?? '')
 			.filter(Boolean)
@@ -376,10 +406,10 @@ class ImapFinanceMailProvider implements FinanceMailProvider {
 		}).filter((attachment) => attachment.contentBase64);
 
 		return {
-			id: String(message.uid),
-			threadId: message.threadId ? String(message.threadId) : undefined,
-			from: this.formatFromAddress(message.envelope?.from?.[0]),
-			subject: message.envelope?.subject ?? '',
+			id: String(message_description.uid),
+			threadId: message_description.threadId ? String(message_description.threadId) : undefined,
+			from: this.formatFromAddress(message_description.envelope?.from?.[0]),
+			subject: message_description.envelope?.subject ?? '',
 			receivedAt,
 			textBody,
 			htmlBody,
@@ -483,6 +513,22 @@ class ImapFinanceMailProvider implements FinanceMailProvider {
 			chunks.push(values.slice(index, index + chunkSize));
 		}
 		return chunks;
+	}
+
+	private parseCursorUid(cursor: string | null | undefined): number | null {
+		if (!cursor) {
+			return null;
+		}
+
+		const parsed = Number(cursor);
+		if (!Number.isInteger(parsed) || parsed <= 0) {
+			this.logger?.warn('Ignoring unsupported IMAP cursor value', {
+				cursor,
+			});
+			return null;
+		}
+
+		return parsed;
 	}
 
 	private createImapOperationError(

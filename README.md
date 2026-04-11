@@ -200,6 +200,10 @@ IMAP setup in plugin settings:
 
 - `Email finance provider` -> `IMAP (login + app password)`
 - `Mailbox scope` -> optional folder name, defaults to `INBOX`
+- `Max email messages per sync run` -> caps one run, useful for large initial imports
+- `Enable scheduled email sync` -> runs sync automatically while Obsidian stays open
+- `Email sync interval (minutes)` -> polling interval for scheduled sync
+- `Telegram notifications for new email receipts` -> sends a Telegram message when sync creates new pending review items
 - `IMAP host` -> for example `imap.gmail.com`
 - `IMAP port` -> usually `993`
 - `IMAP secure connection` -> keep enabled for direct TLS IMAP
@@ -209,6 +213,8 @@ IMAP setup in plugin settings:
 Current IMAP behavior:
 
 - fetches messages newer than the last successful sync boundary
+- for large backfills, processes only the configured maximum number of emails per run
+- resumes from the saved cursor on the next run until the backlog is exhausted
 - opens the selected mailbox in read-only mode
 - extracts `text/plain`, `text/html`, and attachment parts
 - supports attachment fan-out into receipt/PDF routes
@@ -220,6 +226,7 @@ Expected endpoint shape:
 - optional query params:
   - `since`
   - `cursor`
+  - `limit`
   - `mailboxScope`
 - optional `Authorization: Bearer <token>` header
 
@@ -258,6 +265,7 @@ Current behavior:
 - text-only emails go through the text AI route
 - created notes are saved with status `pending-approval`
 - pending notes do not affect reports or analytics until approved
+- optional Telegram notifications can announce newly created pending email review items
 
 ## Data model
 

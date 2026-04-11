@@ -79,6 +79,28 @@ export const resolvedReceiptFixtures: ResolvedReceiptFixture[] = [
 		}),
 	},
 	{
+		name: 'HTML receipt markup resolves timestamp from time datetime attribute',
+		expectedQrPayload: 't=20260410T1108&s=149.00&fn=7380440902990696&i=1261&fp=1234567890&n=1',
+		message: createMessageFixture({
+			id: 'fixture-html-datetime-attribute',
+			receivedAt: '2026-04-10T08:09:12.000Z',
+			from: 'bank@example.test',
+			subject: 'Вы заплатили с карты',
+			htmlBody: `
+				<html><body>
+					<article class="operation-card">
+						<time datetime="2026-04-10T11:08:49+03:00">10 апреля 2026, 11:08</time>
+						<div>Кассовый чек / Приход</div>
+						<div>Сумма: 149.00 ₽</div>
+						<div>ФН 7380440902990696</div>
+						<div>Фискальный документ 1261</div>
+						<div>ФПД 1234567890</div>
+					</article>
+				</body></html>
+			`,
+		}),
+	},
+	{
 		name: 'Tutu receipt resolves from body-only fiscal fields',
 		expectedQrPayload: 't=20260220T1357&s=14436.00&fn=7380440902668375&i=112523&fp=3958914017&n=1',
 		message: createMessageFixture({
@@ -153,6 +175,19 @@ export const pdfFiscalTextFixtures: PdfFiscalTextFixture[] = [
 			ФН 7381440900906552
 			Фискальный признак 681846341
 			Сумма заказа 1 500,00 ₽
+		`,
+	},
+	{
+		name: 'PDF fiscal text resolves dotted timestamp with seconds',
+		expectedQrPayload: 't=20260410T1215&s=1261.00&fn=7380440902990696&i=48455&fp=1234567890&n=1',
+		text: `
+			Кассовый чек / Приход
+			ООО "Тестовый магазин"
+			Дата операции: 10.04.2026 12:15:10
+			Фискальный документ 48455
+			ФН 7380440902990696
+			Фискальный признак 1234567890
+			ИТОГО 1 261,00 ₽
 		`,
 	},
 ];

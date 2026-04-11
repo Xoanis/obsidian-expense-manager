@@ -797,7 +797,7 @@ export function extractFiscalReceiptFields(value: string): ExtractedFiscalReceip
 		...FISCAL_FP_PATTERNS,
 	]);
 	const amount = extractReceiptAmount(normalized);
-	const dateTime = extractReceiptDateTime(normalized);
+	const dateTime = extractReceiptDateTime(value);
 	const operationType = extractReceiptOperationType(normalized);
 
 	if (!fn || !documentNumber || !fiscalSign || !amount || !dateTime || !operationType) {
@@ -1168,49 +1168,101 @@ function extractMagnitReceiptAmount(value: string): string | null {
 }
 
 function extractReceiptDateTime(value: string): string | null {
-	const searchable = toSearchablePlainText(value);
-	const explicitQrDate = searchable.match(/\bt\s*[=:]\s*(\d{8}T\d{4})/i)?.[1];
-	if (explicitQrDate) {
-		return explicitQrDate;
+	const rawValueDate = extractReceiptDateTimeFromRawValue(value);
+	if (rawValueDate) {
+		return rawValueDate;
 	}
 
-	const russianDate = searchable.match(/когда\s*(\d{1,2})\s+([а-яё]+)\s+(\d{4})\s+(\d{2}):(\d{2})/i);
+	const searchable = toSearchablePlainText(value);
+	const explicitQrDate = searchable.match(/\bt\s*[=:]\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(?:\d{2})?\b/i);
+	if (explicitQrDate) {
+		const [, year, month, day, hour, minute] = explicitQrDate;
+		return buildReceiptDateTimeValue(year, month, day, hour, minute);
+	}
+
+	const russianDate = searchable.match(/(?:когда|дата(?:\s+операции|\s+покупки|\s+чека|\s+выдачи)?|время(?:\s+операции|\s+покупки)?)\s*[:=]?\s*(\d{1,2})\s+([а-яё]+)\s+(\d{4})(?:\s*г\.?)?(?:[\s,]+(?:в)?\s*(\d{2}):(\d{2})(?::\d{2})?)?/i);
 	if (russianDate) {
 		const [, day, monthName, year, hour, minute] = russianDate;
 		const month = mapRussianMonth(monthName);
-		if (month) {
-			return `${year}${month}${pad2(day)}T${hour}${minute}`;
+		if (month && hour && minute) {
+			return buildReceiptDateTimeValue(year, month, day, hour, minute);
 		}
 	}
 
-	const issuedRussianDate = searchable.match(/(?:дата\s+выдачи|дата)\s*(\d{1,2})\s+([а-яё]+)\s+(\d{4})\s*(?:г\.?)?\s*(?:в)?\s*(\d{2}):(\d{2})/i);
+	const issuedRussianDate = searchable.match(/(?:дата\s+выдачи|дата)\s*(\d{1,2})\s+([а-яё]+)\s+(\d{4})\s*(?:г\.?)?\s*(?:[, ]+в)?\s*(\d{2}):(\d{2})(?::\d{2})?/i);
 	if (issuedRussianDate) {
 		const [, day, monthName, year, hour, minute] = issuedRussianDate;
 		const month = mapRussianMonth(monthName);
 		if (month) {
-			return `${year}${month}${pad2(day)}T${hour}${minute}`;
+			return buildReceiptDateTimeValue(year, month, day, hour, minute);
 		}
 	}
 
-	const dottedDate = searchable.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?:\s+в)?\s+(\d{2}):(\d{2})\b/i);
+	const splitLabeledDate = searchable.match(/дата(?:\s+операции|\s+покупки|\s+чека|\s+выдачи)?\s*[:=]?\s*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?:\s*(?:[,;|]|время(?:\s+операции|\s+покупки)?\s*[:=]?)\s*|\s+)(\d{2}):(\d{2})(?::\d{2})?/i);
+	if (splitLabeledDate) {
+		const [, day, month, year, hour, minute] = splitLabeledDate;
+		return buildReceiptDateTimeValue(
+			year.length === 2 ? normalizeTwoDigitYear(year) : year,
+			pad2(month),
+			pad2(day),
+			hour,
+			minute,
+		);
+	}
+
+	const dottedDate = searchable.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?:\s*(?:[,;|]|в|время)\s*|\s+)(\d{2}):(\d{2})(?::\d{2})?\b/i);
 	if (dottedDate) {
 		const [, day, month, year, hour, minute] = dottedDate;
-		return `${year}${pad2(month)}${pad2(day)}T${hour}${minute}`;
+		return buildReceiptDateTimeValue(year, pad2(month), pad2(day), hour, minute);
 	}
 
-	const shortDottedDate = searchable.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2})(?:\s+в)?\s+(\d{2}):(\d{2})\b/i);
+	const shortDottedDate = searchable.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2})(?:\s*(?:[,;|]|в|время)\s*|\s+)(\d{2}):(\d{2})(?::\d{2})?\b/i);
 	if (shortDottedDate) {
 		const [, day, month, year, hour, minute] = shortDottedDate;
-		return `${normalizeTwoDigitYear(year)}${pad2(month)}${pad2(day)}T${hour}${minute}`;
+		return buildReceiptDateTimeValue(normalizeTwoDigitYear(year), pad2(month), pad2(day), hour, minute);
 	}
 
-	const isoLikeDate = searchable.match(/\b(\d{4})-(\d{2})-(\d{2})[ t](\d{2}):(\d{2})\b/i);
+	const isoLikeDate = searchable.match(/\b(\d{4})-(\d{2})-(\d{2})[ t](\d{2}):(\d{2})(?::\d{2})?(?:\.\d+)?(?:z|[+-]\d{2}:?\d{2})?\b/i);
 	if (isoLikeDate) {
 		const [, year, month, day, hour, minute] = isoLikeDate;
-		return `${year}${month}${day}T${hour}${minute}`;
+		return buildReceiptDateTimeValue(year, month, day, hour, minute);
 	}
 
 	return null;
+}
+
+function extractReceiptDateTimeFromRawValue(value: string): string | null {
+	if (!value || typeof value !== 'string') {
+		return null;
+	}
+
+	const patterns = [
+		/<time\b[^>]*datetime=["']([^"']+)["']/i,
+		/\b(?:datetime|date-time|date_time|transaction(?:Date|Time)?|operation(?:Date|Time)?|payment(?:Date|Time)?|purchase(?:Date|Time)?|receipt(?:Date|Time)?|postedAt|createdAt|occurredAt)\b[\s"'=:>]+(\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:z|[+-]\d{2}:?\d{2})?)/i,
+	];
+	for (const pattern of patterns) {
+		const matched = value.match(pattern)?.[1];
+		if (!matched) {
+			continue;
+		}
+
+		const normalized = normalizeIsoLikeReceiptDateTimeCandidate(matched);
+		if (normalized) {
+			return normalized;
+		}
+	}
+
+	return null;
+}
+
+function normalizeIsoLikeReceiptDateTimeCandidate(value: string): string | null {
+	const matched = value.match(/(\d{4})-(\d{2})-(\d{2})[t ](\d{2}):(\d{2})(?::\d{2})?(?:\.\d+)?(?:z|[+-]\d{2}:?\d{2})?/i);
+	if (!matched) {
+		return null;
+	}
+
+	const [, year, month, day, hour, minute] = matched;
+	return buildReceiptDateTimeValue(year, month, day, hour, minute);
 }
 
 function extractReceiptMerchant(value: string, from: string): string | null {
@@ -1403,6 +1455,36 @@ function extensionFromMimeType(mimeType: string): string {
 
 function pad2(value: string): string {
 	return value.padStart(2, '0');
+}
+
+function buildReceiptDateTimeValue(
+	year: string,
+	month: string,
+	day: string,
+	hour: string,
+	minute: string,
+): string | null {
+	const parsed = new Date(
+		Number(year),
+		Number(month) - 1,
+		Number(day),
+		Number(hour),
+		Number(minute),
+		0,
+		0,
+	);
+	if (
+		Number.isNaN(parsed.getTime())
+		|| parsed.getFullYear() !== Number(year)
+		|| parsed.getMonth() !== Number(month) - 1
+		|| parsed.getDate() !== Number(day)
+		|| parsed.getHours() !== Number(hour)
+		|| parsed.getMinutes() !== Number(minute)
+	) {
+		return null;
+	}
+
+	return `${year}${month}${day}T${hour}${minute}`;
 }
 
 function normalizeTwoDigitYear(value: string): string {

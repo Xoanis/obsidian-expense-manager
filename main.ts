@@ -21,6 +21,7 @@ import { registerGenerateCustomReportCommand } from './src/commands/generate-cus
 import { registerMigrateLegacyNotesCommand } from './src/commands/migrate-legacy-notes';
 import { registerSetCurrentMonthBudgetCommand } from './src/commands/set-current-month-budget';
 import { registerOpenFinanceReviewQueueCommand } from './src/commands/open-finance-review-queue';
+import { registerSyncCurrentTransactionNoteCommand } from './src/commands/sync-current-transaction-note';
 import { registerSyncFinanceEmailsCommand } from './src/email-finance/commands/sync-finance-emails';
 import { getParaCoreApi } from './src/integrations/para-core/para-core-client';
 import { registerFinanceDomain } from './src/integrations/para-core/register-finance-domain';
@@ -34,6 +35,7 @@ import { formatPluginBuildInfo } from './src/build-info';
 import { ReportSyncService } from './src/services/report-sync-service';
 import { TelegramChartService } from './src/services/telegram-chart-service';
 import { TelegramBudgetAlertService } from './src/services/telegram-budget-alert-service';
+import { TelegramEmailSyncNotificationService } from './src/services/telegram-email-sync-notification-service';
 import { MigrationService } from './src/services/migration-service';
 import { FinanceIntakeService } from './src/services/finance-intake-service';
 import { ReceiptEnrichmentService } from './src/services/receipt-enrichment-service';
@@ -72,10 +74,13 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private reportSyncService!: ReportSyncService;
 	private telegramChartService!: TelegramChartService;
 	private telegramBudgetAlertService!: TelegramBudgetAlertService;
+	private telegramEmailSyncNotificationService!: TelegramEmailSyncNotificationService;
 	private financeIntakeService!: FinanceIntakeService;
 	private receiptEnrichmentService!: ReceiptEnrichmentService;
 	private emailFinanceSyncService!: EmailFinanceSyncService;
 	private logger: PluginLogger = new ConsolePluginLogger('Expense Manager');
+	private scheduledEmailFinanceSyncInterval: number | null = null;
+	private emailFinanceSyncInFlight: Promise<void> | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -90,6 +95,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		this.expenseService = new ExpenseService(this.app, this.settings, this.paraCoreApi, this.financeDomain);
 		this.analyticsService = new AnalyticsService(this.expenseService);
 		this.telegramBudgetAlertService = new TelegramBudgetAlertService(this.app, this.settings);
+		this.telegramEmailSyncNotificationService = new TelegramEmailSyncNotificationService(this.app, this.settings);
 		this.reportSyncService = new ReportSyncService(
 			this.app,
 			this.expenseService,
@@ -116,6 +122,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerMigrateLegacyNotesCommand(this);
 		registerSetCurrentMonthBudgetCommand(this);
 		registerOpenFinanceReviewQueueCommand(this);
+		registerSyncCurrentTransactionNoteCommand(this);
 		registerSyncFinanceEmailsCommand(this);
 		this.addCommand({
 			id: 'open-debug-log',
@@ -134,12 +141,14 @@ export default class ExpenseManagerPlugin extends Plugin {
 		this.addSettingTab(new ExpenseManagerSettingTab(this.app, this));
 		this.registerReportSyncListeners();
 		await this.reportSyncService.initialize();
+		this.configureScheduledEmailFinanceSync();
 
 		// Show startup notice
 		new Notice('Expense Manager loaded');
 	}
 
 	onunload() {
+		this.clearScheduledEmailFinanceSyncInterval();
 		this.logger.info('Plugin unloaded');
 		this.reportSyncService?.destroy();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
@@ -158,6 +167,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 					...loaded.emailFinanceSyncState,
 				}
 				: createDefaultEmailFinanceSyncState(),
+			emailFinanceSyncIntervalMinutes: Math.max(1, Math.round(Number(loaded.emailFinanceSyncIntervalMinutes) || DEFAULT_SETTINGS.emailFinanceSyncIntervalMinutes)),
+			emailFinanceMaxMessagesPerRun: Math.max(1, Math.round(Number(loaded.emailFinanceMaxMessagesPerRun) || DEFAULT_SETTINGS.emailFinanceMaxMessagesPerRun)),
 		};
 	}
 
@@ -175,6 +186,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		this.analyticsService = new AnalyticsService(this.expenseService);
 		this.reportSyncService?.destroy();
 		this.telegramBudgetAlertService = new TelegramBudgetAlertService(this.app, this.settings);
+		this.telegramEmailSyncNotificationService = new TelegramEmailSyncNotificationService(this.app, this.settings);
 		this.reportSyncService = new ReportSyncService(
 			this.app,
 			this.expenseService,
@@ -191,6 +203,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
 		await this.initializeTelegramIntegration();
 		await this.reportSyncService.initialize();
+		this.configureScheduledEmailFinanceSync();
 	}
 
 	async persistEmailFinanceSyncState(nextState: EmailFinanceSyncState) {
@@ -217,14 +230,12 @@ export default class ExpenseManagerPlugin extends Plugin {
 	}
 
 	async handleSyncFinanceEmails() {
-		new Notice('Finance email sync started...', 4000);
-		try {
-			const result = await this.emailFinanceSyncService.syncNewMessages();
-			new Notice(result.summaryText, 7000);
-		} catch (error) {
-			new Notice(`Error syncing finance emails: ${(error as Error).message}`);
-			this.logger.error('Email finance sync failed', error);
-		}
+		await this.runEmailFinanceSync({
+			trigger: 'manual',
+			showStartNotice: true,
+			showResultNotice: true,
+			showErrorNotice: true,
+		});
 	}
 
 	async handleOpenFinanceReviewQueue() {
@@ -318,6 +329,93 @@ export default class ExpenseManagerPlugin extends Plugin {
 				logger: this.logger,
 			},
 		);
+	}
+
+	private configureScheduledEmailFinanceSync(): void {
+		this.clearScheduledEmailFinanceSyncInterval();
+		if (!this.settings.enableScheduledEmailFinanceSync) {
+			return;
+		}
+
+		const intervalMinutes = Math.max(1, this.settings.emailFinanceSyncIntervalMinutes);
+		const intervalMs = intervalMinutes * 60 * 1000;
+		this.scheduledEmailFinanceSyncInterval = window.setInterval(() => {
+			void this.runEmailFinanceSync({
+				trigger: 'scheduled',
+				showStartNotice: false,
+				showResultNotice: false,
+				showErrorNotice: false,
+			});
+		}, intervalMs);
+		this.registerInterval(this.scheduledEmailFinanceSyncInterval);
+		this.logger.info('Scheduled email finance sync configured', {
+			intervalMinutes,
+		});
+	}
+
+	private clearScheduledEmailFinanceSyncInterval(): void {
+		if (this.scheduledEmailFinanceSyncInterval !== null) {
+			window.clearInterval(this.scheduledEmailFinanceSyncInterval);
+			this.scheduledEmailFinanceSyncInterval = null;
+		}
+	}
+
+	private async runEmailFinanceSync(options: {
+		trigger: 'manual' | 'scheduled';
+		showStartNotice: boolean;
+		showResultNotice: boolean;
+		showErrorNotice: boolean;
+	}): Promise<void> {
+		if (this.emailFinanceSyncInFlight) {
+			this.logger.info('Skipped email finance sync because another run is already in progress', {
+				trigger: options.trigger,
+			});
+			if (options.showErrorNotice) {
+				new Notice('Finance email sync is already running.', 4000);
+			}
+			return this.emailFinanceSyncInFlight;
+		}
+
+		const runPromise = (async () => {
+			if (options.showStartNotice) {
+				new Notice('Finance email sync started...', 4000);
+			}
+
+			try {
+				const result = await this.emailFinanceSyncService.syncNewMessages();
+				await this.maybeSendTelegramEmailSyncNotification(result, options.trigger);
+				if (options.showResultNotice) {
+					new Notice(result.summaryText, 7000);
+				}
+			} catch (error) {
+				if (options.showErrorNotice) {
+					new Notice(`Error syncing finance emails: ${(error as Error).message}`);
+				}
+				this.logger.error(`Email finance sync failed (${options.trigger})`, error);
+			}
+		})();
+
+		this.emailFinanceSyncInFlight = runPromise;
+		try {
+			await runPromise;
+		} finally {
+			if (this.emailFinanceSyncInFlight === runPromise) {
+				this.emailFinanceSyncInFlight = null;
+			}
+		}
+	}
+
+	private async maybeSendTelegramEmailSyncNotification(
+		result: Awaited<ReturnType<EmailFinanceSyncService['syncNewMessages']>>,
+		trigger: 'manual' | 'scheduled',
+	): Promise<void> {
+		try {
+			await this.telegramEmailSyncNotificationService.sendEmailSyncNotification(result, {
+				trigger,
+			});
+		} catch (error) {
+			this.logger.warn('Failed to send Telegram email sync notification', error);
+		}
 	}
 
 	private async ensureFinanceReviewQueueNote(): Promise<string> {
@@ -494,6 +592,33 @@ export default class ExpenseManagerPlugin extends Plugin {
 		} catch (error) {
 			new Notice(`Could not fetch receipt items: ${(error as Error).message}`);
 			this.logger.error('Failed to enrich receipt from ProverkaCheka', error);
+		}
+	}
+
+	async handleSyncCurrentFinanceNoteStorage() {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) {
+			new Notice('Open a finance transaction note first.');
+			return;
+		}
+		if (!this.expenseService.isTransactionFile(file)) {
+			new Notice('Open a managed finance transaction note first.');
+			return;
+		}
+
+		const previousPath = file.path;
+		try {
+			const updatedFile = await this.expenseService.syncTransactionFileStorage(file);
+			if (updatedFile.path === previousPath) {
+				new Notice('Finance note filename and folder are already in sync.');
+				return;
+			}
+
+			await this.app.workspace.getLeaf(false).openFile(updatedFile);
+			new Notice(`Finance note moved to ${updatedFile.path}`);
+		} catch (error) {
+			new Notice(`Could not sync finance note filename and folder: ${(error as Error).message}`);
+			this.logger.error('Failed to sync finance note filename and folder', error);
 		}
 	}
 
@@ -951,7 +1076,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Enable scheduled email sync')
-			.setDesc('Scheduling is planned in a later phase, but the setting is already reserved')
+			.setDesc('Run the same email sync pipeline automatically while Obsidian is open')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.enableScheduledEmailFinanceSync)
 				.onChange(async (value) => {
@@ -961,7 +1086,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Email sync interval (minutes)')
-			.setDesc('Reserved for the future scheduled sync worker')
+			.setDesc('How often automatic email sync should run while Obsidian is open')
 			.addText(text => text
 				.setPlaceholder('15')
 				.setValue(String(this.plugin.settings.emailFinanceSyncIntervalMinutes))
@@ -971,6 +1096,30 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 						this.plugin.settings.emailFinanceSyncIntervalMinutes = Math.max(1, Math.round(parsed));
 						await this.plugin.saveSettings();
 					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Max email messages per sync run')
+			.setDesc('Limit how many emails are processed in one run to avoid overloading external APIs. The next run continues from the saved cursor.')
+			.addText(text => text
+				.setPlaceholder('20')
+				.setValue(String(this.plugin.settings.emailFinanceMaxMessagesPerRun))
+				.onChange(async (value) => {
+					const parsed = Number(value);
+					if (Number.isFinite(parsed)) {
+						this.plugin.settings.emailFinanceMaxMessagesPerRun = Math.max(1, Math.round(parsed));
+						await this.plugin.saveSettings();
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Telegram notifications for new email receipts')
+			.setDesc('Send a Telegram message when email sync creates new pending-approval finance notes. Requires Telegram integration.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.sendTelegramEmailSyncNotifications)
+				.onChange(async (value) => {
+					this.plugin.settings.sendTelegramEmailSyncNotifications = value;
+					await this.plugin.saveSettings();
 				}));
 
 		const filterRulesHint = containerEl.createEl('p', {
@@ -1004,9 +1153,10 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 		const syncStatusText = syncState.lastSyncSummary
 			? `${syncState.lastSyncStatus} | ${syncState.lastSyncSummary}`
 			: syncState.lastSyncStatus;
+		const syncCursorText = syncState.cursor ?? 'none';
 		new Setting(containerEl)
 			.setName('Email sync state')
-			.setDesc(`Last attempt: ${syncState.lastAttemptAt ?? 'never'} | Last success: ${syncState.lastSuccessfulSyncAt ?? 'never'} | Status: ${syncStatusText}`)
+			.setDesc(`Last attempt: ${syncState.lastAttemptAt ?? 'never'} | Last success: ${syncState.lastSuccessfulSyncAt ?? 'never'} | Cursor: ${syncCursorText} | Status: ${syncStatusText}`)
 			.addButton(button => button
 				.setButtonText('Reset boundary')
 				.onClick(async () => {

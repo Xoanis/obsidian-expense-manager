@@ -51,6 +51,7 @@ const CALLBACK_ACTIONS = {
 	proposalSetProject: 'pp',
 	proposalSetArea: 'pa',
 	proposalSetDate: 'dt',
+	proposalViewNote: 'vn',
 	proposalOpenSelector: 'os',
 	proposalSelectOption: 'so',
 	proposalBack: 'bk',
@@ -462,6 +463,7 @@ export class FinanceTelegramBridge {
 			|| payload.action === CALLBACK_ACTIONS.proposalSetProject
 			|| payload.action === CALLBACK_ACTIONS.proposalSetArea
 			|| payload.action === CALLBACK_ACTIONS.proposalSetDate
+			|| payload.action === CALLBACK_ACTIONS.proposalViewNote
 			|| payload.action === CALLBACK_ACTIONS.proposalOpenSelector
 			|| payload.action === CALLBACK_ACTIONS.proposalSelectOption
 			|| payload.action === CALLBACK_ACTIONS.proposalBack
@@ -494,6 +496,9 @@ export class FinanceTelegramBridge {
 					processed: true,
 					answer: 'Send the new description text for this finance proposal.',
 				};
+			}
+			if (payload.action === CALLBACK_ACTIONS.proposalViewNote) {
+				return this.sendProposalNotePreview(state.proposalId);
 			}
 			if (payload.action === CALLBACK_ACTIONS.proposalBack) {
 				return this.renderProposal(state.proposalId, callback.messageId);
@@ -1138,7 +1143,7 @@ export class FinanceTelegramBridge {
 	}
 
 	private buildProposalKeyboard(proposalId: string): TelegramInlineKeyboard {
-		return [
+		const keyboard: TelegramInlineKeyboard = [
 			[
 				this.buildProposalButton('Confirm', CALLBACK_ACTIONS.proposalConfirm, proposalId),
 				this.buildProposalButton('Reject', CALLBACK_ACTIONS.proposalReject, proposalId),
@@ -1155,6 +1160,15 @@ export class FinanceTelegramBridge {
 				this.buildProposalButton('Set area', CALLBACK_ACTIONS.proposalSetArea, proposalId),
 			],
 		];
+
+		const proposal = this.proposals.get(proposalId);
+		if (proposal?.sourceFilePath) {
+			keyboard.push([
+				this.buildProposalButton('View note', CALLBACK_ACTIONS.proposalViewNote, proposalId),
+			]);
+		}
+
+		return keyboard;
 	}
 
 	private buildProposalButton(
@@ -1268,6 +1282,7 @@ export class FinanceTelegramBridge {
 	}
 
 	private formatReviewQueueDate(value: string): string {
+		console.log('Parsing date for review queue:', value);
 		const date = new Date(value);
 		if (Number.isNaN(date.getTime())) {
 			return value;
@@ -1364,7 +1379,7 @@ export class FinanceTelegramBridge {
 					return { processed: true, answer: 'Pending finance note was not found.' };
 				}
 
-				await this.expenseService.updateTransaction(file, {
+				await this.expenseService.updateTransactionWithFileSync(file, {
 					...proposal.data,
 					status: 'recorded',
 				});
@@ -1455,6 +1470,32 @@ export class FinanceTelegramBridge {
 			'This item is already saved in the vault as pending approval. Confirm to mark it as recorded.',
 		);
 		return { processed: true, answer: null };
+	}
+
+	private async sendProposalNotePreview(proposalId: string): Promise<TelegramHandlerResult> {
+		if (!this.api) {
+			return { processed: true, answer: 'Telegram integration is not available.' };
+		}
+
+		const proposal = this.proposals.get(proposalId);
+		if (!proposal) {
+			return { processed: true, answer: 'Finance proposal expired. Start capture again.' };
+		}
+		if (!proposal.sourceFilePath) {
+			return { processed: true, answer: 'This proposal has not been saved as a note yet.' };
+		}
+
+		const file = this.app.vault.getAbstractFileByPath(proposal.sourceFilePath);
+		if (!(file instanceof TFile)) {
+			return { processed: true, answer: 'Finance note was not found.' };
+		}
+
+		const content = await this.app.vault.cachedRead(file);
+		await this.api.sendMessage(this.formatProposalNotePreview(proposal, file, content));
+		return {
+			processed: true,
+			answer: null,
+		};
 	}
 
 	private async beginProposalDateFlow(
@@ -1738,6 +1779,40 @@ export class FinanceTelegramBridge {
 
 	private getSelectorButtonLabel(label: string, selected: boolean): string {
 		return selected ? `[x] ${label}` : label;
+	}
+
+	private formatProposalNotePreview(
+		proposal: PendingFinanceProposal,
+		file: TFile,
+		content: string,
+	): string {
+		const body = this.stripYamlFrontmatter(content).trim();
+		const lines = [
+			'Finance note preview',
+			`File: ${file.path}`,
+			`Status: ${proposal.data.status ?? 'recorded'}`,
+			`Date: ${proposal.data.dateTime}`,
+			`Description: ${proposal.data.description}`,
+			`Artifact: ${proposal.data.artifact ?? 'not set'}`,
+		];
+
+		if (body) {
+			lines.push('', 'Current note body:', this.truncateTelegramText(body, 2800));
+		}
+
+		return this.truncateTelegramText(lines.join('\n'), 3800);
+	}
+
+	private stripYamlFrontmatter(content: string): string {
+		return content.replace(/^---\n[\s\S]*?\n---\n?/, '');
+	}
+
+	private truncateTelegramText(value: string, maxLength: number): string {
+		if (value.length <= maxLength) {
+			return value;
+		}
+
+		return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 	}
 
 	private getProposalFieldLabel(field: SelectorField): string {

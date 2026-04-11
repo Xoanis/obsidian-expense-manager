@@ -74,6 +74,8 @@ async function runBundledTypeScriptTests() {
 	);
 	const entryPoints = [
 		path.resolve(process.cwd(), 'tests', 'email-finance-regressions.ts'),
+		path.resolve(process.cwd(), 'tests', 'email-finance-sync-state.ts'),
+		path.resolve(process.cwd(), 'tests', 'email-sync-telegram-notification.ts'),
 		path.resolve(process.cwd(), 'tests', 'receipt-qr-reconstruction.ts'),
 	];
 	const program = ts.createProgram({
@@ -93,7 +95,10 @@ async function runBundledTypeScriptTests() {
 			`${path.basename(entryPoint, '.ts')}.js`,
 		);
 		delete require.cache[require.resolve(outfile)];
-		require(outfile);
+		const loadedModule = require(outfile);
+		if (typeof loadedModule?.default === 'function') {
+			await loadedModule.default();
+		}
 	}
 }
 
