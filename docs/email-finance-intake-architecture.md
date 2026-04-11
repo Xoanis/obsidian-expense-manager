@@ -4,7 +4,7 @@ This document explains the current email finance intake implementation as code-l
 
 The main idea of the current design is:
 
-`mail sync -> coarse filter -> parser chain -> message planning -> finance proposal extraction -> merge -> pending-approval / needs-attention note`
+`mail sync -> coarse filter -> parser chain -> message planning -> finance proposal extraction -> duplicate check -> pending-approval / needs-attention / duplicate note`
 
 The current implementation supports:
 
@@ -18,6 +18,10 @@ The current implementation supports:
 - deterministic text-based PDF preflight before AI fallback
 - `pending-approval` transaction notes that stay out of analytics until approval
 - `needs-attention` transaction notes for emails that looked finance-related but did not yield a valid proposal
+- `duplicate` transaction notes instead of silent duplicate drops
+- rebuild of an email-derived transaction from saved source identity
+- dedicated Obsidian duplicate merge workflow
+- configurable rejected-item retention policy for review notes
 - Telegram review of pending email proposals through `/finance_review`
 - optional Telegram notifications when sync creates new pending-approval notes
 - parser-attempt diagnostics in runtime logs
@@ -36,9 +40,13 @@ Current state after the latest live mailbox iteration:
 - text-based PDF receipts can now succeed without AI when local PDF extraction yields enough fiscal text
 - timestamp extraction is now more resilient when the authoritative receipt time lives in raw HTML attributes or in text-based PDF timestamps with seconds
 - manual review ergonomics improved:
+  - manual Obsidian entry now supports explicit date/time editing and save-as-draft
   - pending notes can be previewed from Telegram review before confirmation
   - note filename and dated folder placement can be re-synced from frontmatter after manual edits
   - Telegram confirmation of edited pending notes uses the same storage-sync path
+  - duplicate candidates now remain visible as notes and can be merged in a dedicated Obsidian modal
+  - email-derived notes can be rebuilt later from `email_msg_id`
+- rejected review notes are now governed by policy instead of a hardcoded delete-only path
 - the main intentionally open gap remains auth-gated Ozon receipt retrieval
 
 The biggest architectural lesson from this iteration is:
@@ -603,7 +611,7 @@ Important routing nuance:
   - attempt deterministic fiscal reconstruction from PDF text, optionally combined with caption context
   - only then allow AI fallback if needed and configured
 
-## 10. Pending Proposal Persistence
+## 10. Proposal Persistence And Review States
 
 ```mermaid
 flowchart TD
@@ -613,12 +621,15 @@ flowchart TD
     C --> E["PendingFinanceProposalService"]
     D --> E
     E --> F{"Any valid proposal left?"}
-    F -->|"Yes"| G["Write pending-approval note(s)"]
     F -->|"No"| H["Write needs-attention note"]
-    G --> I["ExpenseService.createTransaction()"]
-    H --> I
-    I --> J["Optional artifact persistence"]
-    J --> K["Transaction file in vault"]
+    F -->|"Yes"| G{"Duplicate match?"}
+    G -->|"No"| I["Write pending-approval note(s)"]
+    G -->|"Yes"| J["Write duplicate note(s)<br/>status=duplicate<br/>duplicate_of=[[original]]"]
+    H --> K["ExpenseService.createTransaction()"]
+    I --> K
+    J --> K
+    K --> L["Optional artifact persistence"]
+    L --> M["Transaction file in vault"]
 ```
 
 Tag normalization currently removes transport-level leftovers such as:
@@ -629,28 +640,40 @@ Tag normalization currently removes transport-level leftovers such as:
 - `api`
 - `pdf`
 
+Current review-specific persistence behavior:
+
+- pending proposals become normal finance notes with status `pending-approval`
+- likely duplicates are stored instead of discarded and get `status: duplicate`
+- duplicate notes keep a `duplicate_of` link to the original transaction
+- email-derived notes store `email_msg_id`, `email_provider`, and `email_mailbox_scope` in frontmatter
+- rejected saved notes can either be archived with status `rejected` or deleted immediately, depending on settings
+
 ## 11. Transaction Lifecycle
 
 ```mermaid
 stateDiagram-v2
     [*] --> Pending : email sync creates proposal note
     [*] --> NeedsAttention : email passed filter but no valid proposal extracted
+    [*] --> Duplicate : duplicate match during sync or manual save
     Pending : status = pending-approval
     NeedsAttention : status = needs-attention
+    Duplicate : status = duplicate
     Pending --> Recorded : confirmed in Obsidian or /finance_review
-    Pending --> Archived : rejected / archived in review flow
+    Pending --> Rejected : rejected and retained by policy
     NeedsAttention --> Pending : user or future parser resolves candidate
-    NeedsAttention --> Archived : user archives note
+    NeedsAttention --> Rejected : rejected and retained by policy
+    Duplicate --> Recorded : merged back into original note
+    Duplicate --> Rejected : rejected and retained by policy
     Recorded : status = recorded
-    Recorded --> Archived : future archive flow
-    Archived : status = archived
+    Rejected : status = rejected
 ```
 
 Current reporting rule:
 
 - analytics and reports read `recorded` transactions by default
 - duplicate detection checks both `recorded` and `pending-approval`
-- `needs-attention` notes stay out of analytics and do not block future real transaction creation
+- `pending-approval`, `needs-attention`, `duplicate`, and `rejected` notes stay out of analytics
+- when rejected retention is disabled, rejection ends in immediate deletion rather than a terminal stored note
 
 ## 12. Sync State Model
 
@@ -706,6 +729,8 @@ Architectural implication:
   - settings UI, command registration, sync service creation
 - [sync-finance-emails.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/commands/sync-finance-emails.ts)
   - command wiring
+- [rebuild-current-email-transaction.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/commands/rebuild-current-email-transaction.ts)
+  - rebuild command wiring for email-derived transaction notes
 - [email-finance-sync-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/sync/email-finance-sync-service.ts)
   - orchestration
 - [finance-mail-provider.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/transport/finance-mail-provider.ts)
@@ -723,7 +748,13 @@ Architectural implication:
 - [telegram-email-sync-notification-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/telegram-email-sync-notification-service.ts)
   - optional Telegram notification delivery after successful syncs that created new pending review items
 - [expense-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/expense-service.ts)
-  - persistence, duplicate checks, transaction reads
+  - persistence, duplicate checks, transaction reads, rebuild updates, and rejected-note archiving helpers
+- [duplicate-merge-workflow-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/duplicate-merge-workflow-service.ts)
+  - compare/merge orchestration for original vs duplicate transaction notes
+- [finance-review-workflow-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/finance-review-workflow-service.ts)
+  - shared reject-policy orchestration for saved review notes
+- [duplicate-merge-modal.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/ui/duplicate-merge-modal.ts)
+  - Obsidian-first UI for resolving duplicate notes safely
 
 ## 15. Recommended File Split
 
@@ -789,8 +820,9 @@ Practical recommendation:
 - text-based PDF receipts are now much better covered, but scanned/image-only PDFs still remain outside the current deterministic path
 - auth-gated receipt families such as Ozon still need either browser-assisted flow or an authenticated bridge
 - merge heuristics are intentionally simple for now: type + currency + amount + near dateTime
-- one message can produce many pending notes, but there is not yet a dedicated review UI for them
-- Telegram review exists through `/finance_review`, but email-sync notifications still point to the queue rather than to exact proposal note ids
+- queue and duplicate-merge UIs now exist, but there is still no single unified Obsidian workspace that combines all review actions in one surface
+- Telegram review exists through `/finance_review`, but duplicate merge in Telegram is intentionally triage-only and hands off to Obsidian for the actual merge
+- email-sync notifications still point to the queue rather than to exact proposal note ids
 - parser diagnostics are now much better, but some vendor-specific failures still require reading raw message artifacts and runtime trace together
 
 Captured follow-up backlog from the latest stabilization pass:

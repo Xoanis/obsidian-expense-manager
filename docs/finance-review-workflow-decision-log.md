@@ -234,6 +234,26 @@ Implications:
 - the first implementation priority is the Obsidian modal and workflow
 - Telegram duplicate merge can be added incrementally without blocking the main merge release
 
+### Decision 13. Rejected archives use a predictable folder under the transactions root
+
+Accepted:
+
+- when rejected-note retention is enabled, rejected notes are moved into:
+  - `<transactions-root>/Archive/Rejected/YYYY/MM`
+- archive placement is derived automatically from the existing transactions root
+- a separate custom archive-path setting is not added in this iteration
+
+Why:
+
+- the archive location should be easy to predict and debug
+- a fixed convention keeps the first implementation smaller and avoids another path-setting surface
+
+Implications:
+
+- standalone storage archives under the configured finance folder
+- PARA-managed storage archives under the managed transactions root
+- custom archive roots can be added later without changing the reject-policy semantics
+
 ## Planned implementation order
 
 1. Foundation: statuses, metadata fields, frontmatter persistence, validation.

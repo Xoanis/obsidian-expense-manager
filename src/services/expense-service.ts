@@ -20,11 +20,12 @@ import { getPluginLogger } from '../utils/plugin-debug-log';
 import { 
 	generateFrontmatter, 
 	generateContentBody, 
-	parseFrontmatter,
 	parseYamlFrontmatter,
 	parseDetailsFromContent,
 	generateFilename,
+	generateYamlFrontmatterRecord,
 	parseSourceContextFromContent,
+	stripYamlFrontmatter,
 	upsertItemsSection,
 } from '../utils/frontmatter';
 import {
@@ -402,6 +403,28 @@ export class ExpenseService {
 		await this.validateLinkedContext(storageData);
 		await this.app.vault.modify(file, content);
 		return this.renameAndRelocateTransactionFile(file, storageData);
+	}
+
+	async archiveTransactionAsRejected(file: TFile): Promise<TFile> {
+		const transaction = await this.parseTransactionFile(file);
+		if (!transaction) {
+			throw new Error('Could not parse transaction frontmatter from the selected note.');
+		}
+
+		const content = await this.app.vault.cachedRead(file);
+		const frontmatter = parseYamlFrontmatter(content);
+		if (!frontmatter) {
+			throw new Error('Could not parse note frontmatter from the selected note.');
+		}
+
+		frontmatter.status = 'rejected';
+		const body = stripYamlFrontmatter(content).trim();
+		const nextContent = `${generateYamlFrontmatterRecord(frontmatter)}${body ? `${body}\n` : ''}`;
+		await this.app.vault.modify(file, nextContent);
+
+		const targetFolder = await this.ensureFolderPath(this.getRejectedArchiveFolderPath(transaction.dateTime));
+		const desiredName = generateFilename(transaction);
+		return this.moveFileToTargetPath(file, targetFolder, desiredName);
 	}
 
 	/**
@@ -1978,6 +2001,14 @@ export class ExpenseService {
 	): Promise<TFile> {
 		const targetFolder = await this.ensureFolderPath(this.getTransactionFolderPath(data.dateTime));
 		const desiredName = generateFilename(data);
+		return this.moveFileToTargetPath(file, targetFolder, desiredName);
+	}
+
+	private async moveFileToTargetPath(
+		file: TFile,
+		targetFolder: string,
+		desiredName: string,
+	): Promise<TFile> {
 		const desiredPath = normalizePath(`${targetFolder}/${desiredName}`);
 		const currentPath = normalizePath(file.path);
 		if (currentPath === desiredPath) {
@@ -2459,6 +2490,12 @@ export class ExpenseService {
 		const root = this.financeDomain
 			? this.financeDomain.attachmentsPath ?? this.financeDomain.recordsPath
 			: `${this.settings.expenseFolder}/Artifacts`;
+		const { year, month } = this.resolveStorageDateParts(date);
+		return `${root}/${year}/${month}`;
+	}
+
+	private getRejectedArchiveFolderPath(date?: string): string {
+		const root = normalizePath(`${this.getTransactionsRootPath()}/Archive/Rejected`);
 		const { year, month } = this.resolveStorageDateParts(date);
 		return `${root}/${year}/${month}`;
 	}

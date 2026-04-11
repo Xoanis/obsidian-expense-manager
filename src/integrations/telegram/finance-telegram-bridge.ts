@@ -1,6 +1,10 @@
 import { App, TFile } from 'obsidian';
 import { DuplicateTransactionMatch, ExpenseService } from '../../services/expense-service';
 import { DuplicateMergeSession, DuplicateMergeWorkflowService } from '../../services/duplicate-merge-workflow-service';
+import {
+	FinanceReviewWorkflowService,
+	RejectedReviewDisposition,
+} from '../../services/finance-review-workflow-service';
 import { ReportSyncService } from '../../services/report-sync-service';
 import {
 	TelegramChartService,
@@ -117,6 +121,7 @@ export class FinanceTelegramBridge {
 		private readonly reportSyncService: ReportSyncService,
 		private readonly telegramChartService: TelegramChartService,
 		private readonly financeIntakeService: FinanceIntakeService,
+		private readonly financeReviewWorkflowService: FinanceReviewWorkflowService,
 		private readonly settings: ExpenseManagerSettings,
 	) {
 		this.api = getTelegramBotApi(app);
@@ -1542,30 +1547,48 @@ export class FinanceTelegramBridge {
 			return { processed: true, answer: 'Finance proposal already expired.' };
 		}
 
-		this.proposals.delete(proposalId);
-		if (proposal.sourceFilePath) {
-			const file = this.app.vault.getAbstractFileByPath(proposal.sourceFilePath);
-			if (file instanceof TFile) {
-				await this.expenseService.updateTransaction(file, {
-					status: 'archived',
-				});
+		try {
+			this.proposals.delete(proposalId);
+			let storedDisposition: RejectedReviewDisposition | null = null;
+			let missingStoredNote = false;
+
+			if (proposal.sourceFilePath) {
+				const file = this.app.vault.getAbstractFileByPath(proposal.sourceFilePath);
+				if (file instanceof TFile) {
+					const result = await this.financeReviewWorkflowService.rejectStoredReviewItem(file);
+					storedDisposition = result.disposition;
+				} else {
+					missingStoredNote = true;
+				}
 			}
+
+			if (typeof messageId === 'number' && this.api?.editMessage) {
+				await this.api.editMessage(
+					messageId,
+					this.formatProposalMessage(
+						proposal,
+						this.getRejectedProposalMessage(proposal.sourceFilePath, storedDisposition, missingStoredNote),
+					),
+				);
+			}
+
+			if (missingStoredNote) {
+				return {
+					processed: true,
+					answer: 'Pending finance note was not found.',
+				};
+			}
+
+			return {
+				processed: true,
+				answer: this.getRejectedProposalAnswer(proposal.sourceFilePath, storedDisposition),
+			};
+		} catch (error) {
+			return {
+				processed: true,
+				answer: `Error rejecting finance proposal: ${(error as Error).message}`,
+			};
 		}
-		if (typeof messageId === 'number' && this.api?.editMessage) {
-			await this.api.editMessage(
-				messageId,
-				this.formatProposalMessage(
-					proposal,
-					proposal.sourceFilePath
-						? 'Review item archived. Nothing else was written to the vault.'
-						: 'Proposal rejected. Nothing was written to the vault.',
-				),
-			);
-		}
-		return {
-			processed: true,
-			answer: proposal.sourceFilePath ? 'Finance review item archived.' : 'Finance proposal rejected.',
-		};
 	}
 
 	private async saveProposalAsDraft(
@@ -1635,6 +1658,36 @@ export class FinanceTelegramBridge {
 				answer: `Error saving finance draft: ${(error as Error).message}`,
 			};
 		}
+	}
+
+	private getRejectedProposalMessage(
+		sourceFilePath: string | undefined,
+		disposition: RejectedReviewDisposition | null,
+		missingStoredNote: boolean,
+	): string {
+		if (!sourceFilePath) {
+			return 'Proposal rejected. Nothing was written to the vault.';
+		}
+		if (missingStoredNote) {
+			return 'Stored review note was not found. Nothing else was written to the vault.';
+		}
+		if (disposition === 'deleted') {
+			return 'Review item rejected and deleted from the vault.';
+		}
+		return 'Review item rejected and moved to the archive.';
+	}
+
+	private getRejectedProposalAnswer(
+		sourceFilePath: string | undefined,
+		disposition: RejectedReviewDisposition | null,
+	): string {
+		if (!sourceFilePath) {
+			return 'Finance proposal rejected.';
+		}
+		if (disposition === 'deleted') {
+			return 'Finance review item deleted.';
+		}
+		return 'Finance review item rejected and archived.';
 	}
 
 	private async openNextPendingReviewProposal(messageId?: number): Promise<TelegramHandlerResult> {

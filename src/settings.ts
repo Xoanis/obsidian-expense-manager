@@ -126,6 +126,9 @@ export interface ExpenseManagerSettings {
 	/** Show confirmation notice after saving transaction */
 	showConfirmationNotice: boolean;
 
+	/** Archive rejected finance review notes instead of deleting them immediately */
+	archiveRejectedTransactions: boolean;
+
 	/** Keep monthly reports updated automatically */
 	autoMonthlyReports: boolean;
 
@@ -250,6 +253,7 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	dateFormat: 'YYYY-MM-DD HH:mm',
 	enableTelegramIntegration: true,
 	showConfirmationNotice: true,
+	archiveRejectedTransactions: true,
 	autoMonthlyReports: true,
 	autoQuarterlyReports: false,
 	autoHalfYearReports: false,

@@ -13,10 +13,15 @@ The plugin stores every transaction as a note, builds period reports from transa
 
 - create finance records for expenses and income
 - save receipt images and QR-based transactions
+- support proposal-first review flows with `recorded`, `pending-approval`, `needs-attention`, `duplicate`, and `rejected` states
+- save manual records directly or keep them as drafts for later review
 - build monthly, quarterly, half-year, yearly, and custom reports
 - keep report balances cumulative instead of `income - expense` for only one period
 - maintain report notes automatically when transactions change
 - support budgets on report notes
+- sync finance receipts from email and keep source email identity in note frontmatter
+- rebuild older email-derived notes from the original email when extraction logic improves
+- keep duplicate candidates as explicit notes and merge them through a dedicated Obsidian workflow
 - compute budget alerts: `warning`, `forecast`, `critical`
 - show monthly finance reports in Telegram with sections, charts, and month navigation
 - register finance contributions for PARA projects, areas, dashboard, and Telegram cards when PARA Core is available
@@ -90,6 +95,10 @@ Use:
 - `Add finance record`
 
 The unified command accepts structured finance text, signed amounts, raw receipt QR text, and can switch to receipt image capture from the same flow.
+The Obsidian review modal now also lets you:
+- choose an explicit transaction date and time
+- `Save record` immediately
+- `Save as draft` and continue review later from the queue
 
 ### 3. Generate reports
 
@@ -111,7 +120,10 @@ It also moves legacy flat transaction notes into the dated `YYYY/MM` layout.
 | Command | What it does |
 |---|---|
 | `Add finance record` | Create a finance record from text, signed input, QR text, or receipt image |
+| `Open finance review queue` | Open the review note for `pending-approval`, `needs-attention`, and `duplicate` finance notes |
+| `Open duplicate merge queue` | Open the dedicated Obsidian modal for resolving duplicate finance notes |
 | `Sync finance emails` | Run the email finance sync pipeline and create pending-approval notes from provider messages |
+| `Rebuild current email transaction` | Re-fetch the source email by saved identity and rebuild the current email-derived transaction note |
 | `Sync current finance note filename and folder` | Rebuild the current finance note file name and dated folder placement from its frontmatter |
 | `Open current month finance report` | Open the current month report in a modal |
 | `Save current month finance report` | Save the current month report note to the vault |
@@ -145,7 +157,7 @@ You can also start an explicit finance capture without inline args:
 Current Telegram finance intake is `proposal-first`:
 - the explicit command opens finance mode
 - the next text, QR receipt image, or text-based PDF finance document is parsed into a proposed transaction
-- the bot shows `Confirm`, `Reject`, `Set category`, `Edit date`, `Edit description`, `Set project`, and `Set area`
+- the bot shows `Confirm`, `Save draft`, `Reject`, `Set category`, `Edit date`, `Edit description`, `Set project`, and `Set area`
 - the transaction is written to the vault only after `Confirm`
 - when the proposal already comes from a saved pending note, Telegram also shows `View note` so you can inspect the current note body and linked artifact before confirming
 
@@ -184,6 +196,14 @@ Current PNG charts:
 - `Year trend`
 - `Balance trend`
 
+### Review queue
+
+`/finance_review` now acts as a cross-channel review surface:
+
+- pending and needs-attention items can still be confirmed, edited, rejected, or kept as draft
+- duplicate items are visible from Telegram review, but Telegram duplicate handling is intentionally safe and limited
+- complex duplicate merge stays Obsidian-first and points you to `Open duplicate merge queue`
+
 ## Experimental email intake bridge
 
 The plugin now includes the first end-to-end email intake pipeline:
@@ -191,7 +211,7 @@ The plugin now includes the first end-to-end email intake pipeline:
 - manual sync command
 - coarse include/exclude filtering
 - message planning into text, image, and PDF intake units
-- creation of `pending-approval` finance notes
+- creation of `pending-approval`, `needs-attention`, and `duplicate` finance notes
 
 Current provider option:
 
@@ -265,8 +285,13 @@ Current behavior:
 - image attachments go through the receipt route
 - PDF attachments go through the PDF AI route
 - text-only emails go through the text AI route
-- created notes are saved with status `pending-approval`
+- created notes persist stable email identity in frontmatter:
+  - `email_msg_id`
+  - `email_provider`
+  - `email_mailbox_scope`
+- created notes are saved with status `pending-approval`, `needs-attention`, or `duplicate` depending on extraction and duplicate checks
 - pending notes do not affect reports or analytics until approved
+- duplicate notes also stay out of analytics until resolved
 - receipt date/time extraction is now more robust for:
   - raw HTML markup that carries a timestamp in attributes such as `<time datetime="...">`
   - text-based PDF receipts that expose labeled timestamps or timestamps with seconds
@@ -276,10 +301,14 @@ Current behavior:
 
 Current manual review helpers:
 
-- review pending and needs-attention queues in Obsidian or through `/finance_review`
+- review pending, needs-attention, and duplicate queues in Obsidian or through `/finance_review`
+- open `Open finance review queue` for a note-based queue view inside Obsidian
+- open `Open duplicate merge queue` for side-by-side duplicate merge with field-level conflict resolution
+- use `Rebuild current email transaction` on an email-derived note to re-fetch the source email and rebuild the note with newer extraction logic
 - use `Sync current finance note filename and folder` after editing `dateTime`, type, amount, or description in a saved note
 - confirm edited pending notes from Telegram and keep note placement synced with the updated transaction metadata
 - use Telegram `View note` on pending proposals to inspect the saved note body and linked artifact before confirming
+- rejected review items can either be archived under the transactions root or deleted immediately, depending on plugin settings
 
 ## Data model
 
@@ -298,6 +327,7 @@ Typical fields:
 ```yaml
 ---
 type: "finance-expense"
+status: "recorded"
 dateTime: 2026-03-25T21:30:00.000Z
 amount: 1250
 currency: "RUB"
@@ -314,6 +344,21 @@ tags: ["finance","expense","telegram"]
 The body is intentionally small. It keeps only useful structured additions such as:
 - `Items`
 - `Artifact`
+- `Source Context`
+
+Current lifecycle statuses:
+
+- `recorded`
+- `pending-approval`
+- `needs-attention`
+- `duplicate`
+- `rejected`
+
+Additional structured frontmatter used by the current review workflows:
+
+- email-derived notes can store `email_msg_id`, `email_provider`, and `email_mailbox_scope`
+- duplicate notes store `duplicate_of` pointing to the original transaction
+- rejected notes kept for audit remain excluded from analytics because they use status `rejected`
 
 When `obsidian-para-core` is enabled, receipt artifacts are stored under
 `Attachments/Finance/YYYY/MM/` and linked back from the transaction note.
@@ -451,6 +496,8 @@ Internal service interaction and the updated Telegram finance intake flow are do
 - [docs/service-architecture.md](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/docs/service-architecture.md)
 - [docs/email-finance-intake-architecture.md](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/docs/email-finance-intake-architecture.md)
 - [docs/ai-finance-intake-provider.md](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/docs/ai-finance-intake-provider.md)
+- [docs/finance-review-workflow-decision-log.md](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/docs/finance-review-workflow-decision-log.md)
+- [docs/finance-workflow-iteration-summary-2026-04-11.md](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/docs/finance-workflow-iteration-summary-2026-04-11.md)
 
 ## Development
 
@@ -523,6 +570,11 @@ Already implemented:
 - standalone finance tracking
 - PARA Core domain integration
 - Telegram integration
+- manual Obsidian date/time editing and save-as-draft flow
+- proposal-first review queue across Obsidian, Telegram, and email intake
+- email-derived transaction rebuild from persisted source identity
+- explicit duplicate notes with merge workflow in Obsidian
+- configurable rejected-item retention policy
 - monthly Telegram reports with navigation and PNG charts
 - automatic report sync
 - cumulative balances
@@ -554,10 +606,11 @@ Not implemented yet:
 
 ## Backlog
 
-Captured follow-up ideas from the 2026-04-11 stabilization iteration:
+Current follow-up ideas after the completed finance workflow iteration:
 
 - suggest or automate file-name and folder sync immediately after manual pending-note edits, so the user does not need to run the sync command separately
 - make Telegram pending-note preview richer by splitting note body, source context, and artifact references into clearer sections and eventually deep-linking to the exact note
+- add a broader Obsidian-first review workspace that unifies pending, needs-attention, duplicate, and rebuild-oriented actions in one place
 
 ## License
 

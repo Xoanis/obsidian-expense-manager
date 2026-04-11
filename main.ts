@@ -42,6 +42,7 @@ import { MigrationService } from './src/services/migration-service';
 import { FinanceIntakeService } from './src/services/finance-intake-service';
 import { ReceiptEnrichmentService } from './src/services/receipt-enrichment-service';
 import { DuplicateMergeWorkflowService } from './src/services/duplicate-merge-workflow-service';
+import { FinanceReviewWorkflowService } from './src/services/finance-review-workflow-service';
 import { EmailFinanceSyncService } from './src/email-finance/sync/email-finance-sync-service';
 import { EmailFinanceSyncStateStore } from './src/email-finance/sync/email-finance-sync-state-store';
 import { PendingFinanceProposalService } from './src/email-finance/review/pending-finance-proposal-service';
@@ -82,6 +83,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private financeIntakeService!: FinanceIntakeService;
 	private receiptEnrichmentService!: ReceiptEnrichmentService;
 	private duplicateMergeWorkflowService!: DuplicateMergeWorkflowService;
+	private financeReviewWorkflowService!: FinanceReviewWorkflowService;
 	private emailFinanceSyncService!: EmailFinanceSyncService;
 	private pendingFinanceProposalService!: PendingFinanceProposalService;
 	private logger: PluginLogger = new ConsolePluginLogger('Expense Manager');
@@ -114,6 +116,10 @@ export default class ExpenseManagerPlugin extends Plugin {
 		});
 		this.receiptEnrichmentService = new ReceiptEnrichmentService(this.app, this.settings);
 		this.duplicateMergeWorkflowService = new DuplicateMergeWorkflowService(this.app, this.expenseService);
+		this.financeReviewWorkflowService = new FinanceReviewWorkflowService(
+			this.expenseService,
+			() => this.settings,
+		);
 		this.pendingFinanceProposalService = new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency);
 		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
 		this.registerParaCoreTelegramCardContributions();
@@ -209,6 +215,10 @@ export default class ExpenseManagerPlugin extends Plugin {
 		});
 		this.receiptEnrichmentService = new ReceiptEnrichmentService(this.app, this.settings);
 		this.duplicateMergeWorkflowService = new DuplicateMergeWorkflowService(this.app, this.expenseService);
+		this.financeReviewWorkflowService = new FinanceReviewWorkflowService(
+			this.expenseService,
+			() => this.settings,
+		);
 		this.pendingFinanceProposalService = new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency);
 		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
 		this.registerParaCoreTelegramCardContributions();
@@ -775,6 +785,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 				this.reportSyncService,
 				this.telegramChartService,
 				this.financeIntakeService,
+				this.financeReviewWorkflowService,
 				this.settings,
 			);
 			if (!this.financeTelegramBridge.register()) {
@@ -996,6 +1007,18 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.showConfirmationNotice)
 				.onChange(async (value) => {
 					this.plugin.settings.showConfirmationNotice = value;
+					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createEl('h3', { text: 'Review workflow' });
+
+		new Setting(containerEl)
+			.setName('Archive rejected review items')
+			.setDesc('Keep rejected review notes in a dedicated archive folder with status rejected instead of deleting them immediately.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.archiveRejectedTransactions)
+				.onChange(async (value) => {
+					this.plugin.settings.archiveRejectedTransactions = value;
 					await this.plugin.saveSettings();
 				}));
 

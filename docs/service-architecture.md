@@ -4,7 +4,7 @@ This document describes the current runtime structure of `obsidian-expense-manag
 
 The main architectural rule for the current iteration is:
 
-`explicit Telegram intent -> proposal creation -> human confirmation -> vault write`
+`capture or sync -> proposal or duplicate note -> explicit review transition -> vault write or update`
 
 ## Current Runtime View
 
@@ -12,13 +12,21 @@ The main architectural rule for the current iteration is:
 flowchart TD
     U["User"] --> TG["Telegram Bot Plugin"]
 TG --> BR["FinanceTelegramBridge<br/>commands, callbacks, focused input"]
+    U --> OB["Obsidian commands and modals"]
     BR --> FI["FinanceIntakeService<br/>routing + proposal creation"]
     FI --> RP["RuleBasedFinanceIntakeProvider<br/>structured text + QR-first receipts"]
     FI --> AP["AiFinanceIntakeProvider<br/>free-form text + image + text-based PDF normalization"]
     AP --> DX["DocumentExtractionService<br/>pdf.js text extraction only"]
     AP --> AI["AI chat/completions endpoint"]
     RP --> QR["ProverkaChekaClient"]
+    BR --> RW["FinanceReviewWorkflowService<br/>reject-policy transitions"]
+    OB --> DM["DuplicateMergeModal<br/>field-level merge UI"]
+    DM --> DW["DuplicateMergeWorkflowService<br/>compare + merge orchestration"]
+    OB --> EM["ExpenseModal<br/>date/time + save-as-draft"]
     BR --> ES["ExpenseService<br/>validation + persistence + finance rendering"]
+    RW --> ES
+    DW --> ES
+    EM --> ES
     ES --> VA["Obsidian Vault"]
     ES --> RS["ReportSyncService"]
     ES --> DV["DataviewJS host blocks<br/>reports + dashboard"]
@@ -37,6 +45,7 @@ class FinanceTelegramBridge {
       +collect focused input
       +render confirmation UI
       +apply edits
+      +open review queue
     }
 
     class FinanceIntakeService {
@@ -86,14 +95,28 @@ class FinanceTelegramBridge {
 
     class ExpenseService {
       +createTransaction()
+      +createDuplicateTransaction()
       +validate linked context
       +attach artifact
+      +archiveTransactionAsRejected()
       +renderReportSection()
       +renderFinanceDashboard()
     }
 
+    class DuplicateMergeWorkflowService {
+      +buildSession()
+      +mergeSession()
+    }
+
+    class FinanceReviewWorkflowService {
+      +rejectStoredReviewItem()
+    }
+
 FinanceTelegramBridge --> FinanceIntakeService
 FinanceTelegramBridge --> ExpenseService
+FinanceTelegramBridge --> FinanceReviewWorkflowService
+    DuplicateMergeWorkflowService --> ExpenseService
+    FinanceReviewWorkflowService --> ExpenseService
     FinanceIntakeService --> RuleBasedFinanceIntakeProvider
     FinanceIntakeService --> AiFinanceIntakeProvider
     FinanceIntakeService --> FinanceIntakeTypes
@@ -145,6 +168,27 @@ Important current limitation:
 - only `text-based PDF` is supported
 - scanned, image-only, or otherwise textless PDF is rejected explicitly
 
+## Review Workflow Layer
+
+The plugin now has a clearer split between persistence and workflow transitions:
+
+- `ExpenseService`
+  - owns transaction parsing, note writes, duplicate creation, file-name/date-folder sync, and rejected-note archive helpers
+- `DuplicateMergeWorkflowService`
+  - builds a compare session between original and duplicate notes
+  - resolves hidden service metadata automatically
+  - updates the surviving note and deletes the duplicate after merge
+- `FinanceReviewWorkflowService`
+  - applies reject policy for already-saved review notes
+  - archives rejected notes with status `rejected` or deletes them immediately, depending on settings
+- `ExpenseModal`
+  - covers manual Obsidian review with explicit `dateTime` editing and `Save as draft`
+- `DuplicateMergeModal`
+  - is the Obsidian-first UI for duplicate resolution
+  - keeps service-managed fields out of the manual merge surface
+
+This keeps `ExpenseService` focused on storage and lets higher-level review rules evolve without overloading the persistence layer.
+
 ## Telegram Finance Flow
 
 ```mermaid
@@ -165,12 +209,23 @@ participant Bridge as FinanceTelegramBridge
     Intake->>Provider: extract TransactionData
     Provider-->>Intake: proposal or explicit failure
     Intake-->>Bridge: proposal data
-    Bridge-->>User: Confirm / Reject / Edit description / Edit date / Set category / Set project / Set area
-    User->>Bridge: Confirm
-    Bridge->>Expense: createTransaction()
-    Expense->>Vault: save note + artifact
-    Expense-->>Bridge: saved transaction
-    Bridge-->>User: success message
+    Bridge-->>User: Confirm / Save draft / Reject / Edit description / Edit date / Set category / Set project / Set area
+    alt Confirm
+        User->>Bridge: Confirm
+        Bridge->>Expense: createTransaction() or updateTransactionWithFileSync()
+        Expense->>Vault: save note + artifact
+        Expense-->>Bridge: saved transaction
+        Bridge-->>User: success message
+    else Save draft
+        User->>Bridge: Save draft
+        Bridge->>Expense: createTransaction(status=pending-approval) or update existing review note
+        Bridge-->>User: kept in review queue
+    else Reject
+        User->>Bridge: Reject
+        Bridge->>FinanceReviewWorkflowService: rejectStoredReviewItem() when note already exists
+        FinanceReviewWorkflowService->>Expense: archive or delete by policy
+        Bridge-->>User: rejected message
+    end
 ```
 
 Artifact storage convention:
@@ -265,7 +320,15 @@ The current design prefers:
 - [ai-finance-intake-provider.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/ai-finance-intake-provider.ts)
   - AI-backed extraction flow
 - [expense-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/expense-service.ts)
-  - transaction persistence, report calculations, compact report-note rendering, and dashboard rendering API
+  - transaction persistence, duplicate note creation, rejected-note archive helpers, report calculations, compact report-note rendering, and dashboard rendering API
+- [duplicate-merge-workflow-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/duplicate-merge-workflow-service.ts)
+  - duplicate compare/merge orchestration above persistence
+- [finance-review-workflow-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/services/finance-review-workflow-service.ts)
+  - reject-policy orchestration above persistence
+- [expense-modal.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/ui/expense-modal.ts)
+  - manual Obsidian review UI with explicit date/time editing and `Save as draft`
+- [duplicate-merge-modal.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/ui/duplicate-merge-modal.ts)
+  - Obsidian UI for field-level duplicate merging
 - [register-template-contributions.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/integrations/para-core/register-template-contributions.ts)
   - thin PARA template and dashboard host blocks
 
@@ -276,5 +339,6 @@ The current architecture is intentionally conservative.
 The next evolution should happen only if it is justified by real usage:
 
 - improve AI proposal quality inside the existing boundaries
-- keep Telegram confirmation UX as the stable control point
+- keep Telegram confirmation UX as the stable control point while leaving high-context duplicate merge in Obsidian
+- consider a broader Obsidian-first review workspace that unifies queue, rebuild, duplicate merge, and reject actions
 - revisit OCR/scanned-PDF support only as a separate, clearly scoped iteration
