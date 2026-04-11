@@ -36,7 +36,7 @@ export class ManualHandler extends BaseHandler {
 			modal.onComplete = (data: TransactionData) => {
 				resolve({
 					success: true,
-					data
+					data,
 				});
 			};
 

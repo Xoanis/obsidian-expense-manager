@@ -290,6 +290,7 @@ export class EmailFinanceSyncService {
 					proposal: {
 						...proposal,
 						source: 'email',
+						...this.buildEmailSourceMetadata(message),
 					},
 				});
 			} catch (error) {
@@ -326,6 +327,7 @@ export class EmailFinanceSyncService {
 					message,
 					reason: this.buildConflictingProposalsReason(conflict),
 					sourceContext,
+					...this.buildEmailSourceMetadata(message),
 					...this.getBestMessageArtifactFields(message, sourceContext),
 				});
 				createdNeedsAttentionNotes += 1;
@@ -384,6 +386,7 @@ export class EmailFinanceSyncService {
 					message,
 					reason: this.buildNeedsAttentionReason(units, failureMessages),
 					sourceContext,
+					...this.buildEmailSourceMetadata(message),
 					...this.getBestMessageArtifactFields(message, sourceContext),
 				});
 				createdNeedsAttentionNotes += 1;
@@ -1223,6 +1226,18 @@ export class EmailFinanceSyncService {
 		}
 
 		return details;
+	}
+
+	private buildEmailSourceMetadata(
+		message: FinanceMailMessage,
+	): Pick<TransactionData, 'emailMessageId' | 'emailProvider' | 'emailMailboxScope'> {
+		const settings = this.getSettings();
+		const mailboxScope = settings.emailFinanceMailboxScope.trim();
+		return {
+			emailMessageId: message.id,
+			emailProvider: settings.emailFinanceProvider,
+			emailMailboxScope: mailboxScope || undefined,
+		};
 	}
 
 	private getBodyPreview(message: FinanceMailMessage): string {

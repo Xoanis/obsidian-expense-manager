@@ -22,6 +22,10 @@ interface FinanceTransactionFrontmatter {
 	source: string;
 	artifact?: string | null;
 	tags: string[];
+	email_msg_id?: string;
+	email_provider?: string;
+	email_mailbox_scope?: string;
+	duplicate_of?: string | null;
 	fn?: string;
 	fd?: string;
 	fp?: string;
@@ -72,7 +76,7 @@ function createFinanceTransactionNoteType(
 		folderKey: TRANSACTIONS_FOLDER_KEY,
 		fileNameStrategy: 'title',
 		requiredFields: ['type', 'status', 'domain', 'created', 'dateTime', 'amount', 'currency', 'description', 'source', 'tags'],
-		allowedStatuses: ['recorded', 'pending-approval', 'needs-attention', 'archived'] as const,
+		allowedStatuses: ['recorded', 'pending-approval', 'needs-attention', 'duplicate', 'rejected', 'archived'] as const,
 		defaultFrontmatter: (date, timestamp) => ({
 			type,
 			status: 'recorded',
@@ -205,6 +209,38 @@ function validateFinanceTransactionFrontmatter(
 
 	if (frontmatter.artifact !== null && frontmatter.artifact !== undefined && !isWikiLink(frontmatter.artifact)) {
 		issues.push(createIssue('invalid-finance-artifact-link', 'Finance transaction "artifact" should be a wiki-link like [[Receipt]].', 'warning'));
+	}
+
+	if (
+		frontmatter.email_msg_id !== undefined
+		&& frontmatter.email_msg_id !== null
+		&& !isNonEmptyString(frontmatter.email_msg_id)
+	) {
+		issues.push(createIssue('invalid-finance-email-msg-id', 'Finance transaction "email_msg_id" must be a non-empty string when present.'));
+	}
+
+	if (
+		frontmatter.email_provider !== undefined
+		&& frontmatter.email_provider !== null
+		&& !isNonEmptyString(frontmatter.email_provider)
+	) {
+		issues.push(createIssue('invalid-finance-email-provider', 'Finance transaction "email_provider" must be a non-empty string when present.'));
+	}
+
+	if (
+		frontmatter.email_mailbox_scope !== undefined
+		&& frontmatter.email_mailbox_scope !== null
+		&& !isNonEmptyString(frontmatter.email_mailbox_scope)
+	) {
+		issues.push(createIssue('invalid-finance-email-mailbox-scope', 'Finance transaction "email_mailbox_scope" must be a non-empty string when present.'));
+	}
+
+	if (
+		frontmatter.duplicate_of !== undefined
+		&& frontmatter.duplicate_of !== null
+		&& !isWikiLink(frontmatter.duplicate_of)
+	) {
+		issues.push(createIssue('invalid-finance-duplicate-of', 'Finance transaction "duplicate_of" should be a wiki-link like [[Original Transaction]].', 'warning'));
 	}
 
 	if (Array.isArray(frontmatter.tags)) {
@@ -456,6 +492,10 @@ function renderFinanceTransactionTemplate(
 		source: frontmatter.source,
 		artifact: frontmatter.artifact,
 		tags: frontmatter.tags,
+		email_msg_id: frontmatter.email_msg_id,
+		email_provider: frontmatter.email_provider,
+		email_mailbox_scope: frontmatter.email_mailbox_scope,
+		duplicate_of: frontmatter.duplicate_of,
 		fn: frontmatter.fn,
 		fd: frontmatter.fd,
 		fp: frontmatter.fp,

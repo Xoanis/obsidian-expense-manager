@@ -1,5 +1,5 @@
 import { App, Modal, Setting, TFile, TextComponent } from 'obsidian';
-import { TransactionData, TransactionType } from '../types';
+import { TransactionData, TransactionSaveMode, TransactionType } from '../types';
 
 interface LinkedNoteSuggestion {
 	name: string;
@@ -21,7 +21,7 @@ export class ExpenseModal extends Modal {
 	private areaSuggestions: LinkedNoteSuggestion[] = [];
 	private projectSuggestions: LinkedNoteSuggestion[] = [];
 	
-	onComplete: ((data: TransactionData) => void) | null = null;
+	onComplete: ((data: TransactionData, saveMode?: TransactionSaveMode) => void) | null = null;
 	onCancel: (() => void) | null = null;
 
 	constructor(
@@ -88,6 +88,20 @@ export class ExpenseModal extends Modal {
 					.onChange(value => {
 						this.currency = value.toUpperCase();
 					});
+			});
+
+		new Setting(contentEl)
+			.setName('Date and time')
+			.setDesc('Choose when the transaction happened. This value controls note naming and dated folder placement.')
+			.addText(text => {
+				text
+					.setPlaceholder('2026-04-11T14:30')
+					.setValue(this.toLocalDateTimeInputValue(this.dateTime))
+					.onChange(value => {
+						this.dateTime = this.fromLocalDateTimeInputValue(value, this.dateTime);
+					});
+				text.inputEl.type = 'datetime-local';
+				text.inputEl.step = '60';
 			});
 
 		// Category selector
@@ -165,7 +179,14 @@ export class ExpenseModal extends Modal {
 					.setButtonText('Save record')
 					.setCta()
 					.onClick(() => {
-						this.save();
+						this.save('recorded');
+					});
+			})
+			.addButton(button => {
+				button
+					.setButtonText('Save as draft')
+					.onClick(() => {
+						this.save('draft');
 					});
 			})
 			.addButton(button => {
@@ -183,7 +204,7 @@ export class ExpenseModal extends Modal {
 		contentEl.empty();
 	}
 
-	private save() {
+	private save(saveMode: TransactionSaveMode = 'recorded') {
 		if (this.amount <= 0) {
 			alert('Please enter a valid amount');
 			return;
@@ -213,8 +234,36 @@ export class ExpenseModal extends Modal {
 			source: 'manual'
 		};
 
-		this.onComplete?.(data);
+		this.onComplete?.(data, saveMode);
 		this.close();
+	}
+
+	private toLocalDateTimeInputValue(value: string): string {
+		const parsed = new Date(value);
+		if (Number.isNaN(parsed.getTime())) {
+			return '';
+		}
+
+		const year = parsed.getFullYear();
+		const month = String(parsed.getMonth() + 1).padStart(2, '0');
+		const day = String(parsed.getDate()).padStart(2, '0');
+		const hours = String(parsed.getHours()).padStart(2, '0');
+		const minutes = String(parsed.getMinutes()).padStart(2, '0');
+		return `${year}-${month}-${day}T${hours}:${minutes}`;
+	}
+
+	private fromLocalDateTimeInputValue(value: string, fallbackIso: string): string {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return fallbackIso;
+		}
+
+		const parsed = new Date(trimmed);
+		if (Number.isNaN(parsed.getTime())) {
+			return fallbackIso;
+		}
+
+		return parsed.toISOString();
 	}
 
 	private applyInitialData(initialData?: Partial<TransactionData>) {

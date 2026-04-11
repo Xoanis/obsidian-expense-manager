@@ -33,6 +33,9 @@ export class PendingFinanceProposalService {
 		sourceContext?: string;
 		type?: TransactionType;
 		currency?: string;
+		emailMessageId?: string;
+		emailProvider?: string;
+		emailMailboxScope?: string;
 		artifactBytes?: ArrayBuffer;
 		artifactFileName?: string;
 		artifactMimeType?: string;
@@ -50,6 +53,9 @@ export class PendingFinanceProposalService {
 			source,
 			status: 'needs-attention',
 			sourceContext: options.sourceContext ?? this.buildNeedsAttentionContext(options.message, options.reason),
+			emailMessageId: options.emailMessageId,
+			emailProvider: options.emailProvider,
+			emailMailboxScope: options.emailMailboxScope,
 			artifactBytes: options.artifactBytes,
 			artifactFileName: options.artifactFileName,
 			artifactMimeType: options.artifactMimeType,

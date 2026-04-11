@@ -19,6 +19,19 @@ export function generateFrontmatter(data: TransactionData): string {
 		artifact: data.artifact,
 	};
 
+	if (data.emailMessageId) {
+		frontmatter.email_msg_id = data.emailMessageId;
+	}
+	if (data.emailProvider) {
+		frontmatter.email_provider = data.emailProvider;
+	}
+	if (data.emailMailboxScope) {
+		frontmatter.email_mailbox_scope = data.emailMailboxScope;
+	}
+	if (data.duplicateOf) {
+		frontmatter.duplicate_of = data.duplicateOf;
+	}
+
 	// Add fiscal document fields if available
 	if (data.fn) {
 		frontmatter.fn = data.fn;

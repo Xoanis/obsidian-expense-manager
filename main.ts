@@ -12,7 +12,7 @@ import { DashboardContributionMode } from './src/settings';
 import { ExpenseService } from './src/services/expense-service';
 import { AnalyticsService } from './src/services/analytics-service';
 import { QrHandler } from './src/handlers/qr-handler';
-import { FinanceReportSection, TransactionData } from './src/types';
+import { FinanceReportSection, TransactionData, TransactionSaveMode } from './src/types';
 import { registerAddFinanceRecordCommand } from './src/commands/add-finance-record';
 import { registerFetchReceiptItemsCommand } from './src/commands/fetch-receipt-items';
 import { registerGenerateReportCommand } from './src/commands/generate-report';
@@ -78,6 +78,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private financeIntakeService!: FinanceIntakeService;
 	private receiptEnrichmentService!: ReceiptEnrichmentService;
 	private emailFinanceSyncService!: EmailFinanceSyncService;
+	private pendingFinanceProposalService!: PendingFinanceProposalService;
 	private logger: PluginLogger = new ConsolePluginLogger('Expense Manager');
 	private scheduledEmailFinanceSyncInterval: number | null = null;
 	private emailFinanceSyncInFlight: Promise<void> | null = null;
@@ -107,6 +108,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			logger: this.logger,
 		});
 		this.receiptEnrichmentService = new ReceiptEnrichmentService(this.app, this.settings);
+		this.pendingFinanceProposalService = new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency);
 		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
 		this.registerParaCoreTelegramCardContributions();
 
@@ -198,6 +200,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			logger: this.logger,
 		});
 		this.receiptEnrichmentService = new ReceiptEnrichmentService(this.app, this.settings);
+		this.pendingFinanceProposalService = new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency);
 		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
 		this.registerParaCoreTelegramCardContributions();
 		this.telegramApi?.disposeHandlersForUnit(PLUGIN_UNIT_NAME);
@@ -324,7 +327,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 			() => this.settings,
 			syncStateStore,
 			this.financeIntakeService,
-			new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency),
+			this.pendingFinanceProposalService,
 			{
 				logger: this.logger,
 			},
@@ -493,7 +496,9 @@ export default class ExpenseManagerPlugin extends Plugin {
 		const result = await handler.handle();
 		
 		if (result.success && result.data) {
-			await this.saveTransaction(result.data);
+			await this.saveTransaction(result.data, {
+				mode: result.saveMode ?? 'recorded',
+			});
 		} else if (result.error && result.error !== 'User cancelled') {
 			new Notice(result.error);
 		}
@@ -625,7 +630,11 @@ export default class ExpenseManagerPlugin extends Plugin {
 	/**
 	 * Save transaction to vault
 	 */
-	private async saveTransaction(data: TransactionData) {
+	private async saveTransaction(
+		data: TransactionData,
+		options?: { mode?: TransactionSaveMode },
+	) {
+		const mode = options?.mode ?? 'recorded';
 		try {
 			const isDuplicate = await this.expenseService.isDuplicateTransaction(
 				data.fn,
@@ -641,6 +650,22 @@ export default class ExpenseManagerPlugin extends Plugin {
 				return;
 			}
 			
+			if (mode === 'draft') {
+				const file = await this.pendingFinanceProposalService.createPendingProposal({
+					...data,
+					status: 'pending-approval',
+				});
+
+				if (this.settings.showConfirmationNotice) {
+					new Notice(`Draft saved for review: ${data.amount.toFixed(2)} ${data.currency} - ${data.description}`, 5000);
+				}
+				this.logger.info('Finance draft saved', {
+					path: file.path,
+					source: data.source,
+				});
+				return;
+			}
+
 			const file = await this.expenseService.createTransaction(data);
 			this.expenseService.clearReportRenderCache();
 			this.reportSyncService.scheduleAutoSync(`transaction-saved:${file.path}`);
@@ -724,7 +749,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 				proposal,
 			);
 
-			modal.onComplete = async (data: TransactionData) => {
+			modal.onComplete = async (data: TransactionData, saveMode: TransactionSaveMode = 'recorded') => {
 				data.details = proposal.details;
 				data.fn = proposal.fn;
 				data.fd = proposal.fd;
@@ -734,7 +759,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 				data.artifactFileName = proposal.artifactFileName;
 				data.artifactMimeType = proposal.artifactMimeType;
 				data.source = proposal.source;
-				await this.saveTransaction(data);
+				await this.saveTransaction(data, { mode: saveMode });
 				resolve();
 			};
 

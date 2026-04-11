@@ -9,10 +9,23 @@ export type ReceiptOperationType = 1 | 2 | 3 | 4;
 /**
  * Lifecycle state of a finance transaction note
  */
-export type TransactionStatus = 'recorded' | 'pending-approval' | 'needs-attention' | 'archived';
+export type TransactionStatus =
+	| 'recorded'
+	| 'pending-approval'
+	| 'needs-attention'
+	| 'duplicate'
+	| 'rejected'
+	| 'archived';
 
 export function normalizeTransactionStatus(value: unknown): TransactionStatus {
-	if (value === 'pending-approval' || value === 'needs-attention' || value === 'archived' || value === 'recorded') {
+	if (
+		value === 'pending-approval'
+		|| value === 'needs-attention'
+		|| value === 'duplicate'
+		|| value === 'rejected'
+		|| value === 'archived'
+		|| value === 'recorded'
+	) {
 		return value;
 	}
 
@@ -67,6 +80,18 @@ export interface TransactionData {
 
 	/** Persisted source context for review flows, e.g. raw email metadata/body preview */
 	sourceContext?: string;
+
+	/** Stable email-provider message id used for audit and rebuild flows */
+	emailMessageId?: string;
+
+	/** Email provider kind used to fetch the original message again */
+	emailProvider?: string;
+
+	/** Mailbox or folder scope where the original email was found */
+	emailMailboxScope?: string;
+
+	/** Link to the original transaction when this note is marked as a duplicate */
+	duplicateOf?: string;
 
 	/** Transient artifact payload before note creation */
 	artifactBytes?: ArrayBuffer;
@@ -125,10 +150,15 @@ export interface HandlerResult {
 	
 	/** Transaction data if successful */
 	data?: TransactionData;
+
+	/** Whether the caller should persist as a recorded note or a pending draft */
+	saveMode?: TransactionSaveMode;
 	
 	/** Error message if failed */
 	error?: string;
 }
+
+export type TransactionSaveMode = 'recorded' | 'draft';
 
 /**
  * Period report for analytics

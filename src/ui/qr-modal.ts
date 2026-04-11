@@ -1,5 +1,5 @@
 import { App, Modal, Setting, Notice } from 'obsidian';
-import { TransactionData } from '../types';
+import { TransactionData, TransactionSaveMode } from '../types';
 import { ProverkaChekaClient } from '../utils/api-client';
 import { getPluginLogger } from '../utils/plugin-debug-log';
 import { ExpenseModal } from './expense-modal';
@@ -11,7 +11,7 @@ export class QrModal extends Modal {
 	private isProcessing: boolean = false;
 	private processedData: TransactionData | null = null;
 
-	onComplete: ((data: TransactionData) => void) | null = null;
+	onComplete: ((data: TransactionData, saveMode?: TransactionSaveMode) => void) | null = null;
 	onCancel: (() => void) | null = null;
 
 	constructor(
@@ -245,7 +245,7 @@ export class QrModal extends Modal {
 			this.processedData,
 		);
 
-		editModal.onComplete = (data: TransactionData) => {
+		editModal.onComplete = (data: TransactionData, saveMode: TransactionSaveMode = 'recorded') => {
 			// Keep the details and fiscal data from original processing
 			data.details = this.processedData?.details;
 			data.source = 'qr';
@@ -253,7 +253,7 @@ export class QrModal extends Modal {
 			data.fn = this.processedData?.fn;
 			data.fd = this.processedData?.fd;
 			data.fp = this.processedData?.fp;
-			this.onComplete?.(data);
+			this.onComplete?.(data, saveMode);
 		};
 
 		editModal.onCancel = () => {
@@ -265,7 +265,7 @@ export class QrModal extends Modal {
 
 	private saveDirectly() {
 		if (!this.processedData) return;
-		this.onComplete?.(this.processedData);
+		this.onComplete?.(this.processedData, 'recorded');
 		this.close();
 	}
 }

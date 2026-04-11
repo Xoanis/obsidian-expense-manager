@@ -20,6 +20,7 @@ import {
 	FinanceIntakeIntent,
 	FinanceIntakeService,
 } from '../../services/finance-intake-service';
+import { PendingFinanceProposalService } from '../../email-finance/review/pending-finance-proposal-service';
 import {
 	getTelegramBotApi,
 	InputFocusState,
@@ -45,6 +46,7 @@ const CALLBACK_ACTIONS = {
 	reviewShowAll: 'ra',
 	reviewOpenNextPending: 'rn',
 	proposalConfirm: 'pc',
+	proposalSaveDraft: 'pd',
 	proposalReject: 'pr',
 	proposalSetCategory: 'ct',
 	proposalSetDescription: 'ds',
@@ -103,6 +105,7 @@ export class FinanceTelegramBridge {
 	private readonly callbackTokens = new Map<string, CallbackTokenState>();
 	private proposalCounter = 0;
 	private readonly proposals = new Map<string, PendingFinanceProposal>();
+	private readonly pendingProposalService: PendingFinanceProposalService;
 
 	constructor(
 		private readonly app: App,
@@ -113,6 +116,7 @@ export class FinanceTelegramBridge {
 		private readonly settings: ExpenseManagerSettings,
 	) {
 		this.api = getTelegramBotApi(app);
+		this.pendingProposalService = new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency);
 	}
 
 	register(): boolean {
@@ -457,6 +461,7 @@ export class FinanceTelegramBridge {
 
 		if (
 			payload.action === CALLBACK_ACTIONS.proposalConfirm
+			|| payload.action === CALLBACK_ACTIONS.proposalSaveDraft
 			|| payload.action === CALLBACK_ACTIONS.proposalReject
 			|| payload.action === CALLBACK_ACTIONS.proposalSetCategory
 			|| payload.action === CALLBACK_ACTIONS.proposalSetDescription
@@ -479,6 +484,9 @@ export class FinanceTelegramBridge {
 
 			if (payload.action === CALLBACK_ACTIONS.proposalConfirm) {
 				return this.confirmProposal(state.proposalId, callback.messageId);
+			}
+			if (payload.action === CALLBACK_ACTIONS.proposalSaveDraft) {
+				return this.saveProposalAsDraft(state.proposalId, callback.messageId);
 			}
 			if (payload.action === CALLBACK_ACTIONS.proposalReject) {
 				return this.rejectProposal(state.proposalId, callback.messageId);
@@ -1146,6 +1154,7 @@ export class FinanceTelegramBridge {
 		const keyboard: TelegramInlineKeyboard = [
 			[
 				this.buildProposalButton('Confirm', CALLBACK_ACTIONS.proposalConfirm, proposalId),
+				this.buildProposalButton('Save draft', CALLBACK_ACTIONS.proposalSaveDraft, proposalId),
 				this.buildProposalButton('Reject', CALLBACK_ACTIONS.proposalReject, proposalId),
 			],
 			[
@@ -1209,8 +1218,8 @@ export class FinanceTelegramBridge {
 			'',
 			footer ?? (
 				proposal.sourceFilePath
-					? 'Confirm to mark this pending note as recorded, or refine the fields first.'
-					: 'Confirm to save this record to the vault, or refine the context first.'
+					? 'Confirm to mark this pending note as recorded, save draft to keep it pending approval, or refine the fields first.'
+					: 'Confirm to save this record to the vault, save draft to keep it pending approval, or refine the context first.'
 			),
 		);
 		return lines.join('\n');
@@ -1446,6 +1455,63 @@ export class FinanceTelegramBridge {
 			processed: true,
 			answer: proposal.sourceFilePath ? 'Finance review item archived.' : 'Finance proposal rejected.',
 		};
+	}
+
+	private async saveProposalAsDraft(
+		proposalId: string,
+		messageId?: number,
+	): Promise<TelegramHandlerResult> {
+		const proposal = this.proposals.get(proposalId);
+		if (!proposal) {
+			return { processed: true, answer: 'Finance proposal expired. Start capture again.' };
+		}
+
+		try {
+			let file: TFile | null = null;
+			if (proposal.sourceFilePath) {
+				const existing = this.app.vault.getAbstractFileByPath(proposal.sourceFilePath);
+				if (!(existing instanceof TFile)) {
+					return { processed: true, answer: 'Pending finance note was not found.' };
+				}
+
+				file = await this.expenseService.updateTransactionWithFileSync(existing, {
+					...proposal.data,
+					status: 'pending-approval',
+				});
+			} else {
+				file = await this.pendingProposalService.createPendingProposal({
+					...proposal.data,
+					status: 'pending-approval',
+				});
+			}
+
+			this.proposals.delete(proposalId);
+			if (typeof messageId === 'number' && this.api?.editMessage) {
+				await this.api.editMessage(
+					messageId,
+					this.formatProposalMessage(
+						{
+							...proposal,
+							sourceFilePath: file.path,
+						},
+						'Draft saved with pending approval status. You can continue review later from /finance_review.',
+					),
+				);
+			}
+
+			return {
+				processed: true,
+				answer: proposal.sourceFilePath ? 'Finance review item kept pending.' : 'Finance draft saved.',
+			};
+		} catch (error) {
+			if (error instanceof DuplicateTransactionError) {
+				return { processed: true, answer: 'Duplicate transaction found. Draft was not saved.' };
+			}
+			return {
+				processed: true,
+				answer: `Error saving finance draft: ${(error as Error).message}`,
+			};
+		}
 	}
 
 	private async openNextPendingReviewProposal(messageId?: number): Promise<TelegramHandlerResult> {

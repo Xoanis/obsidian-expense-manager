@@ -1,6 +1,6 @@
 import { App } from 'obsidian';
 import { BaseHandler } from './base-handler';
-import { HandlerResult, TransactionData } from '../types';
+import { HandlerResult, TransactionData, TransactionSaveMode } from '../types';
 import { ExpenseManagerSettings } from '../settings';
 import { ProverkaChekaClient } from '../utils/api-client';
 import { QrModal } from '../ui/qr-modal';
@@ -31,10 +31,11 @@ export class QrHandler extends BaseHandler {
 		return new Promise((resolve) => {
 			const modal = new QrModal(this.app, client, this.settings.autoSaveQrExpenses);
 
-			modal.onComplete = (data: TransactionData) => {
+			modal.onComplete = (data: TransactionData, saveMode: TransactionSaveMode = 'recorded') => {
 				resolve({
 					success: true,
-					data
+					data,
+					saveMode,
 				});
 			};
 
