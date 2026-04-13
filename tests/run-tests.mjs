@@ -75,6 +75,7 @@ async function runBundledTypeScriptTests() {
 	const entryPoints = [
 		path.resolve(process.cwd(), 'tests', 'email-finance-regressions.ts'),
 		path.resolve(process.cwd(), 'tests', 'email-finance-rebuild-compat.ts'),
+		path.resolve(process.cwd(), 'tests', 'email-provider-channel-selection.ts'),
 		path.resolve(process.cwd(), 'tests', 'email-finance-sync-state.ts'),
 		path.resolve(process.cwd(), 'tests', 'email-sync-telegram-notification.ts'),
 		path.resolve(process.cwd(), 'tests', 'finance-review-workflow-service.ts'),

@@ -43,6 +43,22 @@ export interface EmailFinanceSyncSummary {
 	summaryText: string;
 }
 
+export interface EmailFinanceSyncProgress {
+	stage: 'starting' | 'fetching' | 'processing' | 'finished';
+	totalMessages: number;
+	processedMessages: number;
+	passedCoarseFilter: number;
+	filteredOut: number;
+	plannedUnits: number;
+	createdPendingNotes: number;
+	createdNeedsAttentionNotes: number;
+	createdDuplicateNotes: number;
+	failedUnits: number;
+	currentMessageId?: string;
+	currentSubject?: string;
+	summaryText?: string;
+}
+
 export interface EmailFinanceRebuildResult {
 	file: TFile;
 	messageId: string;
@@ -105,6 +121,10 @@ interface EmailFinanceSyncServiceOptions {
 	planner?: EmailFinanceMessagePlanner;
 }
 
+interface SyncNewMessagesOptions {
+	onProgress?: (progress: EmailFinanceSyncProgress) => void | Promise<void>;
+}
+
 export class EmailFinanceSyncService {
 	private readonly app?: App;
 	private readonly provider?: FinanceMailProvider;
@@ -139,7 +159,7 @@ export class EmailFinanceSyncService {
 		return this.syncStateStore.reset();
 	}
 
-	async syncNewMessages(): Promise<EmailFinanceSyncSummary> {
+	async syncNewMessages(options?: SyncNewMessagesOptions): Promise<EmailFinanceSyncSummary> {
 		const settings = this.getSettings();
 		if (!settings.enableEmailFinanceIntake) {
 			const state = await this.syncStateStore.getState();
@@ -186,6 +206,18 @@ export class EmailFinanceSyncService {
 			await this.syncStateStore.update({
 				lastAttemptAt: now,
 			});
+			await this.emitSyncProgress(options, {
+				stage: 'starting',
+				totalMessages: 0,
+				processedMessages: 0,
+				passedCoarseFilter: 0,
+				filteredOut: 0,
+				plannedUnits: 0,
+				createdPendingNotes: 0,
+				createdNeedsAttentionNotes: 0,
+				createdDuplicateNotes: 0,
+				failedUnits: 0,
+			});
 
 			const batch = await provider.listMessages({
 				cursor: previousState.cursor,
@@ -201,7 +233,20 @@ export class EmailFinanceSyncService {
 			let createdNeedsAttentionNotes = 0;
 			let createdDuplicateNotes = 0;
 			let failedUnits = 0;
-			for (const message of batch.messages) {
+			await this.emitSyncProgress(options, {
+				stage: 'fetching',
+				totalMessages: batch.messages.length,
+				processedMessages: 0,
+				passedCoarseFilter: 0,
+				filteredOut: 0,
+				plannedUnits: 0,
+				createdPendingNotes: 0,
+				createdNeedsAttentionNotes: 0,
+				createdDuplicateNotes: 0,
+				failedUnits: 0,
+			});
+			for (let index = 0; index < batch.messages.length; index += 1) {
+				const message = batch.messages[index];
 				const filterResult = this.coarseFilter.evaluate(message, settings.emailFinanceCoarseFilterRules);
 				if (filterResult.passed) {
 					passedCoarseFilter += 1;
@@ -214,6 +259,20 @@ export class EmailFinanceSyncService {
 				} else {
 					filteredOut += 1;
 				}
+				await this.emitSyncProgress(options, {
+					stage: 'processing',
+					totalMessages: batch.messages.length,
+					processedMessages: index + 1,
+					passedCoarseFilter,
+					filteredOut,
+					plannedUnits,
+					createdPendingNotes,
+					createdNeedsAttentionNotes,
+					createdDuplicateNotes,
+					failedUnits,
+					currentMessageId: message.id,
+					currentSubject: message.subject,
+				});
 			}
 
 			const hasMore = hasMoreEmailFinanceSyncPages(batch.nextCursor);
@@ -250,6 +309,19 @@ export class EmailFinanceSyncService {
 				hasMore,
 				maxMessagesPerRun: settings.emailFinanceMaxMessagesPerRun,
 			});
+			await this.emitSyncProgress(options, {
+				stage: 'finished',
+				totalMessages: batch.messages.length,
+				processedMessages: batch.messages.length,
+				passedCoarseFilter,
+				filteredOut,
+				plannedUnits,
+				createdPendingNotes,
+				createdNeedsAttentionNotes,
+				createdDuplicateNotes,
+				failedUnits,
+				summaryText,
+			});
 
 			return {
 				status: 'success',
@@ -273,6 +345,17 @@ export class EmailFinanceSyncService {
 			});
 			throw error;
 		}
+	}
+
+	private async emitSyncProgress(
+		options: SyncNewMessagesOptions | undefined,
+		progress: EmailFinanceSyncProgress,
+	): Promise<void> {
+		if (!options?.onProgress) {
+			return;
+		}
+
+		await options.onProgress(progress);
 	}
 
 	async rebuildTransactionFile(file: TFile): Promise<EmailFinanceRebuildResult> {

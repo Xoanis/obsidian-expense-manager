@@ -9,6 +9,7 @@ import {
 	type MailConsumerCheckpointKey,
 } from './types';
 import { getEmailProviderApi } from './client';
+import { parseEmailProviderChannelSelection } from './channel-selection';
 
 interface EmailProviderMigrationChannelRecord {
 	id: string;
@@ -166,7 +167,7 @@ function resolveTargetChannelId(
 	existingChannels: EmailProviderMigrationChannelRecord[],
 	requestedChannelId: string,
 ): string {
-	const normalizedRequested = requestedChannelId.trim();
+	const normalizedRequested = parseEmailProviderChannelSelection(requestedChannelId)[0] ?? '';
 	if (normalizedRequested) {
 		return normalizedRequested;
 	}

@@ -4,7 +4,8 @@ import {
 	type EmailFinanceSyncState,
 	type ExpenseManagerSettings,
 } from '../../settings';
-import { resolveEmailProviderRuntime } from '../../integrations/email-provider/client';
+import { resolveEmailProviderSelection } from '../../integrations/email-provider/client';
+import { buildEmailProviderChannelSelectionKey } from '../../integrations/email-provider/channel-selection';
 import type {
 	MailConsumerCheckpoint,
 	MailConsumerCheckpointKey,
@@ -87,16 +88,19 @@ export class EmailProviderCheckpointSyncStateStore implements EmailFinanceSyncSt
 	}
 
 	private async readCheckpoint(): Promise<{
-		api: ReturnType<typeof resolveEmailProviderRuntime>['api'];
+		api: ReturnType<typeof resolveEmailProviderSelection>['api'];
 		key: MailConsumerCheckpointKey;
 		checkpoint: MailConsumerCheckpoint | null;
 	}> {
 		const settings = this.getSettings();
-		const runtime = resolveEmailProviderRuntime(
+		const runtime = resolveEmailProviderSelection(
 			this.app,
 			settings.emailFinanceProviderChannelId,
 		);
-		const key = this.buildCheckpointKey(runtime.channel.id, settings.emailFinanceMailboxScope);
+		const key = this.buildCheckpointKey(
+			runtime.channels.map((channel) => channel.id),
+			settings.emailFinanceMailboxScope,
+		);
 		const checkpoint = await runtime.api.getCheckpoint(key);
 		return {
 			api: runtime.api,
@@ -106,10 +110,10 @@ export class EmailProviderCheckpointSyncStateStore implements EmailFinanceSyncSt
 	}
 
 	private buildCheckpointKey(
-		channelId: string,
+		channelIds: string[],
 		mailboxScope: string,
 	): MailConsumerCheckpointKey {
-		return buildEmailFinanceCheckpointKey(channelId, mailboxScope);
+		return buildEmailFinanceCheckpointKey(channelIds, mailboxScope);
 	}
 
 	private fromCheckpoint(checkpoint: MailConsumerCheckpoint): EmailFinanceSyncState {
@@ -149,12 +153,15 @@ export class EmailProviderCheckpointSyncStateStore implements EmailFinanceSyncSt
 }
 
 export function buildEmailFinanceCheckpointKey(
-	channelId: string,
+	channelId: string | string[],
 	mailboxScope: string,
 ): MailConsumerCheckpointKey {
+	const normalizedChannelId = buildEmailProviderChannelSelectionKey(
+		Array.isArray(channelId) ? channelId : [channelId],
+	);
 	return {
 		consumerId: EMAIL_FINANCE_CHECKPOINT_CONSUMER_ID,
-		channelId,
+		channelId: normalizedChannelId,
 		scopeFingerprint: buildEmailFinanceScopeFingerprint(mailboxScope),
 	};
 }

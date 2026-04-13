@@ -1,6 +1,9 @@
 import type { App } from 'obsidian';
 import type { ExpenseManagerSettings } from '../../settings';
-import { resolveEmailProviderRuntime } from '../../integrations/email-provider/client';
+import {
+	getEmailProviderApi,
+	resolveEmailProviderSelection,
+} from '../../integrations/email-provider/client';
 import type {
 	IEmailProviderApi,
 	MailMessageDetails,
@@ -32,11 +35,10 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 	) {}
 
 	async listMessages(options: FinanceMailProviderListOptions): Promise<FinanceMailSyncBatch> {
-		const api = this.requireApi();
-		const channel = this.resolveChannel(api);
+		const { api, channels } = this.resolveSelection();
 		const folderScope = this.resolveFolderScope(options.mailboxScope);
 		const result = await api.searchMessages({
-			channelIds: [channel.id],
+			channelIds: channels.map((channel) => channel.id),
 			receivedAfter: options.since ?? undefined,
 			folderScope,
 			cursor: options.cursor ?? undefined,
@@ -69,41 +71,40 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 		options?: FinanceMailProviderGetOptions,
 	): Promise<FinanceMailMessage | null> {
 		const api = this.requireApi();
-		const ref = this.resolveMessageRef(api, messageId, options?.mailboxScope);
-		const details = await api.getMessage(ref);
-		if (!details) {
-			return null;
+		const parsed = this.parseSerializedMessageId(messageId);
+		const scopeId = options?.mailboxScope?.trim() || this.resolveFolderScope(undefined);
+		if (parsed) {
+			const details = await api.getMessage({
+				channelId: parsed.channelId,
+				externalId: parsed.externalId,
+				scopeId,
+			});
+			if (!details) {
+				return null;
+			}
+
+			return this.toFinanceMailMessage(api, details, scopeId);
 		}
 
-		return this.toFinanceMailMessage(api, details, ref.scopeId);
+		return this.getRawMessageFromSelection(api, messageId, scopeId);
 	}
 
 	private requireApi(): IEmailProviderApi {
-		return resolveEmailProviderRuntime(
-			this.app,
-			this.settings.emailFinanceProviderChannelId,
-		).api;
+		const api = getEmailProviderApi(this.app);
+		if (!api) {
+			throw new Error(
+				'The workspace email-provider plugin is not available. Install and enable "obsidian-email-provider", then try again.',
+			);
+		}
+
+		return api;
 	}
 
-	private resolveChannel(_api: IEmailProviderApi, explicitChannelId?: string) {
-		return resolveEmailProviderRuntime(
+	private resolveSelection(explicitChannelSelection?: string) {
+		return resolveEmailProviderSelection(
 			this.app,
-			explicitChannelId?.trim() || this.settings.emailFinanceProviderChannelId,
-		).channel;
-	}
-
-	private resolveMessageRef(
-		api: IEmailProviderApi,
-		messageId: string,
-		mailboxScope?: string,
-	): MailMessageRef {
-		const parsed = this.parseSerializedMessageId(messageId);
-		const channel = this.resolveChannel(api, parsed?.channelId);
-		return {
-			channelId: channel.id,
-			externalId: parsed?.externalId ?? messageId,
-			scopeId: mailboxScope?.trim() || this.resolveFolderScope(undefined),
-		};
+			explicitChannelSelection?.trim() || this.settings.emailFinanceProviderChannelId,
+		);
 	}
 
 	private async toFinanceMailMessage(
@@ -183,6 +184,41 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 			channelId: decodeURIComponent(serialized.slice(0, separatorIndex)),
 			externalId: decodeURIComponent(serialized.slice(separatorIndex + 1)),
 		};
+	}
+
+	private async getRawMessageFromSelection(
+		api: IEmailProviderApi,
+		messageId: string,
+		scopeId?: string,
+	): Promise<FinanceMailMessage | null> {
+		const { channels } = this.resolveSelection();
+		let matchedMessage: MailMessageDetails | null = null;
+
+		for (const channel of channels) {
+			const ref: MailMessageRef = {
+				channelId: channel.id,
+				externalId: messageId,
+				scopeId,
+			};
+			const details = await api.getMessage(ref);
+			if (!details) {
+				continue;
+			}
+			if (matchedMessage) {
+				throw new Error(
+					`Email message id "${messageId}" is ambiguous across the selected email-provider channels. ` +
+					'Rebuild the note once with a single selected channel to upgrade it to a stable provider message id.',
+				);
+			}
+
+			matchedMessage = details;
+		}
+
+		if (!matchedMessage) {
+			return null;
+		}
+
+		return this.toFinanceMailMessage(api, matchedMessage, scopeId);
 	}
 
 	private resolveFolderScope(explicitScope?: string): string | undefined {

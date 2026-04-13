@@ -5,6 +5,7 @@ import {
 	type MailChannelSummary,
 } from './types';
 import { getPluginLogger } from '../../utils/plugin-debug-log';
+import { parseEmailProviderChannelSelection } from './channel-selection';
 
 interface EmailProviderPluginLike {
 	getApi?: () => IEmailProviderApi;
@@ -53,6 +54,24 @@ export function resolveEmailProviderRuntime(
 	app: App,
 	requestedChannelId?: string,
 ): { api: IEmailProviderApi; channel: MailChannelSummary } {
+	const runtime = resolveEmailProviderSelection(app, requestedChannelId);
+	if (runtime.channels.length !== 1) {
+		throw new Error(
+			'This action requires exactly one email-provider channel. ' +
+			'Specify a single channel id in Expense Manager settings or narrow the selection for this operation.',
+		);
+	}
+
+	return {
+		api: runtime.api,
+		channel: runtime.channels[0],
+	};
+}
+
+export function resolveEmailProviderSelection(
+	app: App,
+	requestedChannelSelection?: string,
+): { api: IEmailProviderApi; channels: MailChannelSummary[] } {
 	const api = getEmailProviderApi(app);
 	if (!api) {
 		throw new Error(
@@ -60,24 +79,31 @@ export function resolveEmailProviderRuntime(
 		);
 	}
 
-	const normalizedChannelId = requestedChannelId?.trim() ?? '';
-	if (normalizedChannelId) {
-		const channel = api.getChannel(normalizedChannelId);
-		if (!channel) {
-			throw new Error(`Email-provider channel "${normalizedChannelId}" was not found.`);
-		}
-		if (!channel.enabled) {
-			throw new Error(`Email-provider channel "${normalizedChannelId}" is disabled.`);
-		}
+	const requestedChannelIds = parseEmailProviderChannelSelection(requestedChannelSelection);
+	if (requestedChannelIds.length > 0) {
+		const channels = requestedChannelIds.map((channelId) => {
+			const channel = api.getChannel(channelId);
+			if (!channel) {
+				throw new Error(`Email-provider channel "${channelId}" was not found.`);
+			}
+			if (!channel.enabled) {
+				throw new Error(`Email-provider channel "${channelId}" is disabled.`);
+			}
 
-		return { api, channel };
+			return channel;
+		});
+
+		return {
+			api,
+			channels,
+		};
 	}
 
 	const defaultChannel = api.getDefaultChannel();
 	if (defaultChannel?.enabled) {
 		return {
 			api,
-			channel: defaultChannel,
+			channels: [defaultChannel],
 		};
 	}
 
@@ -85,7 +111,7 @@ export function resolveEmailProviderRuntime(
 	if (enabledChannels.length === 1) {
 		return {
 			api,
-			channel: enabledChannels[0],
+			channels: enabledChannels,
 		};
 	}
 	if (enabledChannels.length === 0) {
@@ -93,6 +119,6 @@ export function resolveEmailProviderRuntime(
 	}
 
 	throw new Error(
-		'Multiple enabled email-provider channels are configured. Set a default channel in obsidian-email-provider or specify a channel id in Expense Manager settings.',
+		'Multiple enabled email-provider channels are configured. Set a default channel in obsidian-email-provider or specify one or more channel ids in Expense Manager settings.',
 	);
 }

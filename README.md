@@ -204,19 +204,78 @@ Current PNG charts:
 - duplicate items are visible from Telegram review, but Telegram duplicate handling is intentionally safe and limited
 - complex duplicate merge stays Obsidian-first and points you to `Open duplicate merge queue`
 
-## Experimental email intake bridge
+## Email finance intake
 
-The plugin now includes the first end-to-end email intake pipeline:
+The email flow is now a real subsystem, not just an experimental bridge.
+
+Current end-to-end behavior:
 
 - manual sync command
+- scheduled sync while Obsidian is open
 - coarse include/exclude filtering
-- message planning into text, image, and PDF intake units
+- parser-first planning into text, image, and PDF intake units
 - creation of `pending-approval`, `needs-attention`, and `duplicate` finance notes
+- rebuild of older email-derived notes from saved email identity
 
-Current provider option:
+### Current architecture split
 
-- `IMAP (login + app password)`
-- `HTTP JSON bridge`
+`Expense Manager` no longer tries to own the whole mail stack by itself.
+
+Current responsibility split:
+
+- `obsidian-email-provider`
+  - channel configuration
+  - mailbox transport and driver execution
+  - normalized message search/fetch APIs
+  - attachment materialization
+  - checkpoint storage
+  - multi-channel pagination
+
+- `obsidian-expense-manager`
+  - finance coarse filter
+  - parser chain and planner
+  - finance proposal extraction
+  - duplicate detection
+  - pending note creation
+  - rebuild of finance notes from saved email identity
+
+### Provider modes
+
+Current provider modes:
+
+- `Workspace email-provider plugin` - recommended
+- `IMAP (login + app password)` - legacy compatibility path
+- `HTTP JSON bridge` - compatibility / external integration path
+
+### Recommended setup
+
+Recommended setup is now:
+
+1. Install and enable `obsidian-email-provider`.
+2. Create one or more mail channels there.
+3. Optionally mark one channel as default.
+4. In `Expense Manager`, set `Email finance provider` to `Workspace email-provider plugin`.
+5. In `Email-provider channels`, choose either:
+   - `Use provider default`
+   - `Select specific channels`
+
+When `Select specific channels` is used, `Expense Manager` can sync more than one mailbox channel in the same run.
+
+### Current behavior in workspace email-provider mode
+
+- sync can target one or many selected channels
+- the saved cursor belongs to the exact selected channel set plus mailbox scope
+- message transport and attachment download happen through the normalized `email-provider` API
+- created notes persist stable email identity in frontmatter:
+  - `email_msg_id`
+  - `email_provider`
+  - `email_mailbox_scope`
+- rebuild upgrades older legacy IMAP notes to stable provider ids when possible
+- if an old raw message id is ambiguous across many selected channels, rebuild will ask you to narrow the selection first
+
+### Legacy direct IMAP mode
+
+Direct IMAP is still available for compatibility and bootstrap scenarios.
 
 IMAP setup in plugin settings:
 
@@ -232,7 +291,7 @@ IMAP setup in plugin settings:
 - `IMAP username` -> mailbox login
 - `IMAP app password` -> provider-specific application password
 
-Current IMAP behavior:
+Current direct IMAP behavior:
 
 - fetches messages newer than the last successful sync boundary
 - for large backfills, processes only the configured maximum number of emails per run
@@ -242,7 +301,9 @@ Current IMAP behavior:
 - supports attachment fan-out into receipt/PDF routes
 - does not mark messages as seen or move them between folders
 
-Expected endpoint shape:
+### HTTP JSON bridge mode
+
+The compatibility HTTP mode still expects:
 
 - `GET <base-url>/messages`
 - optional query params:
@@ -280,15 +341,11 @@ Expected JSON response shape:
 }
 ```
 
-Current behavior:
+### Current intake semantics
 
 - image attachments go through the receipt route
 - PDF attachments go through the PDF AI route
 - text-only emails go through the text AI route
-- created notes persist stable email identity in frontmatter:
-  - `email_msg_id`
-  - `email_provider`
-  - `email_mailbox_scope`
 - created notes are saved with status `pending-approval`, `needs-attention`, or `duplicate` depending on extraction and duplicate checks
 - pending notes do not affect reports or analytics until approved
 - duplicate notes also stay out of analytics until resolved

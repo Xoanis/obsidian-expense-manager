@@ -8,6 +8,7 @@ The main idea of the current design is:
 
 The current implementation supports:
 
+- `Workspace email-provider plugin` as the recommended transport host
 - `IMAP (login + app password)`
 - `HTTP JSON bridge`
 - manual sync command
@@ -30,6 +31,17 @@ The current implementation supports:
 
 Current state after the latest live mailbox iteration:
 
+- mailbox transport has now been split out into `obsidian-email-provider`, while finance parsing and review logic remain in `obsidian-expense-manager`
+- `obsidian-email-provider` already provides:
+  - channel settings
+  - IMAP driver execution
+  - full message fetch and attachment materialization
+  - checkpoint persistence
+  - multi-channel search with an opaque composite cursor
+- `Expense Manager` now uses `obsidian-email-provider` as the recommended path for:
+  - mailbox search
+  - rebuild fetch-by-id
+  - sync boundary storage
 - generic `ResolvedReceiptEvidenceEmailParser` is no longer experimental-only; it now closes a meaningful share of real receipt emails before vendor-specific logic is needed
 - scheduled sync, bounded backfill batches, and Telegram email-sync notifications now exist as first-class operator controls rather than placeholders in settings
 - confirmed live deterministic coverage now includes:
@@ -65,6 +77,9 @@ flowchart TD
     State["EmailFinanceSyncStateStore"]
     ProviderFactory["createFinanceMailProvider()"]
     Provider["FinanceMailProvider"]
+    EmailProviderAdapter["EmailProviderFinanceMailProvider"]
+    EmailProviderApi["obsidian-email-provider API"]
+    Drivers["Mail drivers"]
     Filter["EmailFinanceCoarseFilter"]
     ParserChain["CompositeEmailFinanceMessageParser"]
     CustomParsers["Custom Email Parsers"]
@@ -84,6 +99,9 @@ flowchart TD
     Sync <--> State
     Sync --> ProviderFactory
     ProviderFactory --> Provider
+    Provider --> EmailProviderAdapter
+    EmailProviderAdapter --> EmailProviderApi
+    EmailProviderApi --> Drivers
     Sync --> Filter
     Sync --> Planner
     Planner --> ParserChain
@@ -106,6 +124,7 @@ sequenceDiagram
     participant Sync as EmailFinanceSyncService
     participant State as EmailFinanceSyncStateStore
     participant Provider as FinanceMailProvider
+    participant EmailProvider as obsidian-email-provider API
     participant Filter as EmailFinanceCoarseFilter
     participant Planner as EmailFinanceMessagePlanner
     participant Parsers as Email Parser Chain
@@ -121,6 +140,10 @@ sequenceDiagram
     Sync->>State: getState()
     Sync->>State: update(lastAttemptAt)
     Sync->>Provider: listMessages(cursor, since, mailboxScope, limit)
+    alt provider mode = workspace email-provider
+        Provider->>EmailProvider: searchMessages(channelIds, cursor, receivedAfter, folderScope, limit)
+        EmailProvider-->>Provider: MailSearchResult
+    end
     Provider-->>Sync: FinanceMailSyncBatch
 
     loop each message
@@ -172,15 +195,62 @@ sequenceDiagram
 flowchart TD
     A["settings.emailFinanceProvider"] --> B{"Provider kind"}
     B -->|"none"| C["NoopFinanceMailProvider"]
-    B -->|"imap"| D["ImapFinanceMailProvider"]
-    B -->|"http-json"| E["HttpJsonFinanceMailProvider"]
+    B -->|"email-provider"| D["EmailProviderFinanceMailProvider"]
+    B -->|"imap"| E["ImapFinanceMailProvider"]
+    B -->|"http-json"| F["HttpJsonFinanceMailProvider"]
 
-    C --> F["Return empty batch"]
-    D --> G["Fetch live messages from IMAP mailbox"]
-    E --> H["Fetch normalized messages from external HTTP bridge"]
+    C --> G["Return empty batch"]
+    D --> H["Delegate mailbox access to obsidian-email-provider"]
+    E --> I["Fetch live messages from IMAP mailbox"]
+    F --> J["Fetch normalized messages from external HTTP bridge"]
 ```
 
-## 4. IMAP Provider Internals
+Recommended mode:
+
+- `email-provider` is now the primary architecture
+- direct `imap` and `http-json` remain compatibility paths
+
+## 4. Workspace Email Provider Mode
+
+In the recommended mode, `Expense Manager` no longer owns mailbox transport directly.
+
+Instead it:
+
+- discovers `obsidian-email-provider` at runtime
+- resolves either one selected channel or an explicit multi-channel selection
+- calls `searchMessages`, `getMessage`, and `materializeAttachment` through the shared API
+- stores its sync checkpoint in `obsidian-email-provider`
+- mirrors the effective sync state back into local settings for operator visibility
+
+```mermaid
+flowchart TD
+    A["Expense Manager settings"]
+    B["EmailProviderFinanceMailProvider"]
+    C["resolveEmailProviderSelection()"]
+    D["obsidian-email-provider API"]
+    E["searchMessages(channelIds, cursor, receivedAfter, folderScope, limit)"]
+    F["getMessage(ref)"]
+    G["materializeAttachment(ref, attachmentId)"]
+    H["Checkpoint store in obsidian-email-provider"]
+
+    A --> B --> C --> D
+    D --> E
+    D --> F
+    D --> G
+    D --> H
+```
+
+Current behavior in this mode:
+
+- one sync can target one or many channels
+- multi-channel search uses an opaque composite cursor owned by `obsidian-email-provider`
+- the checkpoint key is built from:
+  - consumer id
+  - one channel id, or a synthetic channel-selection key
+  - mailbox scope fingerprint
+- saved finance notes keep stable provider ids such as `email-provider:<channelId>:<externalId>`
+
+## 4a. Legacy Direct IMAP Mode
 
 ```mermaid
 flowchart TD
@@ -678,20 +748,31 @@ Current reporting rule:
 ## 12. Sync State Model
 
 ```mermaid
-flowchart LR
-    Settings["settings.emailFinanceSyncState"] --> LastSuccess["lastSuccessfulSyncAt"]
-    Settings --> Cursor["cursor"]
-    Settings --> LastAttempt["lastAttemptAt"]
-    Settings --> Status["lastSyncStatus"]
-    Settings --> Summary["lastSyncSummary"]
+flowchart TD
+    ProviderKind["settings.emailFinanceProvider"] --> Branch{"State store"}
+    Branch -->|"email-provider"| ProviderStore["EmailProviderCheckpointSyncStateStore"]
+    Branch -->|"imap / http-json / none"| LocalStore["LocalEmailFinanceSyncStateStore"]
+
+    ProviderStore --> ProviderCheckpoint["Checkpoint in obsidian-email-provider"]
+    ProviderStore --> Mirror["Mirror into settings.emailFinanceSyncState"]
+    LocalStore --> Mirror
+
+    Mirror --> LastSuccess["lastSuccessfulSyncAt"]
+    Mirror --> Cursor["cursor"]
+    Mirror --> LastAttempt["lastAttemptAt"]
+    Mirror --> Status["lastSyncStatus"]
+    Mirror --> Summary["lastSyncSummary"]
 ```
 
 Current usage:
 
+- `settings.emailFinanceSyncState` is always the operator-visible mirror
+- in `email-provider` mode, the authoritative checkpoint lives in `obsidian-email-provider`
+- in legacy direct modes, the local settings snapshot remains authoritative
 - `lastSuccessfulSyncAt` is the stable delta-sync boundary for completed batches
 - `cursor` is the active continuation boundary for partially consumed paginated backfills
 - when `cursor` is non-null, sync resumes from that cursor before advancing `lastSuccessfulSyncAt`
-- `lastSuccessfulSyncAt` advances only after the current cursor-backed backlog slice is exhausted
+- for multi-channel email-provider sync, the cursor belongs to the exact selected channel set
 - `lastAttemptAt`, `lastSyncStatus`, and `lastSyncSummary` are used for operator visibility in settings
 
 ## 12a. Scheduled Sync And Notification Hooks
@@ -734,7 +815,13 @@ Architectural implication:
 - [email-finance-sync-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/sync/email-finance-sync-service.ts)
   - orchestration
 - [finance-mail-provider.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/transport/finance-mail-provider.ts)
-  - provider abstraction plus IMAP and HTTP implementations
+  - provider abstraction plus legacy IMAP and HTTP implementations
+- [email-provider-finance-mail-provider.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/transport/email-provider-finance-mail-provider.ts)
+  - adapter from finance sync into the workspace `obsidian-email-provider` API
+- [client.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/integrations/email-provider/client.ts)
+  - runtime discovery and channel-selection resolution for `obsidian-email-provider`
+- [channel-selection.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/integrations/email-provider/channel-selection.ts)
+  - parsing and normalization of explicit one-channel or multi-channel selections
 - [email-finance-coarse-filter.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/sync/email-finance-coarse-filter.ts)
   - pre-routing message filtering
 - [email-finance-message-planner.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/planning/email-finance-message-planner.ts)
@@ -755,6 +842,10 @@ Architectural implication:
   - shared reject-policy orchestration for saved review notes
 - [duplicate-merge-modal.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/ui/duplicate-merge-modal.ts)
   - Obsidian-first UI for resolving duplicate notes safely
+- [obsidian-email-provider/main.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-email-provider/main.ts)
+  - shared mailbox API surface, settings UI, and multi-channel search orchestration
+- [obsidian-email-provider/src/drivers/imap-driver.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-email-provider/src/drivers/imap-driver.ts)
+  - current concrete transport driver used by the shared mail plugin
 
 ## 15. Recommended File Split
 

@@ -207,7 +207,7 @@ export interface ExpenseManagerSettings {
 	/** Auth token for the provider-compatible mail JSON endpoint */
 	emailFinanceProviderAuthToken: string;
 
-	/** Optional channel id in the workspace email-provider plugin */
+	/** Optional email-provider channel selection: one id or a comma/newline-separated list */
 	emailFinanceProviderChannelId: string;
 
 	/** Enable scheduled email finance sync */

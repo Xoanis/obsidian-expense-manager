@@ -30,7 +30,10 @@ import { registerFinanceDomain } from './src/integrations/para-core/register-fin
 import { registerFinanceMetadataContributions } from './src/integrations/para-core/register-metadata-contributions';
 import { registerFinanceTemplateContributions } from './src/integrations/para-core/register-template-contributions';
 import { registerFinanceTelegramHelpContributions } from './src/integrations/para-core/register-telegram-help-contributions';
+import { getEmailProviderApi } from './src/integrations/email-provider/client';
+import { normalizeEmailProviderChannelIds, parseEmailProviderChannelSelection } from './src/integrations/email-provider/channel-selection';
 import { migrateLegacyImapSettingsToEmailProvider } from './src/integrations/email-provider/legacy-imap-migration';
+import type { MailChannelSummary } from './src/integrations/email-provider/types';
 import { IParaCoreApi, RegisteredParaDomain } from './src/integrations/para-core/types';
 import { FinanceTelegramBridge } from './src/integrations/telegram/finance-telegram-bridge';
 import { getTelegramBotApi, TelegramBotApi } from './src/integrations/telegram/client';
@@ -50,6 +53,7 @@ import {
 	EmailProviderCheckpointSyncStateStore,
 	LocalEmailFinanceSyncStateStore,
 } from './src/email-finance/sync/email-finance-sync-state-store';
+import type { EmailFinanceSyncProgress } from './src/email-finance/sync/email-finance-sync-service';
 import { PendingFinanceProposalService } from './src/email-finance/review/pending-finance-proposal-service';
 import { ReportPeriodModal } from './src/ui/report-period-modal';
 import { ReportsModal } from './src/ui/reports-modal';
@@ -94,6 +98,9 @@ export default class ExpenseManagerPlugin extends Plugin {
 	private logger: PluginLogger = new ConsolePluginLogger('Expense Manager');
 	private scheduledEmailFinanceSyncInterval: number | null = null;
 	private emailFinanceSyncInFlight: Promise<void> | null = null;
+	private emailFinanceSyncStatusEl: HTMLElement | null = null;
+	private emailFinanceSyncLiveNotice: Notice | null = null;
+	private emailFinanceSyncLastProgressAt = 0;
 
 	async onload() {
 		await this.loadSettings();
@@ -127,6 +134,8 @@ export default class ExpenseManagerPlugin extends Plugin {
 		);
 		this.pendingFinanceProposalService = new PendingFinanceProposalService(this.expenseService, () => this.settings.defaultCurrency);
 		this.emailFinanceSyncService = this.createEmailFinanceSyncService();
+		this.emailFinanceSyncStatusEl = this.addStatusBarItem();
+		this.emailFinanceSyncStatusEl.style.display = 'none';
 		this.registerParaCoreTelegramCardContributions();
 
 		// Initialize Telegram handler if API is available
@@ -484,17 +493,20 @@ export default class ExpenseManagerPlugin extends Plugin {
 		}
 
 		const runPromise = (async () => {
-			if (options.showStartNotice) {
-				new Notice('Finance email sync started...', 4000);
-			}
-
 			try {
-				const result = await this.emailFinanceSyncService.syncNewMessages();
+				this.emailFinanceSyncLastProgressAt = 0;
+				const result = await this.emailFinanceSyncService.syncNewMessages({
+					onProgress: async (progress) => {
+						this.handleEmailFinanceSyncProgress(progress, options.trigger);
+					},
+				});
 				await this.maybeSendTelegramEmailSyncNotification(result, options.trigger);
+				this.clearEmailFinanceSyncFeedback();
 				if (options.showResultNotice) {
 					new Notice(result.summaryText, 7000);
 				}
 			} catch (error) {
+				this.clearEmailFinanceSyncFeedback();
 				if (options.showErrorNotice) {
 					new Notice(`Error syncing finance emails: ${(error as Error).message}`);
 				}
@@ -509,7 +521,88 @@ export default class ExpenseManagerPlugin extends Plugin {
 			if (this.emailFinanceSyncInFlight === runPromise) {
 				this.emailFinanceSyncInFlight = null;
 			}
+			this.clearEmailFinanceSyncFeedback();
 		}
+	}
+
+	private handleEmailFinanceSyncProgress(
+		progress: EmailFinanceSyncProgress,
+		trigger: 'manual' | 'scheduled',
+	): void {
+		const now = Date.now();
+		const shouldRefreshUi = progress.stage === 'finished'
+			|| progress.stage === 'starting'
+			|| progress.processedMessages <= 1
+			|| progress.processedMessages >= progress.totalMessages
+			|| now - this.emailFinanceSyncLastProgressAt >= 350;
+		if (!shouldRefreshUi) {
+			return;
+		}
+
+		this.emailFinanceSyncLastProgressAt = now;
+		const message = this.buildEmailFinanceSyncProgressText(progress);
+		this.renderEmailFinanceSyncStatus(message);
+		if (trigger === 'manual') {
+			if (!this.emailFinanceSyncLiveNotice) {
+				this.emailFinanceSyncLiveNotice = new Notice(message, 0);
+			} else {
+				this.emailFinanceSyncLiveNotice.setMessage(message);
+			}
+		}
+	}
+
+	private buildEmailFinanceSyncProgressText(progress: EmailFinanceSyncProgress): string {
+		if (progress.stage === 'starting') {
+			return 'Finance email sync started. Preparing sync state...';
+		}
+		if (progress.stage === 'fetching') {
+			return `Finance email sync fetched ${progress.totalMessages} email(s). Starting processing...`;
+		}
+		if (progress.stage === 'finished') {
+			return progress.summaryText ?? 'Finance email sync finished.';
+		}
+
+		const subject = progress.currentSubject?.trim()
+			? ` Current: ${this.truncateForStatus(progress.currentSubject.trim(), 72)}.`
+			: '';
+		return [
+			`Finance email sync ${progress.processedMessages}/${progress.totalMessages}.`,
+			` Passed: ${progress.passedCoarseFilter}.`,
+			` Filtered: ${progress.filteredOut}.`,
+			` Pending: ${progress.createdPendingNotes}.`,
+			` Needs attention: ${progress.createdNeedsAttentionNotes}.`,
+			` Duplicates: ${progress.createdDuplicateNotes}.`,
+			` Failed units: ${progress.failedUnits}.`,
+			subject,
+		].join('');
+	}
+
+	private renderEmailFinanceSyncStatus(message: string): void {
+		if (!this.emailFinanceSyncStatusEl) {
+			return;
+		}
+
+		this.emailFinanceSyncStatusEl.style.display = '';
+		this.emailFinanceSyncStatusEl.textContent = message;
+	}
+
+	private clearEmailFinanceSyncFeedback(): void {
+		if (this.emailFinanceSyncLiveNotice) {
+			this.emailFinanceSyncLiveNotice.hide();
+			this.emailFinanceSyncLiveNotice = null;
+		}
+		if (this.emailFinanceSyncStatusEl) {
+			this.emailFinanceSyncStatusEl.textContent = '';
+			this.emailFinanceSyncStatusEl.style.display = 'none';
+		}
+	}
+
+	private truncateForStatus(value: string, maxLength: number): string {
+		if (value.length <= maxLength) {
+			return value;
+		}
+
+		return `${value.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
 	}
 
 	private async maybeSendTelegramEmailSyncNotification(
@@ -1149,42 +1242,25 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 			.setDesc('Choose how finance emails are fetched for sync')
 			.addDropdown(dropdown => dropdown
 				.addOption('none', 'Not configured')
-				.addOption('email-provider', 'Workspace email-provider plugin')
-				.addOption('imap', 'IMAP (login + app password)')
-				.addOption('http-json', 'HTTP JSON bridge')
+				.addOption('email-provider', 'Workspace email-provider plugin (recommended)')
+				.addOption('imap', 'Legacy direct IMAP')
+				.addOption('http-json', 'Legacy HTTP JSON bridge')
 				.setValue(this.plugin.settings.emailFinanceProvider)
 				.onChange(async (value) => {
 					if (value === 'none' || value === 'email-provider' || value === 'imap' || value === 'http-json') {
 						this.plugin.settings.emailFinanceProvider = value;
 						await this.plugin.saveSettings();
+						this.display();
 					}
 				}));
 
-		new Setting(containerEl)
-			.setName('Email-provider channel id')
-			.setDesc('Optional channel id from the obsidian-email-provider plugin. Leave empty to use that plugin\'s default channel.')
-			.addText(text => text
-				.setPlaceholder('personal-imap')
-				.setValue(this.plugin.settings.emailFinanceProviderChannelId)
-				.onChange(async (value) => {
-					this.plugin.settings.emailFinanceProviderChannelId = value.trim();
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('Legacy IMAP migration')
-			.setDesc('Create or update an IMAP channel in obsidian-email-provider from the legacy Expense Manager IMAP settings, migrate the saved sync boundary, and switch this plugin to the new provider mode.')
-			.addButton(button => button
-				.setButtonText('Migrate to Email Provider')
-				.setCta()
-				.onClick(async () => {
-					await this.plugin.handleMigrateLegacyImapToEmailProvider();
-					this.display();
-				}));
+		if (this.plugin.settings.emailFinanceProvider === 'email-provider') {
+			this.renderEmailProviderChannelSelection(containerEl);
+		}
 
 		new Setting(containerEl)
 			.setName('Mailbox scope')
-			.setDesc('Optional mailbox, folder, or label scope for the future mail provider')
+			.setDesc('Optional mailbox, folder, or label scope used by the active email provider')
 			.addText(text => text
 				.setPlaceholder('Receipts')
 				.setValue(this.plugin.settings.emailFinanceMailboxScope)
@@ -1193,90 +1269,115 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
-		new Setting(containerEl)
-			.setName('IMAP host')
-			.setDesc('Hostname of the IMAP server used with login and app password authentication')
-			.addText(text => text
-				.setPlaceholder('imap.gmail.com')
-				.setValue(this.plugin.settings.emailFinanceImapHost)
-				.onChange(async (value) => {
-					this.plugin.settings.emailFinanceImapHost = value.trim();
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('IMAP port')
-			.setDesc('Usually 993 for direct TLS IMAP')
-			.addText(text => text
-				.setPlaceholder('993')
-				.setValue(String(this.plugin.settings.emailFinanceImapPort))
-				.onChange(async (value) => {
-					const parsed = Number(value);
-					if (Number.isFinite(parsed)) {
-						this.plugin.settings.emailFinanceImapPort = Math.max(1, Math.round(parsed));
-						await this.plugin.saveSettings();
-					}
-				}));
-
-		new Setting(containerEl)
-			.setName('IMAP secure connection')
-			.setDesc('Use direct TLS when connecting to the IMAP server')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.emailFinanceImapSecure)
-				.onChange(async (value) => {
-					this.plugin.settings.emailFinanceImapSecure = value;
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('IMAP username')
-			.setDesc('Email login used for IMAP authentication')
-			.addText(text => text
-				.setPlaceholder('you@example.com')
-				.setValue(this.plugin.settings.emailFinanceImapUser)
-				.onChange(async (value) => {
-					this.plugin.settings.emailFinanceImapUser = value.trim();
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('IMAP app password')
-			.setDesc('Application-specific password used instead of the normal account password')
-			.addText(text => {
-				text
-					.setPlaceholder('Enter app password')
-					.setValue(this.plugin.settings.emailFinanceImapPassword)
-					.onChange(async (value) => {
-						this.plugin.settings.emailFinanceImapPassword = value.trim();
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.type = 'password';
+		if (this.plugin.settings.emailFinanceProvider === 'imap') {
+			const legacyHint = containerEl.createEl('p', {
+				text: 'Legacy direct IMAP mode is still supported for compatibility, but new setups should use the workspace email-provider plugin instead.',
 			});
+			legacyHint.addClass('setting-item-description');
 
-		new Setting(containerEl)
-			.setName('Email provider base URL')
-			.setDesc('For the HTTP JSON bridge, messages are fetched from <base-url>/messages')
-			.addText(text => text
-				.setPlaceholder('https://mail-bridge.example.com')
-				.setValue(this.plugin.settings.emailFinanceProviderBaseUrl)
-				.onChange(async (value) => {
-					this.plugin.settings.emailFinanceProviderBaseUrl = value.trim();
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('Email provider auth token')
-			.setDesc('Bearer token used for the HTTP JSON bridge, when required')
-			.addText(text => {
-				text
-					.setPlaceholder('Enter provider token')
-					.setValue(this.plugin.settings.emailFinanceProviderAuthToken)
+			new Setting(containerEl)
+				.setName('IMAP host')
+				.setDesc('Hostname of the IMAP server used with login and app password authentication')
+				.addText(text => text
+					.setPlaceholder('imap.gmail.com')
+					.setValue(this.plugin.settings.emailFinanceImapHost)
 					.onChange(async (value) => {
-						this.plugin.settings.emailFinanceProviderAuthToken = value.trim();
+						this.plugin.settings.emailFinanceImapHost = value.trim();
 						await this.plugin.saveSettings();
-					});
-				text.inputEl.type = 'password';
+					}));
+
+			new Setting(containerEl)
+				.setName('IMAP port')
+				.setDesc('Usually 993 for direct TLS IMAP')
+				.addText(text => text
+					.setPlaceholder('993')
+					.setValue(String(this.plugin.settings.emailFinanceImapPort))
+					.onChange(async (value) => {
+						const parsed = Number(value);
+						if (Number.isFinite(parsed)) {
+							this.plugin.settings.emailFinanceImapPort = Math.max(1, Math.round(parsed));
+							await this.plugin.saveSettings();
+						}
+					}));
+
+			new Setting(containerEl)
+				.setName('IMAP secure connection')
+				.setDesc('Use direct TLS when connecting to the IMAP server')
+				.addToggle(toggle => toggle
+					.setValue(this.plugin.settings.emailFinanceImapSecure)
+					.onChange(async (value) => {
+						this.plugin.settings.emailFinanceImapSecure = value;
+						await this.plugin.saveSettings();
+					}));
+
+			new Setting(containerEl)
+				.setName('IMAP username')
+				.setDesc('Email login used for IMAP authentication')
+				.addText(text => text
+					.setPlaceholder('you@example.com')
+					.setValue(this.plugin.settings.emailFinanceImapUser)
+					.onChange(async (value) => {
+						this.plugin.settings.emailFinanceImapUser = value.trim();
+						await this.plugin.saveSettings();
+					}));
+
+			new Setting(containerEl)
+				.setName('IMAP app password')
+				.setDesc('Application-specific password used instead of the normal account password')
+				.addText(text => {
+					text
+						.setPlaceholder('Enter app password')
+						.setValue(this.plugin.settings.emailFinanceImapPassword)
+						.onChange(async (value) => {
+							this.plugin.settings.emailFinanceImapPassword = value.trim();
+							await this.plugin.saveSettings();
+						});
+					text.inputEl.type = 'password';
+				});
+
+			new Setting(containerEl)
+				.setName('Migrate legacy IMAP to email-provider')
+				.setDesc('Create or update an IMAP channel in obsidian-email-provider from the legacy Expense Manager IMAP settings, migrate the saved sync boundary, and switch this plugin to the new provider mode.')
+				.addButton(button => button
+					.setButtonText('Migrate to Email Provider')
+					.setCta()
+					.onClick(async () => {
+						await this.plugin.handleMigrateLegacyImapToEmailProvider();
+						this.display();
+					}));
+		}
+
+		if (this.plugin.settings.emailFinanceProvider === 'http-json') {
+			const legacyHint = containerEl.createEl('p', {
+				text: 'Legacy HTTP JSON bridge mode remains available for compatibility and external integrations. New workspace setups should prefer the shared email-provider plugin.',
 			});
+			legacyHint.addClass('setting-item-description');
+
+			new Setting(containerEl)
+				.setName('Email provider base URL')
+				.setDesc('For the HTTP JSON bridge, messages are fetched from <base-url>/messages')
+				.addText(text => text
+					.setPlaceholder('https://mail-bridge.example.com')
+					.setValue(this.plugin.settings.emailFinanceProviderBaseUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.emailFinanceProviderBaseUrl = value.trim();
+						await this.plugin.saveSettings();
+					}));
+
+			new Setting(containerEl)
+				.setName('Email provider auth token')
+				.setDesc('Bearer token used for the HTTP JSON bridge, when required')
+				.addText(text => {
+					text
+						.setPlaceholder('Enter provider token')
+						.setValue(this.plugin.settings.emailFinanceProviderAuthToken)
+						.onChange(async (value) => {
+							this.plugin.settings.emailFinanceProviderAuthToken = value.trim();
+							await this.plugin.saveSettings();
+						});
+					text.inputEl.type = 'password';
+				});
+		}
 
 		new Setting(containerEl)
 			.setName('Enable scheduled email sync')
@@ -1557,6 +1658,176 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 			: syncState.lastSyncStatus;
 		const syncCursorText = syncState.cursor ?? 'none';
 		return `Last attempt: ${syncState.lastAttemptAt ?? 'never'} | Last success: ${syncState.lastSuccessfulSyncAt ?? 'never'} | Cursor: ${syncCursorText} | Status: ${syncStatusText}`;
+	}
+
+	private renderEmailProviderChannelSelection(containerEl: HTMLElement): void {
+		const api = getEmailProviderApi(this.app);
+		const channels = this.sortEmailProviderChannels(api?.listChannels() ?? []);
+		const selectedChannelIds = parseEmailProviderChannelSelection(this.plugin.settings.emailFinanceProviderChannelId);
+		const enabledChannels = channels.filter((channel) => channel.enabled);
+		const selectedChannelIdSet = new Set(selectedChannelIds);
+		const invalidSelectedChannelIds = selectedChannelIds.filter((channelId) => {
+			const channel = channels.find((item) => item.id === channelId);
+			return !channel || !channel.enabled;
+		});
+		const isSpecificSelection = selectedChannelIds.length > 0;
+
+		const selectorSetting = new Setting(containerEl)
+			.setName('Email-provider channels')
+			.setDesc(this.buildEmailProviderChannelSelectionDescription(api !== null, channels, selectedChannelIds));
+		selectorSetting.addDropdown((dropdown) => dropdown
+			.addOption('default', 'Use provider default')
+			.addOption('specific', 'Select specific channels')
+			.setValue(isSpecificSelection ? 'specific' : 'default')
+			.onChange(async (value) => {
+				if (value === 'default') {
+					await this.saveEmailProviderChannelSelection([]);
+					this.display();
+					return;
+				}
+
+				const nextSelection = isSpecificSelection
+					? selectedChannelIds
+					: this.getInitialExplicitEmailProviderSelection(channels);
+				await this.saveEmailProviderChannelSelection(nextSelection);
+				this.display();
+			}));
+		selectorSetting.addButton((button) => button
+			.setButtonText('Refresh')
+			.onClick(() => {
+				this.display();
+			}));
+		if (isSpecificSelection && enabledChannels.length > 0) {
+			selectorSetting.addButton((button) => button
+				.setButtonText('Select all')
+				.onClick(async () => {
+					await this.saveEmailProviderChannelSelection(enabledChannels.map((channel) => channel.id));
+					this.display();
+				}));
+			selectorSetting.addButton((button) => button
+				.setButtonText('Use default')
+				.onClick(async () => {
+					await this.saveEmailProviderChannelSelection([]);
+					this.display();
+				}));
+		}
+		if (invalidSelectedChannelIds.length > 0) {
+			selectorSetting.addButton((button) => button
+				.setButtonText('Clear invalid')
+				.onClick(async () => {
+					const channelById = new Map(channels.map((channel) => [channel.id, channel]));
+					const nextSelection = selectedChannelIds.filter((channelId) => channelById.get(channelId)?.enabled);
+					await this.saveEmailProviderChannelSelection(nextSelection);
+					this.display();
+				}));
+		}
+
+		if (!api) {
+			return;
+		}
+		if (!isSpecificSelection) {
+			return;
+		}
+		if (channels.length === 0) {
+			return;
+		}
+
+		const checklistHint = containerEl.createEl('p', {
+			text: 'Choose the channels that Expense Manager should sync. The saved cursor will belong to this exact channel selection.',
+		});
+		checklistHint.addClass('setting-item-description');
+
+		for (const channel of channels) {
+			const isSelected = selectedChannelIdSet.has(channel.id);
+			new Setting(containerEl)
+				.setName(channel.isDefault ? `${channel.name} (default)` : channel.name)
+				.setDesc([
+					channel.id,
+					channel.driverKind,
+					channel.enabled ? 'enabled' : 'disabled in email-provider',
+				].join(' | '))
+				.addToggle((toggle) => toggle
+					.setValue(isSelected)
+					.setDisabled(!channel.enabled && !isSelected)
+					.onChange(async (value) => {
+						const nextSelection = value
+							? [...selectedChannelIds, channel.id]
+							: selectedChannelIds.filter((channelId) => channelId !== channel.id);
+						await this.saveEmailProviderChannelSelection(nextSelection);
+						this.display();
+					}));
+		}
+	}
+
+	private buildEmailProviderChannelSelectionDescription(
+		apiAvailable: boolean,
+		channels: MailChannelSummary[],
+		selectedChannelIds: string[],
+	): string {
+		if (!apiAvailable) {
+			return 'The workspace email-provider plugin is not available. Install and enable it to pick channels here.';
+		}
+
+		const enabledChannels = channels.filter((channel) => channel.enabled);
+		const defaultChannel = channels.find((channel) => channel.enabled && channel.isDefault) ?? null;
+		const channelById = new Map(channels.map((channel) => [channel.id, channel]));
+		const invalidSelectedChannelIds = selectedChannelIds.filter((channelId) => !channelById.get(channelId)?.enabled);
+
+		if (selectedChannelIds.length === 0) {
+			if (defaultChannel) {
+				return `Selection is empty, so Expense Manager will use the email-provider default channel "${defaultChannel.name}" (${defaultChannel.id}).`;
+			}
+			if (enabledChannels.length === 1) {
+				const onlyChannel = enabledChannels[0];
+				return `Selection is empty, so Expense Manager will use the only enabled channel "${onlyChannel.name}" (${onlyChannel.id}).`;
+			}
+			if (enabledChannels.length === 0) {
+				return 'No enabled channels are currently available in obsidian-email-provider.';
+			}
+
+			return 'Selection is empty. Configure a default channel in obsidian-email-provider or switch to specific channels here.';
+		}
+
+		const selectedCount = selectedChannelIds.length;
+		const baseDescription = `Selected ${selectedCount} channel${selectedCount === 1 ? '' : 's'} for email sync.`;
+		if (invalidSelectedChannelIds.length === 0) {
+			return baseDescription;
+		}
+
+		return `${baseDescription} Unavailable channels in the saved selection: ${invalidSelectedChannelIds.join(', ')}.`;
+	}
+
+	private getInitialExplicitEmailProviderSelection(channels: MailChannelSummary[]): string[] {
+		const enabledChannels = this.sortEmailProviderChannels(channels.filter((channel) => channel.enabled));
+		const defaultChannel = enabledChannels.find((channel) => channel.isDefault);
+		if (defaultChannel) {
+			return [defaultChannel.id];
+		}
+
+		return enabledChannels[0] ? [enabledChannels[0].id] : [];
+	}
+
+	private sortEmailProviderChannels(channels: MailChannelSummary[]): MailChannelSummary[] {
+		return channels.slice().sort((left, right) => {
+			if (left.isDefault !== right.isDefault) {
+				return left.isDefault ? -1 : 1;
+			}
+			if (left.enabled !== right.enabled) {
+				return left.enabled ? -1 : 1;
+			}
+
+			const nameComparison = left.name.localeCompare(right.name);
+			if (nameComparison !== 0) {
+				return nameComparison;
+			}
+
+			return left.id.localeCompare(right.id);
+		});
+	}
+
+	private async saveEmailProviderChannelSelection(channelIds: string[]): Promise<void> {
+		this.plugin.settings.emailFinanceProviderChannelId = normalizeEmailProviderChannelIds(channelIds).join(', ');
+		await this.plugin.saveSettings();
 	}
 
 	private async refreshEmailFinanceSyncStateSetting(setting: Setting): Promise<void> {

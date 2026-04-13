@@ -6,7 +6,7 @@ Status:
 
 Last updated:
 
-- 2026-04-11
+- 2026-04-13
 
 ## Summary
 
@@ -32,6 +32,8 @@ Implementation note:
 
 - this RFC is no longer purely theoretical
 - the feature is partially implemented and validated on live mailbox data
+- mailbox transport is now being extracted into the dedicated workspace plugin `obsidian-email-provider`
+- `Expense Manager` keeps finance-specific parsing, planning, review, and note persistence on top of that transport boundary
 - the main outcome of the current iteration is that a generic receipt-evidence layer now resolves a meaningful share of real receipts without requiring a dedicated parser for every sender
 - the latest stabilization pass also tightened manual review ergonomics and timestamp extraction quality for older receipts
 
@@ -301,6 +303,12 @@ It should not be modeled as:
 ### 1. `FinanceMailProvider`
 
 Provider boundary for mailbox access.
+
+Current implementation note:
+
+- inside `Expense Manager`, `FinanceMailProvider` remains the consumer-side abstraction
+- the recommended concrete implementation now delegates mailbox transport to `obsidian-email-provider`
+- direct IMAP and HTTP implementations remain as compatibility paths
 
 Responsibilities:
 
@@ -650,6 +658,7 @@ The recommended first delivery should already align with the long-term model.
 
 ### Included
 
+- workspace `obsidian-email-provider` as the recommended transport host
 - one mailbox source behind a provider abstraction
 - delta sync using a previous successful sync boundary
 - per-run message limits with saved-cursor resume for large mailbox backfills
@@ -667,6 +676,7 @@ The recommended first delivery should already align with the long-term model.
 - optional Telegram notifications for newly created pending email review items
 - first vendor-specific parsers, with confirmed live coverage for Yandex, Lenta, and Magnit
 - generic resolved-evidence coverage for multiple non-trivial receipt families
+- explicit multi-channel selection when the shared mail provider is used
 
 ### Deferred
 
