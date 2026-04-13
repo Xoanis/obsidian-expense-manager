@@ -244,8 +244,7 @@ Current responsibility split:
 Current provider modes:
 
 - `Workspace email-provider plugin` - recommended
-- `IMAP (login + app password)` - legacy compatibility path
-- `HTTP JSON bridge` - compatibility / external integration path
+- `Not configured`
 
 ### Recommended setup
 
@@ -264,7 +263,7 @@ When `Select specific channels` is used, `Expense Manager` can sync more than on
 ### Current behavior in workspace email-provider mode
 
 - sync can target one or many selected channels
-- the saved cursor belongs to the exact selected channel set plus mailbox scope
+- the saved cursor belongs to the exact selected channel set
 - message transport and attachment download happen through the normalized `email-provider` API
 - created notes persist stable email identity in frontmatter:
   - `email_msg_id`
@@ -273,73 +272,22 @@ When `Select specific channels` is used, `Expense Manager` can sync more than on
 - rebuild upgrades older legacy IMAP notes to stable provider ids when possible
 - if an old raw message id is ambiguous across many selected channels, rebuild will ask you to narrow the selection first
 
-### Legacy direct IMAP mode
+### Removed legacy transport runtime
 
-Direct IMAP is still available for compatibility and bootstrap scenarios.
+`Expense Manager` no longer contains built-in mailbox transport implementations such as:
 
-IMAP setup in plugin settings:
+- direct `IMAP`
+- `HTTP JSON bridge`
 
-- `Email finance provider` -> `IMAP (login + app password)`
-- `Mailbox scope` -> optional folder name, defaults to `INBOX`
-- `Max email messages per sync run` -> caps one run, useful for large initial imports
-- `Enable scheduled email sync` -> runs sync automatically while Obsidian stays open
-- `Email sync interval (minutes)` -> polling interval for scheduled sync
-- `Telegram notifications for new email receipts` -> sends a Telegram message when sync creates new pending review items
-- `IMAP host` -> for example `imap.gmail.com`
-- `IMAP port` -> usually `993`
-- `IMAP secure connection` -> keep enabled for direct TLS IMAP
-- `IMAP username` -> mailbox login
-- `IMAP app password` -> provider-specific application password
+All mailbox access for finance sync now goes through `obsidian-email-provider`.
 
-Current direct IMAP behavior:
+What remains for compatibility:
 
-- fetches messages newer than the last successful sync boundary
-- for large backfills, processes only the configured maximum number of emails per run
-- resumes from the saved cursor on the next run until the backlog is exhausted
-- opens the selected mailbox in read-only mode
-- extracts `text/plain`, `text/html`, and attachment parts
-- supports attachment fan-out into receipt/PDF routes
-- does not mark messages as seen or move them between folders
+- older finance notes with `email_provider: imap` can still be rebuilt after migrating to the workspace email-provider plugin
+- older vault settings that still reference removed mail transports are normalized on load to the workspace email-provider mode
+- obsolete built-in IMAP / HTTP bridge config payload is dropped from the saved plugin settings
 
-### HTTP JSON bridge mode
-
-The compatibility HTTP mode still expects:
-
-- `GET <base-url>/messages`
-- optional query params:
-  - `since`
-  - `cursor`
-  - `limit`
-  - `mailboxScope`
-- optional `Authorization: Bearer <token>` header
-
-Expected JSON response shape:
-
-```json
-{
-  "messages": [
-    {
-      "id": "msg-1",
-      "threadId": "thread-1",
-      "from": "shop@example.com",
-      "subject": "Your receipt",
-      "receivedAt": "2026-04-04T10:15:00.000Z",
-      "textBody": "Payment received...",
-      "htmlBody": "<p>Payment received...</p>",
-      "attachmentNames": ["receipt.pdf"],
-      "attachments": [
-        {
-          "id": "att-1",
-          "fileName": "receipt.pdf",
-          "mimeType": "application/pdf",
-          "contentBase64": "JVBERi0xLjQK..."
-        }
-      ]
-    }
-  ],
-  "nextCursor": "cursor-2"
-}
-```
+If a previously configured vault used the old built-in mail transports, verify its channels in `obsidian-email-provider` after the first load of the updated plugin.
 
 ### Current intake semantics
 

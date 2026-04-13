@@ -20,6 +20,7 @@ import type {
 } from './finance-mail-provider';
 
 const EMAIL_PROVIDER_MESSAGE_ID_PREFIX = 'email-provider:';
+type AttachmentLoadMode = 'metadata-only' | 'supported-artifacts';
 
 export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 	readonly kind = 'email-provider' as const;
@@ -28,7 +29,6 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 		private readonly app: App,
 		private readonly settings: Pick<
 			ExpenseManagerSettings,
-			| 'emailFinanceMailboxScope'
 			| 'emailFinanceProviderChannelId'
 		>,
 		private readonly logger?: PluginLogger,
@@ -36,7 +36,7 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 
 	async listMessages(options: FinanceMailProviderListOptions): Promise<FinanceMailSyncBatch> {
 		const { api, channels } = this.resolveSelection();
-		const folderScope = this.resolveFolderScope(options.mailboxScope);
+		const folderScope = this.normalizeScope(options.mailboxScope);
 		const result = await api.searchMessages({
 			channelIds: channels.map((channel) => channel.id),
 			receivedAfter: options.since ?? undefined,
@@ -55,7 +55,7 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 				continue;
 			}
 
-			messages.push(await this.toFinanceMailMessage(api, details, folderScope));
+			messages.push(await this.toFinanceMailMessage(api, details, folderScope, 'metadata-only'));
 		}
 
 		return {
@@ -72,7 +72,7 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 	): Promise<FinanceMailMessage | null> {
 		const api = this.requireApi();
 		const parsed = this.parseSerializedMessageId(messageId);
-		const scopeId = options?.mailboxScope?.trim() || this.resolveFolderScope(undefined);
+		const scopeId = this.normalizeScope(options?.mailboxScope);
 		if (parsed) {
 			const details = await api.getMessage({
 				channelId: parsed.channelId,
@@ -83,7 +83,7 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 				return null;
 			}
 
-			return this.toFinanceMailMessage(api, details, scopeId);
+			return this.toFinanceMailMessage(api, details, scopeId, 'supported-artifacts');
 		}
 
 		return this.getRawMessageFromSelection(api, messageId, scopeId);
@@ -111,8 +111,13 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 		api: IEmailProviderApi,
 		message: MailMessageDetails,
 		folderScope?: string,
+		attachmentLoadMode: AttachmentLoadMode = 'supported-artifacts',
 	): Promise<FinanceMailMessage> {
 		const attachments = await Promise.all(message.attachments.map(async (attachment) => {
+			if (!this.shouldMaterializeAttachment(attachment, attachmentLoadMode)) {
+				return this.toFinanceAttachment(attachment, null, attachment.byteLength);
+			}
+
 			try {
 				const materialized = await api.materializeAttachment({
 					...message.ref,
@@ -136,6 +141,7 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 
 		return {
 			id: this.serializeMessageId(message.ref.channelId, message.ref.externalId),
+			mailboxScope: message.ref.scopeId?.trim() || folderScope || undefined,
 			threadId: message.threadId,
 			from: message.from,
 			subject: message.subject,
@@ -147,6 +153,27 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 			attachmentNames,
 			attachments,
 		};
+	}
+
+	private shouldMaterializeAttachment(
+		attachment: MailMessageDetails['attachments'][number],
+		attachmentLoadMode: AttachmentLoadMode,
+	): boolean {
+		if (attachmentLoadMode === 'metadata-only') {
+			return false;
+		}
+
+		return this.isSupportedArtifactAttachment(attachment);
+	}
+
+	private isSupportedArtifactAttachment(
+		attachment: MailMessageDetails['attachments'][number],
+	): boolean {
+		const fileName = attachment.fileName || '';
+		const mimeType = attachment.mimeType?.toLowerCase() ?? '';
+		return mimeType === 'application/pdf'
+			|| mimeType.startsWith('image/')
+			|| /\.(pdf|png|jpg|jpeg|webp|bmp)$/i.test(fileName);
 	}
 
 	private toFinanceAttachment(
@@ -218,11 +245,11 @@ export class EmailProviderFinanceMailProvider implements FinanceMailProvider {
 			return null;
 		}
 
-		return this.toFinanceMailMessage(api, matchedMessage, scopeId);
+		return this.toFinanceMailMessage(api, matchedMessage, scopeId, 'supported-artifacts');
 	}
 
-	private resolveFolderScope(explicitScope?: string): string | undefined {
-		const resolved = explicitScope?.trim() || this.settings.emailFinanceMailboxScope.trim();
+	private normalizeScope(explicitScope?: string): string | undefined {
+		const resolved = explicitScope?.trim();
 		return resolved || undefined;
 	}
 

@@ -24,7 +24,7 @@ run('rebuild accepts legacy imap notes after migrating to workspace email-provid
 
 run('rebuild still rejects incompatible non-migration provider mismatches', () => {
 	assert.equal(
-		isEmailFinanceRebuildProviderCompatible('email-provider', 'imap'),
+		isEmailFinanceRebuildProviderCompatible('email-provider', 'none'),
 		false,
 	);
 	assert.equal(

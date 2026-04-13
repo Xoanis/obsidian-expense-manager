@@ -1,7 +1,7 @@
 import { TransactionType } from './types';
 
 export type DashboardContributionMode = 'simple' | 'interactive';
-export type EmailFinanceProviderKind = 'none' | 'imap' | 'http-json' | 'email-provider';
+export type EmailFinanceProviderKind = 'none' | 'email-provider';
 export type EmailFinanceCoarseFilterField = 'from' | 'subject' | 'body' | 'attachmentName' | 'any';
 export type EmailFinanceCoarseFilterMode = 'contains' | 'regex';
 export type EmailFinanceCoarseFilterAction = 'include' | 'exclude';
@@ -183,30 +183,6 @@ export interface ExpenseManagerSettings {
 	/** Mail provider kind used for finance sync */
 	emailFinanceProvider: EmailFinanceProviderKind;
 
-	/** Optional mailbox or folder scope */
-	emailFinanceMailboxScope: string;
-
-	/** IMAP server host */
-	emailFinanceImapHost: string;
-
-	/** IMAP server port */
-	emailFinanceImapPort: number;
-
-	/** Use direct TLS for IMAP */
-	emailFinanceImapSecure: boolean;
-
-	/** IMAP username */
-	emailFinanceImapUser: string;
-
-	/** IMAP password or app password */
-	emailFinanceImapPassword: string;
-
-	/** Base URL for a provider-compatible mail JSON endpoint */
-	emailFinanceProviderBaseUrl: string;
-
-	/** Auth token for the provider-compatible mail JSON endpoint */
-	emailFinanceProviderAuthToken: string;
-
 	/** Optional email-provider channel selection: one id or a comma/newline-separated list */
 	emailFinanceProviderChannelId: string;
 
@@ -275,14 +251,6 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	aiFinanceModel: 'gpt-4.1-mini',
 	enableEmailFinanceIntake: false,
 	emailFinanceProvider: 'none',
-	emailFinanceMailboxScope: '',
-	emailFinanceImapHost: '',
-	emailFinanceImapPort: 993,
-	emailFinanceImapSecure: true,
-	emailFinanceImapUser: '',
-	emailFinanceImapPassword: '',
-	emailFinanceProviderBaseUrl: '',
-	emailFinanceProviderAuthToken: '',
 	emailFinanceProviderChannelId: '',
 	enableScheduledEmailFinanceSync: false,
 	emailFinanceSyncIntervalMinutes: 15,
@@ -290,3 +258,82 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	emailFinanceCoarseFilterRules: createDefaultEmailFinanceCoarseFilterRules(),
 	emailFinanceSyncState: createDefaultEmailFinanceSyncState(),
 };
+
+export interface ExpenseManagerSettingsNormalizationResult {
+	settings: ExpenseManagerSettings;
+	normalizedLegacyEmailFinanceProvider: 'imap' | 'http-json' | null;
+	removedLegacyEmailFinanceConfigKeys: string[];
+}
+
+export function normalizeExpenseManagerSettings(raw: unknown): ExpenseManagerSettingsNormalizationResult {
+	const source = isRecord(raw) ? raw : {};
+	const loaded = Object.assign({}, DEFAULT_SETTINGS, source) as ExpenseManagerSettings;
+	const normalizedProvider = normalizeEmailFinanceProviderKind(source.emailFinanceProvider);
+	const removedLegacyEmailFinanceConfigKeys = collectRemovedLegacyEmailFinanceConfigKeys(source);
+
+	return {
+		settings: {
+			...loaded,
+			emailFinanceProvider: normalizedProvider.kind,
+			emailFinanceProviderChannelId: typeof loaded.emailFinanceProviderChannelId === 'string'
+				? loaded.emailFinanceProviderChannelId
+				: DEFAULT_SETTINGS.emailFinanceProviderChannelId,
+			emailFinanceCoarseFilterRules: Array.isArray(loaded.emailFinanceCoarseFilterRules) && loaded.emailFinanceCoarseFilterRules.length > 0
+				? loaded.emailFinanceCoarseFilterRules
+				: createDefaultEmailFinanceCoarseFilterRules(),
+			emailFinanceSyncState: loaded.emailFinanceSyncState
+				? {
+					...createDefaultEmailFinanceSyncState(),
+					...loaded.emailFinanceSyncState,
+				}
+				: createDefaultEmailFinanceSyncState(),
+			emailFinanceSyncIntervalMinutes: Math.max(1, Math.round(Number(loaded.emailFinanceSyncIntervalMinutes) || DEFAULT_SETTINGS.emailFinanceSyncIntervalMinutes)),
+			emailFinanceMaxMessagesPerRun: Math.max(1, Math.round(Number(loaded.emailFinanceMaxMessagesPerRun) || DEFAULT_SETTINGS.emailFinanceMaxMessagesPerRun)),
+		},
+		normalizedLegacyEmailFinanceProvider: normalizedProvider.normalizedLegacyProvider,
+		removedLegacyEmailFinanceConfigKeys,
+	};
+}
+
+function normalizeEmailFinanceProviderKind(value: unknown): {
+	kind: EmailFinanceProviderKind;
+	normalizedLegacyProvider: 'imap' | 'http-json' | null;
+} {
+	if (value === 'email-provider') {
+		return {
+			kind: 'email-provider',
+			normalizedLegacyProvider: null,
+		};
+	}
+
+	if (value === 'imap' || value === 'http-json') {
+		return {
+			kind: 'email-provider',
+			normalizedLegacyProvider: value,
+		};
+	}
+
+	return {
+		kind: 'none',
+		normalizedLegacyProvider: null,
+	};
+}
+
+function collectRemovedLegacyEmailFinanceConfigKeys(source: Record<string, unknown>): string[] {
+	const legacyKeys = [
+		'emailFinanceMailboxScope',
+		'emailFinanceImapHost',
+		'emailFinanceImapPort',
+		'emailFinanceImapSecure',
+		'emailFinanceImapUser',
+		'emailFinanceImapPassword',
+		'emailFinanceProviderBaseUrl',
+		'emailFinanceProviderAuthToken',
+	];
+
+	return legacyKeys.filter((key) => key in source);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === 'object';
+}

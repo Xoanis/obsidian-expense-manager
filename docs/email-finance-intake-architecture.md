@@ -9,8 +9,7 @@ The main idea of the current design is:
 The current implementation supports:
 
 - `Workspace email-provider plugin` as the recommended transport host
-- `IMAP (login + app password)`
-- `HTTP JSON bridge`
+- removed legacy `IMAP` / `HTTP JSON bridge` runtime with on-load settings normalization
 - manual sync command
 - scheduled sync on a configurable interval while Obsidian is open
 - per-run message cap with saved cursor resume for large initial backfills
@@ -196,19 +195,17 @@ flowchart TD
     A["settings.emailFinanceProvider"] --> B{"Provider kind"}
     B -->|"none"| C["NoopFinanceMailProvider"]
     B -->|"email-provider"| D["EmailProviderFinanceMailProvider"]
-    B -->|"imap"| E["ImapFinanceMailProvider"]
-    B -->|"http-json"| F["HttpJsonFinanceMailProvider"]
 
     C --> G["Return empty batch"]
     D --> H["Delegate mailbox access to obsidian-email-provider"]
-    E --> I["Fetch live messages from IMAP mailbox"]
-    F --> J["Fetch normalized messages from external HTTP bridge"]
 ```
 
 Recommended mode:
 
 - `email-provider` is now the primary architecture
-- direct `imap` and `http-json` remain compatibility paths
+- built-in legacy `imap` and `http-json` runtime paths have been removed
+- older vault settings that still point at removed transports are normalized on load into `email-provider`
+- old finance notes still retain rebuild compatibility when migrating from legacy IMAP to `email-provider`
 
 ## 4. Workspace Email Provider Mode
 
@@ -247,57 +244,21 @@ Current behavior in this mode:
 - the checkpoint key is built from:
   - consumer id
   - one channel id, or a synthetic channel-selection key
-  - mailbox scope fingerprint
+  - a fixed default scope fingerprint on the consumer side
 - saved finance notes keep stable provider ids such as `email-provider:<channelId>:<externalId>`
+- the actual mailbox scope used for a message is persisted per note from the provider response rather than from an `Expense Manager` setting
 
-## 4a. Legacy Direct IMAP Mode
+## 4a. Removed Legacy Transport Runtime
 
-```mermaid
-flowchart TD
-    A["ImapFinanceMailProvider.listMessages()"]
-    B["Read host / port / secure / user / app password"]
-    C{"Missing required credentials?"}
-    D["Create ImapFlow client"]
-    E["connect()"]
-    F["getMailboxLock(mailboxScope or INBOX, readOnly=true)"]
-    G["Build search query from since"]
-    H["search(..., uid=true)"]
-    I["Sort UIDs, apply cursor resume, apply limit"]
-    J["fetch(uid, envelope, internalDate, bodyStructure)"]
-    K["collectMessageParts(bodyStructure)"]
-    L["downloadMany(text, html, attachments)"]
-    M["Normalize message summary"]
-    N["Append FinanceMailMessage"]
-    O["Compute nextCursor when more UIDs remain"]
-    P["release mailbox lock"]
-    Q["logout()"]
-    R["Return FinanceMailSyncBatch"]
+`Expense Manager` no longer contains built-in mailbox transports such as direct IMAP or the HTTP JSON bridge.
 
-    A --> B --> C
-    C -->|"Yes"| X["Throw configuration error"]
-    C -->|"No"| D --> E --> F --> G --> H --> I --> J --> K --> L --> M --> N --> O --> P --> Q --> R
-```
+What remains:
 
-Current IMAP pagination behavior:
+- finance-note rebuild compatibility for older notes that still say `email_provider: imap`
+- older vault settings that still reference removed built-in mail transports are normalized into `email-provider` on load
+- obsolete IMAP / HTTP bridge config payload is removed from the saved plugin settings during normalization
 
-- mailbox search still starts from `since`, but the provider now resumes after the saved numeric UID cursor when one exists
-- the configured per-run limit is applied before body and attachment downloads, so large backfills do not eagerly materialize the whole mailbox
-- when more matching UIDs remain after the selected batch, the provider returns `nextCursor`
-- `nextCursor` is cleared only after the current backlog slice is exhausted
-
-### IMAP extraction details
-
-```mermaid
-flowchart LR
-    Root["MessageStructureObject"] --> Walk["Recursive walk over MIME tree"]
-    Walk --> Text["Collect text/plain part ids"]
-    Walk --> Html["Collect text/html part ids"]
-    Walk --> Attach["Collect attachment parts<br/>filename or disposition=attachment"]
-    Text --> Download["download() per part"]
-    Html --> Download
-    Attach --> Download
-    Download --> Summary["FinanceMailMessage"]
-```
+After normalization, the operator should verify mailbox channels in `obsidian-email-provider` if the old vault relied on built-in transport settings.
 
 ## 5. Coarse Filter Logic
 
@@ -751,7 +712,7 @@ Current reporting rule:
 flowchart TD
     ProviderKind["settings.emailFinanceProvider"] --> Branch{"State store"}
     Branch -->|"email-provider"| ProviderStore["EmailProviderCheckpointSyncStateStore"]
-    Branch -->|"imap / http-json / none"| LocalStore["LocalEmailFinanceSyncStateStore"]
+    Branch -->|"none"| LocalStore["LocalEmailFinanceSyncStateStore"]
 
     ProviderStore --> ProviderCheckpoint["Checkpoint in obsidian-email-provider"]
     ProviderStore --> Mirror["Mirror into settings.emailFinanceSyncState"]
@@ -768,7 +729,7 @@ Current usage:
 
 - `settings.emailFinanceSyncState` is always the operator-visible mirror
 - in `email-provider` mode, the authoritative checkpoint lives in `obsidian-email-provider`
-- in legacy direct modes, the local settings snapshot remains authoritative
+- when email sync is disabled, the local settings snapshot remains the only mirror
 - `lastSuccessfulSyncAt` is the stable delta-sync boundary for completed batches
 - `cursor` is the active continuation boundary for partially consumed paginated backfills
 - when `cursor` is non-null, sync resumes from that cursor before advancing `lastSuccessfulSyncAt`
@@ -815,7 +776,7 @@ Architectural implication:
 - [email-finance-sync-service.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/sync/email-finance-sync-service.ts)
   - orchestration
 - [finance-mail-provider.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/transport/finance-mail-provider.ts)
-  - provider abstraction plus legacy IMAP and HTTP implementations
+  - provider abstraction for `none` and workspace `email-provider` modes
 - [email-provider-finance-mail-provider.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/email-finance/transport/email-provider-finance-mail-provider.ts)
   - adapter from finance sync into the workspace `obsidian-email-provider` API
 - [client.ts](C:/Users/petro/OneDrive/Документы/codex_projects/obsidian/obsidian-expense-manager/src/integrations/email-provider/client.ts)

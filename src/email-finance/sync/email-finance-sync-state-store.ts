@@ -52,7 +52,6 @@ export class EmailProviderCheckpointSyncStateStore implements EmailFinanceSyncSt
 		private readonly app: App,
 		private readonly getSettings: () => Pick<
 			ExpenseManagerSettings,
-			| 'emailFinanceMailboxScope'
 			| 'emailFinanceProviderChannelId'
 		>,
 		private readonly persistLocalMirror: (nextState: EmailFinanceSyncState) => Promise<void>,
@@ -97,10 +96,7 @@ export class EmailProviderCheckpointSyncStateStore implements EmailFinanceSyncSt
 			this.app,
 			settings.emailFinanceProviderChannelId,
 		);
-		const key = this.buildCheckpointKey(
-			runtime.channels.map((channel) => channel.id),
-			settings.emailFinanceMailboxScope,
-		);
+		const key = this.buildCheckpointKey(runtime.channels.map((channel) => channel.id));
 		const checkpoint = await runtime.api.getCheckpoint(key);
 		return {
 			api: runtime.api,
@@ -111,9 +107,8 @@ export class EmailProviderCheckpointSyncStateStore implements EmailFinanceSyncSt
 
 	private buildCheckpointKey(
 		channelIds: string[],
-		mailboxScope: string,
 	): MailConsumerCheckpointKey {
-		return buildEmailFinanceCheckpointKey(channelIds, mailboxScope);
+		return buildEmailFinanceCheckpointKey(channelIds);
 	}
 
 	private fromCheckpoint(checkpoint: MailConsumerCheckpoint): EmailFinanceSyncState {
@@ -154,7 +149,6 @@ export class EmailProviderCheckpointSyncStateStore implements EmailFinanceSyncSt
 
 export function buildEmailFinanceCheckpointKey(
 	channelId: string | string[],
-	mailboxScope: string,
 ): MailConsumerCheckpointKey {
 	const normalizedChannelId = buildEmailProviderChannelSelectionKey(
 		Array.isArray(channelId) ? channelId : [channelId],
@@ -162,15 +156,6 @@ export function buildEmailFinanceCheckpointKey(
 	return {
 		consumerId: EMAIL_FINANCE_CHECKPOINT_CONSUMER_ID,
 		channelId: normalizedChannelId,
-		scopeFingerprint: buildEmailFinanceScopeFingerprint(mailboxScope),
+		scopeFingerprint: DEFAULT_SCOPE_FINGERPRINT,
 	};
-}
-
-export function buildEmailFinanceScopeFingerprint(mailboxScope: string): string {
-	const normalizedScope = mailboxScope.trim();
-	if (!normalizedScope) {
-		return DEFAULT_SCOPE_FINGERPRINT;
-	}
-
-	return `mailbox:${normalizedScope}`;
 }

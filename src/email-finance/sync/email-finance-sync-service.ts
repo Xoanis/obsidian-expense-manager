@@ -222,7 +222,6 @@ export class EmailFinanceSyncService {
 			const batch = await provider.listMessages({
 				cursor: previousState.cursor,
 				since: previousState.lastSuccessfulSyncAt,
-				mailboxScope: settings.emailFinanceMailboxScope,
 				limit: settings.emailFinanceMaxMessagesPerRun,
 			});
 
@@ -250,7 +249,11 @@ export class EmailFinanceSyncService {
 				const filterResult = this.coarseFilter.evaluate(message, settings.emailFinanceCoarseFilterRules);
 				if (filterResult.passed) {
 					passedCoarseFilter += 1;
-					const outcome = await this.processMessage(message);
+					const hydratedMessage = await this.hydrateMessageForProcessing(
+						provider,
+						message,
+					);
+					const outcome = await this.processMessage(hydratedMessage);
 					plannedUnits += outcome.plannedUnits;
 					createdPendingNotes += outcome.createdPendingNotes;
 					createdNeedsAttentionNotes += outcome.createdNeedsAttentionNotes;
@@ -384,7 +387,7 @@ export class EmailFinanceSyncService {
 			throw new Error('This email note does not contain a structured or recoverable message id yet.');
 		}
 
-		const mailboxScope = current.emailMailboxScope?.trim() || settings.emailFinanceMailboxScope.trim() || undefined;
+		const mailboxScope = current.emailMailboxScope?.trim() || undefined;
 		const message = await provider.getMessage(messageId, {
 			mailboxScope,
 		});
@@ -1502,7 +1505,7 @@ export class EmailFinanceSyncService {
 		message: FinanceMailMessage,
 	): Pick<TransactionData, 'emailMessageId' | 'emailProvider' | 'emailMailboxScope'> {
 		const settings = this.getSettings();
-		const mailboxScope = settings.emailFinanceMailboxScope.trim();
+		const mailboxScope = message.mailboxScope?.trim();
 		return {
 			emailMessageId: message.id,
 			emailProvider: settings.emailFinanceProvider,
@@ -1649,16 +1652,48 @@ export class EmailFinanceSyncService {
 		return this.buildSyntheticMessageArtifact(message, fallbackText);
 	}
 
-	private isSupportedArtifactAttachment(attachment: FinanceMailAttachment): boolean {
-		if (!attachment.contentBase64) {
-			return false;
+	private async hydrateMessageForProcessing(
+		provider: FinanceMailProvider,
+		message: FinanceMailMessage,
+	): Promise<FinanceMailMessage> {
+		if (!this.needsAttachmentHydration(message)) {
+			return message;
 		}
 
+		try {
+			const hydratedMessage = await provider.getMessage(message.id, {
+				mailboxScope: message.mailboxScope?.trim() || undefined,
+			});
+			return hydratedMessage ?? message;
+		} catch (error) {
+			this.logger?.warn('Email finance message hydration failed, continuing without attachment bytes', {
+				messageId: message.id,
+				subject: message.subject,
+				error: (error as Error).message,
+			});
+			return message;
+		}
+	}
+
+	private needsAttachmentHydration(message: FinanceMailMessage): boolean {
+		return message.attachments.some((attachment) => (
+			this.isSupportedArtifactAttachmentCandidate(attachment) && !attachment.contentBase64
+		));
+	}
+
+	private isSupportedArtifactAttachmentCandidate(attachment: FinanceMailAttachment): boolean {
 		const fileName = attachment.fileName || '';
 		const mimeType = attachment.mimeType?.toLowerCase() ?? '';
 		return mimeType === 'application/pdf'
 			|| mimeType.startsWith('image/')
 			|| /\.(pdf|png|jpg|jpeg|webp|bmp)$/i.test(fileName);
+	}
+
+	private isSupportedArtifactAttachment(attachment: FinanceMailAttachment): boolean {
+		if (!attachment.contentBase64) {
+			return false;
+		}
+		return this.isSupportedArtifactAttachmentCandidate(attachment);
 	}
 
 	private scoreAttachment(attachment: FinanceMailAttachment): number {
