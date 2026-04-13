@@ -215,7 +215,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 		if (normalization.removedLegacyEmailFinanceConfigKeys.length > 0) {
 			parts.push('Dropped obsolete built-in mail transport settings from the saved plugin configuration.');
 		}
-		parts.push('Verify your channels in obsidian-email-provider if email sync was previously configured through legacy settings.');
+		parts.push('Review channels and mailbox scope in obsidian-email-provider if email sync was previously configured through legacy settings.');
 		return parts.join(' ');
 	}
 
@@ -1211,7 +1211,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Enable email finance intake')
-			.setDesc('Prepare delta-sync and coarse filtering for mailbox-based finance intake')
+			.setDesc('Enable mailbox-based finance intake. Mail transport comes from obsidian-email-provider; filtering and parsing stay in Expense Manager.')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.enableEmailFinanceIntake)
 				.onChange(async (value) => {
@@ -1221,7 +1221,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Email finance provider')
-			.setDesc('Choose how finance emails are fetched for sync')
+			.setDesc('Choose the mailbox source used for finance sync. Direct mail transport configuration now lives in obsidian-email-provider.')
 			.addDropdown((dropdown) => dropdown
 				.addOption('none', 'Not configured')
 				.addOption('email-provider', 'Workspace email-provider plugin (recommended)')
@@ -1240,7 +1240,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Enable scheduled email sync')
-			.setDesc('Run the same email sync pipeline automatically while Obsidian is open')
+			.setDesc('Run the same finance-email sync pipeline automatically while Obsidian is open.')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.enableScheduledEmailFinanceSync)
 				.onChange(async (value) => {
@@ -1250,7 +1250,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Email sync interval (minutes)')
-			.setDesc('How often automatic email sync should run while Obsidian is open')
+			.setDesc('How often automatic finance-email sync should run while Obsidian is open.')
 			.addText(text => text
 				.setPlaceholder('15')
 				.setValue(String(this.plugin.settings.emailFinanceSyncIntervalMinutes))
@@ -1264,7 +1264,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Max email messages per sync run')
-			.setDesc('Limit how many emails are processed in one run to avoid overloading external APIs. The next run continues from the saved cursor.')
+			.setDesc('Cap a single run to keep sync responsive and avoid API spikes. Later runs continue from the saved cursor for the same channel selection.')
 			.addText(text => text
 				.setPlaceholder('20')
 				.setValue(String(this.plugin.settings.emailFinanceMaxMessagesPerRun))
@@ -1592,7 +1592,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 		}
 
 		const checklistHint = containerEl.createEl('p', {
-			text: 'Choose the channels that Expense Manager should sync. The saved cursor will belong to this exact channel selection.',
+			text: 'Choose which enabled channels Expense Manager should sync in one run. The saved cursor is tied to this exact channel set.',
 		});
 		checklistHint.addClass('setting-item-description');
 
@@ -1624,7 +1624,7 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 		selectedChannelIds: string[],
 	): string {
 		if (!apiAvailable) {
-			return 'The workspace email-provider plugin is not available. Install and enable it to pick channels here.';
+			return 'obsidian-email-provider is not available. Install and enable it to choose channels here.';
 		}
 
 		const enabledChannels = channels.filter((channel) => channel.enabled);
@@ -1634,21 +1634,21 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 
 		if (selectedChannelIds.length === 0) {
 			if (defaultChannel) {
-				return `Selection is empty, so Expense Manager will use the email-provider default channel "${defaultChannel.name}" (${defaultChannel.id}).`;
+				return `No explicit selection. Expense Manager will use the email-provider default channel "${defaultChannel.name}" (${defaultChannel.id}).`;
 			}
 			if (enabledChannels.length === 1) {
 				const onlyChannel = enabledChannels[0];
-				return `Selection is empty, so Expense Manager will use the only enabled channel "${onlyChannel.name}" (${onlyChannel.id}).`;
+				return `No explicit selection. Expense Manager will use the only enabled channel "${onlyChannel.name}" (${onlyChannel.id}).`;
 			}
 			if (enabledChannels.length === 0) {
 				return 'No enabled channels are currently available in obsidian-email-provider.';
 			}
 
-			return 'Selection is empty. Configure a default channel in obsidian-email-provider or switch to specific channels here.';
+			return 'No explicit selection. Configure a default channel in obsidian-email-provider or switch to a specific channel list here.';
 		}
 
 		const selectedCount = selectedChannelIds.length;
-		const baseDescription = `Selected ${selectedCount} channel${selectedCount === 1 ? '' : 's'} for email sync.`;
+		const baseDescription = `Selected ${selectedCount} channel${selectedCount === 1 ? '' : 's'} for email sync. The cursor will be tied to this exact set.`;
 		if (invalidSelectedChannelIds.length === 0) {
 			return baseDescription;
 		}

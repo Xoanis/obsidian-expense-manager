@@ -252,19 +252,21 @@ Recommended setup is now:
 
 1. Install and enable `obsidian-email-provider`.
 2. Create one or more mail channels there.
-3. Optionally mark one channel as default.
+3. Optionally mark one channel as default and configure its mailbox scope there.
 4. In `Expense Manager`, set `Email finance provider` to `Workspace email-provider plugin`.
 5. In `Email-provider channels`, choose either:
    - `Use provider default`
    - `Select specific channels`
 
 When `Select specific channels` is used, `Expense Manager` can sync more than one mailbox channel in the same run.
+Mailbox scope is configured per channel in `obsidian-email-provider`, not as a global `Expense Manager` setting.
 
 ### Current behavior in workspace email-provider mode
 
 - sync can target one or many selected channels
 - the saved cursor belongs to the exact selected channel set
 - message transport and attachment download happen through the normalized `email-provider` API
+- mailbox scope is resolved by `obsidian-email-provider` and persisted per note for rebuilds
 - created notes persist stable email identity in frontmatter:
   - `email_msg_id`
   - `email_provider`
@@ -285,7 +287,7 @@ What remains for compatibility:
 
 - older finance notes with `email_provider: imap` can still be rebuilt after migrating to the workspace email-provider plugin
 - older vault settings that still reference removed mail transports are normalized on load to the workspace email-provider mode
-- obsolete built-in IMAP / HTTP bridge config payload is dropped from the saved plugin settings
+- obsolete built-in IMAP / HTTP bridge config payload and the old global mailbox-scope setting are dropped from the saved plugin settings
 
 If a previously configured vault used the old built-in mail transports, verify its channels in `obsidian-email-provider` after the first load of the updated plugin.
 

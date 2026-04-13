@@ -1,7 +1,7 @@
 {
 	"id": "expense-manager",
 	"name": "Expense Manager",
-	"version": "1.0.1",
+	"version": "1.1.0",
 	"minAppVersion": "0.15.0",
 	"description": "Track your expenses and income with multiple input methods including QR code receipts and Telegram bot integration.",
 	"author": "Petrov Ivan",

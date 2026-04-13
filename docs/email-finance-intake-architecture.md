@@ -244,8 +244,9 @@ Current behavior in this mode:
 - the checkpoint key is built from:
   - consumer id
   - one channel id, or a synthetic channel-selection key
-  - a fixed default scope fingerprint on the consumer side
+  - a fixed default scope fingerprint on the consumer side, because mailbox scope is no longer a global `Expense Manager` setting
 - saved finance notes keep stable provider ids such as `email-provider:<channelId>:<externalId>`
+- channel and mailbox scope configuration live in `obsidian-email-provider`
 - the actual mailbox scope used for a message is persisted per note from the provider response rather than from an `Expense Manager` setting
 
 ## 4a. Removed Legacy Transport Runtime
@@ -256,9 +257,9 @@ What remains:
 
 - finance-note rebuild compatibility for older notes that still say `email_provider: imap`
 - older vault settings that still reference removed built-in mail transports are normalized into `email-provider` on load
-- obsolete IMAP / HTTP bridge config payload is removed from the saved plugin settings during normalization
+- obsolete IMAP / HTTP bridge config payload and the old global mailbox-scope setting are removed from the saved plugin settings during normalization
 
-After normalization, the operator should verify mailbox channels in `obsidian-email-provider` if the old vault relied on built-in transport settings.
+After normalization, the operator should verify mailbox channels and mailbox scope in `obsidian-email-provider` if the old vault relied on built-in transport settings.
 
 ## 5. Coarse Filter Logic
 
