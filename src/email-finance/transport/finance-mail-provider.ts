@@ -1,7 +1,9 @@
+import type { App } from 'obsidian';
 import { requestUrl } from 'obsidian';
 import type { EmailFinanceProviderKind, ExpenseManagerSettings } from '../../settings';
 import type { PluginLogger } from '../../utils/plugin-debug-log';
 import { ImapFlow, type MessageAddressObject, type MessageStructureObject } from 'imapflow';
+import { EmailProviderFinanceMailProvider } from './email-provider-finance-mail-provider';
 
 export interface FinanceMailAttachment {
 	id: string;
@@ -867,19 +869,30 @@ class ImapFinanceMailProvider implements FinanceMailProvider {
 }
 
 export function createFinanceMailProvider(
+	app: App | undefined,
 	settings: Pick<
 		ExpenseManagerSettings,
 		| 'emailFinanceProvider'
 		| 'emailFinanceProviderBaseUrl'
 		| 'emailFinanceProviderAuthToken'
+		| 'emailFinanceProviderChannelId'
 		| 'emailFinanceImapHost'
 		| 'emailFinanceImapPort'
 		| 'emailFinanceImapSecure'
 		| 'emailFinanceImapUser'
 		| 'emailFinanceImapPassword'
+		| 'emailFinanceMailboxScope'
 	>,
 	logger?: PluginLogger,
 ): FinanceMailProvider {
+	if (settings.emailFinanceProvider === 'email-provider') {
+		if (!app) {
+			throw new Error('Expense Manager requires the Obsidian app instance to use the workspace email-provider plugin.');
+		}
+
+		return new EmailProviderFinanceMailProvider(app, settings, logger);
+	}
+
 	if (settings.emailFinanceProvider === 'imap') {
 		return new ImapFinanceMailProvider(settings, logger);
 	}

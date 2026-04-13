@@ -1,3 +1,4 @@
+import type { App } from 'obsidian';
 import { requestUrl, TFile } from 'obsidian';
 import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { request as httpsRequest } from 'node:https';
@@ -15,6 +16,10 @@ import {
 	buildSuccessfulEmailFinanceSyncState,
 	hasMoreEmailFinanceSyncPages,
 } from './email-finance-sync-progress';
+import {
+	isEmailFinanceRebuildProviderCompatible,
+	resolveRebuiltEmailMessageId,
+} from './email-finance-rebuild-compat';
 import {
 	createFinanceMailProvider,
 	FinanceMailProvider,
@@ -93,6 +98,7 @@ interface RemoteReceiptMaterializationResult {
 }
 
 interface EmailFinanceSyncServiceOptions {
+	app?: App;
 	logger?: PluginLogger;
 	provider?: FinanceMailProvider;
 	coarseFilter?: EmailFinanceCoarseFilter;
@@ -100,6 +106,7 @@ interface EmailFinanceSyncServiceOptions {
 }
 
 export class EmailFinanceSyncService {
+	private readonly app?: App;
 	private readonly provider?: FinanceMailProvider;
 	private readonly coarseFilter: EmailFinanceCoarseFilter;
 	private readonly planner: EmailFinanceMessagePlanner;
@@ -113,6 +120,7 @@ export class EmailFinanceSyncService {
 		private readonly pendingProposalService: PendingFinanceProposalService,
 		options?: EmailFinanceSyncServiceOptions,
 	) {
+		this.app = options?.app;
 		this.provider = options?.provider;
 		this.coarseFilter = options?.coarseFilter ?? new EmailFinanceCoarseFilter();
 		this.logger = options?.logger;
@@ -120,12 +128,21 @@ export class EmailFinanceSyncService {
 	}
 
 	private resolveProvider(settings: ExpenseManagerSettings): FinanceMailProvider {
-		return this.provider ?? createFinanceMailProvider(settings, this.logger);
+		return this.provider ?? createFinanceMailProvider(this.app, settings, this.logger);
+	}
+
+	async getSyncState(): Promise<ExpenseManagerSettings['emailFinanceSyncState']> {
+		return this.syncStateStore.getState();
+	}
+
+	async resetSyncState(): Promise<ExpenseManagerSettings['emailFinanceSyncState']> {
+		return this.syncStateStore.reset();
 	}
 
 	async syncNewMessages(): Promise<EmailFinanceSyncSummary> {
 		const settings = this.getSettings();
 		if (!settings.enableEmailFinanceIntake) {
+			const state = await this.syncStateStore.getState();
 			return {
 				status: 'disabled',
 				totalMessages: 0,
@@ -136,7 +153,7 @@ export class EmailFinanceSyncService {
 				createdNeedsAttentionNotes: 0,
 				createdDuplicateNotes: 0,
 				failedUnits: 0,
-				nextCursor: this.syncStateStore.getState().cursor,
+				nextCursor: state.cursor,
 				summaryText: 'Email finance intake is disabled in settings.',
 			};
 		}
@@ -163,7 +180,7 @@ export class EmailFinanceSyncService {
 			};
 		}
 
-		const previousState = this.syncStateStore.getState();
+		const previousState = await this.syncStateStore.getState();
 		const now = new Date().toISOString();
 		try {
 			await this.syncStateStore.update({
@@ -273,10 +290,7 @@ export class EmailFinanceSyncService {
 			throw new Error('No email provider is configured for rebuild.');
 		}
 
-		if (
-			current.emailProvider?.trim()
-			&& current.emailProvider.trim() !== provider.kind
-		) {
+		if (!isEmailFinanceRebuildProviderCompatible(current.emailProvider, provider.kind)) {
 			throw new Error(
 				`The note expects email provider "${current.emailProvider}", but the current settings use "${provider.kind}".`,
 			);
@@ -296,6 +310,7 @@ export class EmailFinanceSyncService {
 				`Email message ${messageId} was not found in ${mailboxScope ?? 'the configured mailbox'}.`,
 			);
 		}
+		const rebuiltMessageId = resolveRebuiltEmailMessageId(message, messageId);
 
 		const analysis = await this.analyzeMessage(message);
 		const selected = this.selectAcceptedProposalForExistingTransaction(
@@ -335,7 +350,7 @@ export class EmailFinanceSyncService {
 				artifact: undefined,
 				sourceContext,
 				source: 'email',
-				emailMessageId: messageId,
+				emailMessageId: rebuiltMessageId,
 				emailProvider: provider.kind,
 				emailMailboxScope: mailboxScope,
 				duplicateOf: current.duplicateOf,
@@ -382,7 +397,7 @@ export class EmailFinanceSyncService {
 
 		return {
 			file: updatedFile,
-			messageId,
+			messageId: rebuiltMessageId,
 			matchedUnitLabels: selected.unitLabels,
 			proposal: rebuiltProposal,
 		};

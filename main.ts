@@ -30,6 +30,7 @@ import { registerFinanceDomain } from './src/integrations/para-core/register-fin
 import { registerFinanceMetadataContributions } from './src/integrations/para-core/register-metadata-contributions';
 import { registerFinanceTemplateContributions } from './src/integrations/para-core/register-template-contributions';
 import { registerFinanceTelegramHelpContributions } from './src/integrations/para-core/register-telegram-help-contributions';
+import { migrateLegacyImapSettingsToEmailProvider } from './src/integrations/email-provider/legacy-imap-migration';
 import { IParaCoreApi, RegisteredParaDomain } from './src/integrations/para-core/types';
 import { FinanceTelegramBridge } from './src/integrations/telegram/finance-telegram-bridge';
 import { getTelegramBotApi, TelegramBotApi } from './src/integrations/telegram/client';
@@ -44,7 +45,11 @@ import { ReceiptEnrichmentService } from './src/services/receipt-enrichment-serv
 import { DuplicateMergeWorkflowService } from './src/services/duplicate-merge-workflow-service';
 import { FinanceReviewWorkflowService } from './src/services/finance-review-workflow-service';
 import { EmailFinanceSyncService } from './src/email-finance/sync/email-finance-sync-service';
-import { EmailFinanceSyncStateStore } from './src/email-finance/sync/email-finance-sync-state-store';
+import {
+	EmailFinanceSyncStateStore,
+	EmailProviderCheckpointSyncStateStore,
+	LocalEmailFinanceSyncStateStore,
+} from './src/email-finance/sync/email-finance-sync-state-store';
 import { PendingFinanceProposalService } from './src/email-finance/review/pending-finance-proposal-service';
 import { ReportPeriodModal } from './src/ui/report-period-modal';
 import { ReportsModal } from './src/ui/reports-modal';
@@ -141,6 +146,13 @@ export default class ExpenseManagerPlugin extends Plugin {
 		registerSyncFinanceEmailsCommand(this);
 		registerRebuildCurrentEmailTransactionCommand(this);
 		this.addCommand({
+			id: 'migrate-legacy-imap-to-email-provider',
+			name: 'Migrate legacy IMAP finance settings to Email Provider',
+			callback: async () => {
+				await this.handleMigrateLegacyImapToEmailProvider();
+			},
+		});
+		this.addCommand({
 			id: 'open-debug-log',
 			name: 'Open shared runtime log',
 			callback: async () => {
@@ -233,6 +245,14 @@ export default class ExpenseManagerPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
+	async getCurrentEmailFinanceSyncState(): Promise<EmailFinanceSyncState> {
+		return this.emailFinanceSyncService.getSyncState();
+	}
+
+	async resetEmailFinanceSyncBoundary(): Promise<EmailFinanceSyncState> {
+		return this.emailFinanceSyncService.resetSyncState();
+	}
+
 	isParaCoreStorageManaged(): boolean {
 		return this.financeDomain !== null;
 	}
@@ -258,6 +278,34 @@ export default class ExpenseManagerPlugin extends Plugin {
 			showResultNotice: true,
 			showErrorNotice: true,
 		});
+	}
+
+	async handleMigrateLegacyImapToEmailProvider() {
+		try {
+			const result = await migrateLegacyImapSettingsToEmailProvider(
+				this.app,
+				this.settings,
+				this.logger,
+			);
+
+			this.settings.emailFinanceProvider = 'email-provider';
+			this.settings.emailFinanceProviderChannelId = result.channelId;
+			await this.saveSettings();
+
+			const statusParts = [
+				result.channelCreated
+					? `created channel "${result.channelId}"`
+					: `updated channel "${result.channelId}"`,
+				result.checkpointMigrated
+					? 'migrated sync checkpoint'
+					: 'kept existing provider checkpoint state',
+			];
+			new Notice(`Email finance migration completed: ${statusParts.join(', ')}.`, 7000);
+		} catch (error) {
+			const message = (error as Error).message;
+			new Notice(`Email finance migration failed: ${message}`, 10000);
+			this.logger.error('Email finance legacy IMAP migration failed', error);
+		}
 	}
 
 	async handleOpenFinanceReviewQueue() {
@@ -359,10 +407,7 @@ export default class ExpenseManagerPlugin extends Plugin {
 	}
 
 	private createEmailFinanceSyncService(): EmailFinanceSyncService {
-		const syncStateStore = new EmailFinanceSyncStateStore(
-			() => this.settings.emailFinanceSyncState,
-			(nextState) => this.persistEmailFinanceSyncState(nextState),
-		);
+		const syncStateStore = this.createEmailFinanceSyncStateStore();
 
 		return new EmailFinanceSyncService(
 			() => this.settings,
@@ -371,8 +416,25 @@ export default class ExpenseManagerPlugin extends Plugin {
 			this.expenseService,
 			this.pendingFinanceProposalService,
 			{
+				app: this.app,
 				logger: this.logger,
 			},
+		);
+	}
+
+	private createEmailFinanceSyncStateStore(): EmailFinanceSyncStateStore {
+		if (this.settings.emailFinanceProvider === 'email-provider') {
+			return new EmailProviderCheckpointSyncStateStore(
+				this.app,
+				() => this.settings,
+				(nextState) => this.persistEmailFinanceSyncState(nextState),
+				this.logger,
+			);
+		}
+
+		return new LocalEmailFinanceSyncStateStore(
+			() => this.settings.emailFinanceSyncState,
+			(nextState) => this.persistEmailFinanceSyncState(nextState),
 		);
 	}
 
@@ -1087,14 +1149,37 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 			.setDesc('Choose how finance emails are fetched for sync')
 			.addDropdown(dropdown => dropdown
 				.addOption('none', 'Not configured')
+				.addOption('email-provider', 'Workspace email-provider plugin')
 				.addOption('imap', 'IMAP (login + app password)')
 				.addOption('http-json', 'HTTP JSON bridge')
 				.setValue(this.plugin.settings.emailFinanceProvider)
 				.onChange(async (value) => {
-					if (value === 'none' || value === 'imap' || value === 'http-json') {
+					if (value === 'none' || value === 'email-provider' || value === 'imap' || value === 'http-json') {
 						this.plugin.settings.emailFinanceProvider = value;
 						await this.plugin.saveSettings();
 					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Email-provider channel id')
+			.setDesc('Optional channel id from the obsidian-email-provider plugin. Leave empty to use that plugin\'s default channel.')
+			.addText(text => text
+				.setPlaceholder('personal-imap')
+				.setValue(this.plugin.settings.emailFinanceProviderChannelId)
+				.onChange(async (value) => {
+					this.plugin.settings.emailFinanceProviderChannelId = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Legacy IMAP migration')
+			.setDesc('Create or update an IMAP channel in obsidian-email-provider from the legacy Expense Manager IMAP settings, migrate the saved sync boundary, and switch this plugin to the new provider mode.')
+			.addButton(button => button
+				.setButtonText('Migrate to Email Provider')
+				.setCta()
+				.onClick(async () => {
+					await this.plugin.handleMigrateLegacyImapToEmailProvider();
+					this.display();
 				}));
 
 		new Setting(containerEl)
@@ -1268,27 +1353,23 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 					this.display();
 				}));
 
-		const syncState = this.plugin.settings.emailFinanceSyncState;
-		const syncStatusText = syncState.lastSyncSummary
-			? `${syncState.lastSyncStatus} | ${syncState.lastSyncSummary}`
-			: syncState.lastSyncStatus;
-		const syncCursorText = syncState.cursor ?? 'none';
-		new Setting(containerEl)
+		const syncStateSetting = new Setting(containerEl)
 			.setName('Email sync state')
-			.setDesc(`Last attempt: ${syncState.lastAttemptAt ?? 'never'} | Last success: ${syncState.lastSuccessfulSyncAt ?? 'never'} | Cursor: ${syncCursorText} | Status: ${syncStatusText}`)
+			.setDesc(this.buildEmailFinanceSyncStateDescription(this.plugin.settings.emailFinanceSyncState))
 			.addButton(button => button
 				.setButtonText('Reset boundary')
 				.onClick(async () => {
-					await this.plugin.persistEmailFinanceSyncState(createDefaultEmailFinanceSyncState());
+					await this.plugin.resetEmailFinanceSyncBoundary();
 					new Notice('Email finance sync boundary reset.');
-					this.display();
+					await this.refreshEmailFinanceSyncStateSetting(syncStateSetting);
 				}))
 			.addButton(button => button
 				.setButtonText('Run sync')
 				.onClick(async () => {
 					await this.plugin.handleSyncFinanceEmails();
-					this.display();
+					await this.refreshEmailFinanceSyncStateSetting(syncStateSetting);
 				}));
+		void this.refreshEmailFinanceSyncStateSetting(syncStateSetting);
 
 		new Setting(containerEl)
 			.setName('Shared runtime log')
@@ -1468,5 +1549,22 @@ class ExpenseManagerSettingTab extends PluginSettingTab {
 						.filter(c => c.length > 0);
 					await this.plugin.saveSettings();
 				}));
+	}
+
+	private buildEmailFinanceSyncStateDescription(syncState: EmailFinanceSyncState): string {
+		const syncStatusText = syncState.lastSyncSummary
+			? `${syncState.lastSyncStatus} | ${syncState.lastSyncSummary}`
+			: syncState.lastSyncStatus;
+		const syncCursorText = syncState.cursor ?? 'none';
+		return `Last attempt: ${syncState.lastAttemptAt ?? 'never'} | Last success: ${syncState.lastSuccessfulSyncAt ?? 'never'} | Cursor: ${syncCursorText} | Status: ${syncStatusText}`;
+	}
+
+	private async refreshEmailFinanceSyncStateSetting(setting: Setting): Promise<void> {
+		try {
+			const syncState = await this.plugin.getCurrentEmailFinanceSyncState();
+			setting.setDesc(this.buildEmailFinanceSyncStateDescription(syncState));
+		} catch (error) {
+			setting.setDesc(`Could not load sync state: ${(error as Error).message}`);
+		}
 	}
 }

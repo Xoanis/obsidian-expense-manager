@@ -1,7 +1,7 @@
 import { TransactionType } from './types';
 
 export type DashboardContributionMode = 'simple' | 'interactive';
-export type EmailFinanceProviderKind = 'none' | 'imap' | 'http-json';
+export type EmailFinanceProviderKind = 'none' | 'imap' | 'http-json' | 'email-provider';
 export type EmailFinanceCoarseFilterField = 'from' | 'subject' | 'body' | 'attachmentName' | 'any';
 export type EmailFinanceCoarseFilterMode = 'contains' | 'regex';
 export type EmailFinanceCoarseFilterAction = 'include' | 'exclude';
@@ -207,6 +207,9 @@ export interface ExpenseManagerSettings {
 	/** Auth token for the provider-compatible mail JSON endpoint */
 	emailFinanceProviderAuthToken: string;
 
+	/** Optional channel id in the workspace email-provider plugin */
+	emailFinanceProviderChannelId: string;
+
 	/** Enable scheduled email finance sync */
 	enableScheduledEmailFinanceSync: boolean;
 
@@ -280,6 +283,7 @@ export const DEFAULT_SETTINGS: ExpenseManagerSettings = {
 	emailFinanceImapPassword: '',
 	emailFinanceProviderBaseUrl: '',
 	emailFinanceProviderAuthToken: '',
+	emailFinanceProviderChannelId: '',
 	enableScheduledEmailFinanceSync: false,
 	emailFinanceSyncIntervalMinutes: 15,
 	emailFinanceMaxMessagesPerRun: 20,
